@@ -136,6 +136,68 @@ npm start            # 后端自动托管 dist，监听 3001
 > - Windows：设置 → 防火墙 → 允许应用通过防火墙 → 勾选 Node.js（专用网络）
 > - 或者临时关闭防火墙测试
 
+## 🚢 部署上线（Render 免费部署）
+
+想让不在同一 WiFi 的朋友也能聊？可以把整个项目免费部署到 [Render](https://render.com)——一个常驻容器，完整支持 WebSocket，**代码零改动**。
+
+### 1. 推送代码到 GitHub
+
+把本项目推送到你自己的 GitHub 仓库（公开或私有均可，Render 两种都支持）：
+
+```bash
+git remote add origin https://github.com/<你的用户名>/<仓库名>.git
+git push -u origin main
+```
+
+### 2. 创建 Render 服务
+
+1. 打开 [dashboard.render.com](https://dashboard.render.com)，用 **GitHub 账号**登录
+2. 右上角 **New +** → **Web Service** → 选择本仓库并连接
+3. 按下表填写配置：
+
+| 配置项 | 值 |
+|---|---|
+| Region | Singapore（离国内最近） |
+| Branch | `main` |
+| Runtime | Node |
+| Build Command | `cd web && npm install && npm run build` |
+| Start Command | `cd server && npm install && npm start` |
+| Instance Type | **Free** |
+
+### 3. ⭐ 设置管理口令（重要）
+
+还是在创建页面，往下找到 **Advanced → Add Environment Variable**，添加一条：
+
+```
+Key:   ADMIN_TOKEN
+Value: 你的口令（字母数字符号混搭，12 位以上，别用默认值）
+```
+
+这就是后台登录口令的真正来源——它加密保存在 Render 后台，**不存在于任何代码里**。以后想换口令：左侧 **Environment** 标签页修改 Value 并保存，服务会自动重新部署生效。
+
+> ⚠️ 如果你创建时忘了填，随时可以进服务的 **Environment** 标签页补加，保存后自动重新部署。
+
+### 4. 创建并等待
+
+点 **Create Web Service**，构建日志滚动约 3~5 分钟后状态变为绿色 **Live**，你会得到一个形如 `https://xxx.onrender.com` 的网址。
+
+验证：访问 `/chat` 应看到聊天页；`/admin.html` 用你设置的口令能进入后台。
+
+### 5. 绑定自定义域名（可选）
+
+1. 服务页 **Settings → Custom Domains → Add Custom Domain**，输入你的域名（如 `chat.example.com`）
+2. Render 会给出一条 CNAME 记录值，去你的域名 DNS 解析面板添加：
+   - 记录类型：`CNAME`
+   - 主机记录：你的子域名前缀（如 `chat`）
+   - 记录值：Render 提供的地址
+3. 等 DNS 生效 + HTTPS 证书自动签发即可
+
+### 6. 免费版注意事项
+
+- 🌙 **15 分钟无访问自动休眠**，下次唤醒需 20~40 秒——朋友第一次打开慢属正常，先自己刷一遍热身
+- 😴 容器重启后服务器内存清空，**未送达的离线消息会丢失**（各端已收到的本地记录不受影响）
+- 💸 每月 750 小时免费时长，个人使用完全够
+
 ## ⚙️ 配置项（环境变量）
 
 | 变量 | 默认值 | 说明 |
@@ -152,6 +214,8 @@ PORT=4000 ADMIN_TOKEN=my-secret node server.js
 # Windows PowerShell
 $env:PORT=4000; $env:ADMIN_TOKEN="my-secret"; node server.js
 ```
+
+> 🔐 **安全提醒**：`seegud123` 只是本地开发的兜底默认值。**线上部署时务必通过平台环境变量设置自己的口令**（Render 见上文「部署上线」第 3 步），否则任何看过本仓库的人都能进你的后台。若口令意外泄露，直接更换环境变量并重新部署即可使其失效。
 
 ## 🖼️ 图片存储方案
 
