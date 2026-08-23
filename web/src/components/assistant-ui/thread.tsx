@@ -56,6 +56,8 @@ export type ThreadComponents = {
    * flipped = 用户左/助手右（管理端，"用户"是访客、"助手"是你自己）
    */
   bubbleLayout?: "normal" | "flipped" | undefined;
+  /** 隐藏助手消息下方的操作栏（复制等），管理端使用 */
+  hideAssistantActions?: boolean | undefined;
 };
 
 export type ThreadProps = ThreadComponents;
@@ -75,12 +77,19 @@ export const Thread: FC<ThreadProps> = ({
   AssistantMessage,
   welcomeOverride,
   bubbleLayout = "normal",
+  hideAssistantActions,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <ThreadComponentsContext.Provider
-      value={{ Welcome, AssistantMessage, welcomeOverride, bubbleLayout }}
+      value={{
+        Welcome,
+        AssistantMessage,
+        welcomeOverride,
+        bubbleLayout,
+        hideAssistantActions,
+      }}
     >
       <ThreadRoot isEmpty={isEmpty} />
     </ThreadComponentsContext.Provider>
@@ -153,6 +162,10 @@ const ThreadMessage: FC = () => {
 /** 从上下文取气泡布局 */
 const useBubbleLayout = () =>
   useContext(ThreadComponentsContext).bubbleLayout ?? "normal";
+
+/** 是否隐藏助手消息操作栏（管理端） */
+const useHideAssistantActions = () =>
+  useContext(ThreadComponentsContext).hideAssistantActions ?? false;
 
 const ThreadScrollToBottom: FC = () => {
   return (
@@ -382,7 +395,7 @@ const VoiceBubble: DataMessagePartComponent<"voice-message"> = ({ data }) => {
                 <rect x="14" y="5" width="4" height="14" rx="1" />
               </svg>
             ) : (
-              <svg viewBox="0 0 24 24" className="size-4 translate-x-[1px]" fill="currentColor">
+              <svg viewBox="0 0 24 24" className="size-4 -translate-x-[1px]" fill="currentColor">
                 <path d="M8 5.5v13l11-6.5-11-6.5z" />
               </svg>
             )}
@@ -581,6 +594,7 @@ const DefaultAssistantMessage: FC = () => {
     return hasMedia && !hasText;
   });
   const flipped = useBubbleLayout() === "flipped";
+  const hideActions = useHideAssistantActions();
 
   return (
     <MessagePrimitive.Root
@@ -612,7 +626,7 @@ const DefaultAssistantMessage: FC = () => {
         <MessageError />
       </div>
 
-      {!isMediaOnly && <AssistantActionBar />}
+{!isMediaOnly && !hideActions && <AssistantActionBar />}
     </MessagePrimitive.Root>
   );
 };

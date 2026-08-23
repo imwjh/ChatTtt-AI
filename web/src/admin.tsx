@@ -616,7 +616,7 @@ export default function AdminApp() {
             </header>
             <div className="relative flex-1 overflow-hidden">
               {activeId ? (
-                <Thread welcomeOverride="回复这位访客…" bubbleLayout="flipped" />
+                <Thread welcomeOverride="回复这位访客…" bubbleLayout="flipped" hideAssistantActions />
               ) : (
                 <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
                   ← 从左侧选择一个访客开始对话
