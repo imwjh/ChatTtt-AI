@@ -70,8 +70,38 @@ const useAttachmentSrc = () => {
     }),
   );
 
-  return useFileSrc(file) ?? src;
+  const idbSrc = useIdbAttachmentSrc(src);
+  return useFileSrc(file) ?? idbSrc ?? src;
 };
+
+/**
+ * 附件的 image part 可能是 `idb://<key>` 引用（本端 IndexedDB 存储），
+ * 浏览器无法直接渲染，需要异步解析成 objectURL。
+ */
+function useIdbAttachmentSrc(src: string | undefined) {
+  const [resolved, setResolved] = useState<string | undefined>(undefined);
+  const isIdb = typeof src === "string" && src.startsWith("idb://");
+
+  useEffect(() => {
+    if (!isIdb || !src) return;
+    let alive = true;
+    let objectUrl: string | undefined;
+    import("@/lib/image-store")
+      .then(({ getImage }) => getImage(src.slice("idb://".length)))
+      .then((blob) => {
+        if (!blob) throw new Error("not found");
+        objectUrl = URL.createObjectURL(blob);
+        if (alive) setResolved(objectUrl);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [src]);
+
+  return isIdb ? resolved : undefined;
+}
 
 type AttachmentPreviewProps = {
   src: string;

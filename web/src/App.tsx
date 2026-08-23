@@ -175,26 +175,6 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
   async *run({ messages, abortSignal }) {
     const socket = getSocket();
     const last = messages[messages.length - 1];
-    // TODO: 调试日志，修复后删除
-    try {
-      const dbg = {
-        role: (last as { role?: string })?.role,
-        contentParts: (last?.content ?? []).map((p) => p.type),
-        attachments: (
-          (last as unknown as { attachments?: Array<Record<string, unknown>> })
-            ?.attachments ?? []
-        ).map((a) => ({
-          keys: Object.keys(a),
-          name: a.name,
-          contentTypes: Array.isArray(a.content)
-            ? (a.content as Array<{ type: string }>).map((p) => p.type)
-            : "no-content",
-        })),
-      };
-      console.log("[chat-debug]", JSON.stringify(dbg));
-    } catch (e) {
-      console.log("[chat-debug] logging failed", e);
-    }
     const textPart = last?.content.find((p) => p.type === "text");
 
     // 图片提取：assistant-ui 把附件放在 message.attachments（其 content 含 image part），
