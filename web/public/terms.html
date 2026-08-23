@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>服务条款 · ChatTtt AI</title>
+    <style>
+      :root {
+        --bg: #ffffff;
+        --fg: #22222a;
+        --muted: #6b6b76;
+        --border: #e6e6ea;
+        --card: #fafafa;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #131317;
+          --fg: #f2f2f4;
+          --muted: #9a9aa4;
+          --border: #2a2a32;
+          --card: #1a1a20;
+        }
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        font-family: Outfit, Manrope, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        line-height: 1.85;
+        -webkit-font-smoothing: antialiased;
+      }
+      nav {
+        position: sticky; top: 0; z-index: 10;
+        backdrop-filter: blur(12px);
+        background: color-mix(in srgb, var(--bg) 82%, transparent);
+        border-bottom: 1px solid var(--border);
+      }
+      .nav-inner {
+        max-width: 860px; margin-inline: auto; padding-inline: 24px;
+        display: flex; align-items: center; justify-content: space-between; height: 60px;
+      }
+      .logo {
+        display: flex; align-items: center; gap: 9px;
+        font-weight: 700; font-size: 16px; text-decoration: none; color: var(--fg);
+      }
+      .logo svg { width: 18px; height: 18px; }
+      .back { font-size: 14px; color: var(--muted); text-decoration: none; }
+      .back:hover { color: var(--fg); }
+      main { max-width: 760px; margin-inline: auto; padding: 56px 24px 96px; }
+      h1 { font-size: clamp(28px, 4vw, 40px); letter-spacing: -0.02em; }
+      .updated { margin-top: 10px; color: var(--muted); font-size: 14px; }
+      .toc {
+        margin: 30px 0; padding: 20px 24px;
+        border: 1px solid var(--border); border-radius: 14px; background: var(--card);
+      }
+      .toc b { font-size: 14px; letter-spacing: 0.05em; color: var(--muted); }
+      .toc ol { margin: 10px 0 0 18px; font-size: 14.5px; }
+      .toc a { color: inherit; text-decoration: none; }
+      .toc a:hover { text-decoration: underline; }
+      h2 {
+        font-size: 21px; margin: 44px 0 14px; letter-spacing: -0.01em;
+        padding-top: 12px; border-top: 1px solid var(--border);
+      }
+      p, li { font-size: 15.5px; color: color-mix(in srgb, var(--fg) 86%, var(--muted)); }
+      ul, ol { padding-left: 22px; margin: 10px 0; }
+      li { margin-block: 4px; }
+      strong { color: var(--fg); }
+      .note {
+        margin: 18px 0; padding: 14px 18px;
+        border-left: 3px solid var(--muted);
+        background: var(--card); border-radius: 0 10px 10px 0;
+        font-size: 14.5px; color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <div class="nav-inner">
+        <a class="logo" href="/">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          ChatTtt AI
+        </a>
+        <a class="back" href="/">← 返回首页</a>
+      </div>
+    </nav>
+
+    <main>
+      <h1>服务条款</h1>
+      <p class="updated">生效日期：2026 年 8 月 24 日</p>
+
+      <p>
+        欢迎使用 ChatTtt AI（以下简称“本服务”）。本条款是你与神秘的 ChatTtt 团队（以下简称“我们”）之间就使用本服务所达成的协议。开始使用即表示你已阅读并同意本条款。
+      </p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#desc">服务描述</a></li>
+          <li><a href="#free">免费使用</a></li>
+          <li><a href="#account">账户与注册</a></li>
+          <li><a href="#acceptable">可接受使用</a></li>
+          <li><a href="#content">用户内容</a></li>
+          <li><a href="#ip">知识产权</a></li>
+          <li><a href="#disclaimer">免责声明</a></li>
+          <li><a href="#liability">责任限制</a></li>
+          <li><a href="#termination">服务变更与终止</a></li>
+          <li><a href="#law">法律适用</a></li>
+        </ol>
+      </div>
+
+      <h2 id="desc">一、服务描述</h2>
+      <p>
+        本服务是一款基于网页的对话式人工智能产品，提供文本对话、图片识别、语音理解与文生图等能力。本服务按“现状”提供，我们持续改进，但不承诺功能永远不变。
+      </p>
+
+      <h2 id="free">二、免费使用</h2>
+      <p>
+        本服务现阶段完全免费，且<strong>不要求注册账户</strong>。这意味着我们没有付费用户协议、订阅关系或自动续费机制；未来若推出收费功能，我们将在本页面提前公告，且不会影响你已保存在本地的数据。
+      </p>
+
+      <h2 id="account">三、账户与注册</h2>
+      <p>本服务无需注册。你通过浏览器使用服务的全部状态均保存在本地，因此你有责任妥善保管自己的设备与浏览器环境。</p>
+
+      <h2 id="acceptable">四、可接受使用</h2>
+      <p>在使用本服务时，你承诺<strong>不</strong>利用本服务从事以下行为：</p>
+      <ul>
+        <li>违反任何适用法律法规的活动，包括但不限于制作、传播违法违规内容；</li>
+        <li>生成或传播侵犯他人知识产权、肖像权、隐私权的内容；</li>
+        <li>对他人进行骚扰、欺诈、诽谤或其他不当行为；</li>
+        <li>以自动化手段对本服务发起攻击性、高频率请求，或试图破坏、逆向干扰服务的正常运行；</li>
+        <li>将本服务用于任何危险、非法或对我们或第三方造成损害的目的。</li>
+      </ul>
+      <p>若你违反上述约定，我们有权随时限制或终止你对本服务的访问。</p>
+
+      <h2 id="content">五、用户内容</h2>
+      <ul>
+        <li><strong>归属</strong>：你在对话中输入的内容归你所有；由模型生成的输出（包括图像）在适用法律允许的范围内可供你自由使用，我们不主张权利。</li>
+        <li><strong>责任</strong>：你对输入的内容以及你对生成内容的使用方式负责。模型输出可能存在错误、遗漏或不准确之处，<strong>不应被视为专业建议</strong>（包括但不限于医疗、法律、金融建议），重要决策请务必自行核实。</li>
+      </ul>
+
+      <h2 id="ip">六、知识产权</h2>
+      <p>本服务的软件、界面设计、标识（Logo）与文案内容的权利归我们或相应权利人所有。本项目以开源方式发布时，你可以在遵循其开源许可证的前提下使用源代码。</p>
+
+      <h2 id="disclaimer">七、免责声明</h2>
+      <p><strong>本服务按“现状”与“可用”的基础提供，不作任何形式的明示或默示担保</strong>，包括但不限于对适销性、特定用途适用性、不间断运行、准确性的担保。你不应依赖本服务输出的内容做出重大决策。</p>
+
+      <h2 id="liability">八、责任限制</h2>
+      <p>
+        在适用法律允许的最大范围内，对于因使用或无法使用本服务而导致的任何直接、间接、附带、特殊或后果性损失（包括数据丢失、利润损失等），我们不承担责任。你理解并同意：本服务免费提供，双方的权利义务安排与此免费性质相匹配。
+      </p>
+
+      <h2 id="termination">九、服务变更与终止</h2>
+      <p>
+        我们可以随时修改、暂停或终止本服务的全部或部分功能，且无需事先通知。你可以随时停止使用本服务，并通过清除浏览器数据删除你的全部本地记录。
+      </p>
+
+      <h2 id="law">十、法律适用</h2>
+      <p>本条款受中华人民共和国法律管辖。如本条款个别条款被认定无效，不影响其余条款的效力。</p>
+
+      <div class="note">
+        如对本条款有任何疑问，可通过开源项目仓库的 Issue 区联系我们。
+      </div>
+    </main>
+  </body>
+</html>

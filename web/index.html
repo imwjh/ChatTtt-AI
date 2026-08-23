@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ChatTtt AI · 开源大语言模型</title>
+    <meta
+      name="description"
+      content="ChatTtt AI —— 由某家神秘公司发布的开源大语言模型：接近一百二十万上下文，具备图片、语音识别与艺术家级文生图能力。无需注册，免费开放。"
+    />
+    <style>
+      :root {
+        --bg: #ffffff;
+        --fg: #22222a;
+        --muted: #6b6b76;
+        --border: #e6e6ea;
+        --card: #fafafa;
+        --invert-bg: #1c1c22;
+        --invert-fg: #fafafa;
+        --radius: 14px;
+        --container: 1080px;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #131317;
+          --fg: #f2f2f4;
+          --muted: #9a9aa4;
+          --border: #2a2a32;
+          --card: #1a1a20;
+          --invert-bg: #f2f2f4;
+          --invert-fg: #1c1c22;
+        }
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        font-family:
+          Outfit,
+          Manrope,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          "PingFang SC",
+          "Microsoft YaHei",
+          sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        line-height: 1.7;
+        -webkit-font-smoothing: antialiased;
+      }
+      .container {
+        width: 100%;
+        max-width: var(--container);
+        margin-inline: auto;
+        padding-inline: 24px;
+      }
+      .icon {
+        width: 22px;
+        height: 22px;
+        display: block;
+      }
+
+      /* ─── 导航 ─── */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        backdrop-filter: blur(12px);
+        background: color-mix(in srgb, var(--bg) 82%, transparent);
+        border-bottom: 1px solid var(--border);
+      }
+      .nav-inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: 60px;
+      }
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 26px;
+      }
+      .nav-links a.hide-sm {
+        font-size: 14.5px;
+        color: var(--muted);
+        text-decoration: none;
+        transition: color 0.15s ease;
+      }
+      .nav-links a.hide-sm:hover {
+        color: var(--fg);
+      }
+      @media (max-width: 720px) {
+        .hide-sm { display: none; }
+      }
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-weight: 700;
+        font-size: 17px;
+        letter-spacing: -0.01em;
+        text-decoration: none;
+        color: var(--fg);
+      }
+      .logo-mark {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        background: #fff;
+        border: 1px solid var(--border);
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+      }
+      .logo-mark img {
+        width: 22px;
+        height: 22px;
+        object-fit: contain;
+      }
+
+      /* ─── 按钮 ─── */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 11px 22px;
+        border-radius: 999px;
+        font-size: 15px;
+        font-weight: 600;
+        text-decoration: none;
+        transition:
+          transform 0.15s ease,
+          opacity 0.15s ease;
+      }
+      .btn:hover {
+        transform: translateY(-1px);
+      }
+      .btn:active {
+        transform: translateY(0);
+      }
+      .btn-primary {
+        background: var(--fg);
+        color: var(--bg);
+      }
+      .btn-secondary {
+        border: 1px solid var(--border);
+        color: var(--fg);
+      }
+      .btn-lg {
+        padding: 14px 30px;
+        font-size: 16px;
+      }
+      .btn-sm {
+        padding: 8px 18px;
+        font-size: 14px;
+      }
+
+      /* ─── Hero（网格背景 + 光晕） ─── */
+      .hero-wrap {
+        position: relative;
+        overflow: hidden;
+      }
+      .bg-grid {
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        background-image:
+          linear-gradient(to right, rgba(127, 127, 140, 0.09) 1px, transparent 1px),
+          linear-gradient(to bottom, rgba(127, 127, 140, 0.09) 1px, transparent 1px);
+        background-size: 56px 56px;
+        mask-image: radial-gradient(ellipse 75% 62% at 50% 0%, #000 40%, transparent 100%);
+        -webkit-mask-image: radial-gradient(ellipse 75% 62% at 50% 0%, #000 40%, transparent 100%);
+      }
+      .bg-glow {
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        background: radial-gradient(
+          ellipse 60% 52% at 50% -10%,
+          rgba(127, 127, 150, 0.16),
+          transparent 70%
+        );
+        animation: glow-pulse 8s ease-in-out infinite alternate;
+      }
+      @keyframes glow-pulse {
+        from { opacity: 0.7; }
+        to { opacity: 1; }
+      }
+      .hero {
+        text-align: center;
+        padding: 96px 24px 88px;
+        max-width: 860px;
+        margin-inline: auto;
+      }
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 6px 16px;
+        margin-bottom: 28px;
+        background: color-mix(in srgb, var(--bg) 60%, transparent);
+      }
+      .eyebrow .pulse {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #34c77b;
+        animation: pulse 2s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+      }
+      h1 {
+        font-size: clamp(34px, 6vw, 58px);
+        line-height: 1.18;
+        letter-spacing: -0.03em;
+        font-weight: 800;
+      }
+      h1 .accent {
+        background: linear-gradient(120deg, var(--fg) 40%, var(--muted));
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .subheadline {
+        margin-top: 22px;
+        font-size: clamp(15px, 2vw, 18px);
+        color: var(--muted);
+        max-width: 640px;
+        margin-inline: auto;
+      }
+      .hero-actions {
+        margin-top: 38px;
+        display: flex;
+        gap: 14px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      .hero-note {
+        margin-top: 16px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      /* ─── 数据条 ─── */
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 1px;
+        background: var(--border);
+        border-block: 1px solid var(--border);
+      }
+      .stat {
+        background: var(--bg);
+        padding: 34px 20px;
+        text-align: center;
+      }
+      .stat b {
+        display: block;
+        font-size: clamp(24px, 3.4vw, 34px);
+        letter-spacing: -0.02em;
+      }
+      .stat span {
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      /* ─── 区块通用 ─── */
+      section.block {
+        padding: 84px 24px;
+      }
+      .section-head {
+        text-align: center;
+        max-width: 620px;
+        margin: 0 auto 52px;
+      }
+      .section-head .kicker {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .section-head h2 {
+        font-size: clamp(26px, 4vw, 38px);
+        letter-spacing: -0.02em;
+        margin-top: 10px;
+      }
+      .section-head p {
+        margin-top: 14px;
+        color: var(--muted);
+        font-size: 16px;
+      }
+
+      /* ─── 特性卡片 ─── */
+      .features {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 18px;
+      }
+      .feature {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--card);
+        padding: 30px 26px;
+        transition: transform 0.2s ease, border-color 0.2s ease;
+      }
+      .feature:hover {
+        transform: translateY(-3px);
+        border-color: color-mix(in srgb, var(--fg) 30%, var(--border));
+      }
+      .feature-icon {
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        background: var(--fg);
+        color: var(--bg);
+        display: grid;
+        place-items: center;
+        margin-bottom: 18px;
+      }
+      .feature-icon svg {
+        width: 22px;
+        height: 22px;
+      }
+      .feature h3 {
+        font-size: 18px;
+        letter-spacing: -0.01em;
+      }
+      .feature p {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 14.5px;
+      }
+
+      /* ─── 对话演示 ─── */
+      .demo-wrap {
+        position: relative;
+        overflow: hidden;
+        border-block: 1px solid var(--border);
+      }
+      .demo {
+        max-width: 640px;
+        margin-inline: auto;
+        padding: 72px 24px;
+      }
+      .demo-window {
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        background: var(--card);
+        box-shadow:
+          0 24px 60px -24px rgba(20, 20, 30, 0.25),
+          0 4px 16px -8px rgba(20, 20, 30, 0.12);
+        overflow: hidden;
+      }
+      .demo-titlebar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .demo-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--border);
+      }
+      .demo-titlebar span.title {
+        margin-left: 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .demo-body {
+        padding: 22px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        min-height: 300px;
+      }
+      .bubble {
+        max-width: 82%;
+        padding: 11px 15px;
+        border-radius: 16px;
+        font-size: 14.5px;
+        line-height: 1.65;
+      }
+      .bubble.user {
+        align-self: flex-end;
+        background: var(--fg);
+        color: var(--bg);
+        border-bottom-right-radius: 6px;
+      }
+      .bubble.ai {
+        align-self: flex-start;
+        background: color-mix(in srgb, var(--muted) 12%, transparent);
+        border-bottom-left-radius: 6px;
+      }
+      .bubble.ai ol {
+        padding-left: 18px;
+        display: grid;
+        gap: 4px;
+      }
+      .typing {
+        align-self: flex-start;
+        display: inline-flex;
+        gap: 5px;
+        padding: 13px 16px;
+        background: color-mix(in srgb, var(--muted) 12%, transparent);
+        border-radius: 16px;
+        border-bottom-left-radius: 6px;
+      }
+      .typing i {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--muted);
+        animation: bounce-typing 1.2s ease-in-out infinite;
+      }
+      .typing i:nth-child(2) { animation-delay: 0.15s; }
+      .typing i:nth-child(3) { animation-delay: 0.3s; }
+      @keyframes bounce-typing {
+        0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+        30% { transform: translateY(-4px); opacity: 1; }
+      }
+
+      /* ─── 技术规格 ─── */
+      .specs {
+        max-width: 720px;
+        margin-inline: auto;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      .spec-row {
+        display: grid;
+        grid-template-columns: 180px 1fr;
+        gap: 16px;
+        padding: 15px 22px;
+        font-size: 14.5px;
+        border-bottom: 1px solid var(--border);
+      }
+      .spec-row:last-child { border-bottom: none; }
+      .spec-row:nth-child(odd) { background: var(--card); }
+      .spec-row .k { color: var(--muted); }
+      .spec-row .v { font-weight: 600; }
+
+      /* ─── FAQ ─── */
+      .faq-list {
+        max-width: 720px;
+        margin-inline: auto;
+      }
+      details {
+        border-bottom: 1px solid var(--border);
+        padding: 20px 6px;
+      }
+      summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 16px;
+        list-style: none;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      summary::after {
+        content: "+";
+        font-size: 20px;
+        color: var(--muted);
+        transition: transform 0.2s ease;
+      }
+      details[open] summary::after {
+        transform: rotate(45deg);
+      }
+      details p {
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      /* ─── 底部 CTA ─── */
+      .cta-invert {
+        background: var(--invert-bg);
+        color: var(--invert-fg);
+        text-align: center;
+        padding: 92px 24px;
+      }
+      .cta-invert h2 {
+        font-size: clamp(28px, 4.5vw, 42px);
+        letter-spacing: -0.02em;
+      }
+      .cta-invert p {
+        margin-top: 14px;
+        opacity: 0.72;
+        font-size: 16px;
+      }
+      .cta-invert .btn {
+        margin-top: 34px;
+        background: var(--invert-fg);
+        color: var(--invert-bg);
+      }
+
+      footer {
+        border-top: 1px solid var(--border);
+        padding: 34px 24px 26px;
+        font-size: 13.5px;
+        color: var(--muted);
+      }
+      .footer-inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 16px;
+      }
+      .footer-brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 700;
+        color: var(--fg);
+      }
+      .footer-brand img {
+        width: 18px;
+        height: 18px;
+        object-fit: contain;
+      }
+      .footer-nav {
+        display: flex;
+        gap: 22px;
+        flex-wrap: wrap;
+      }
+      .footer-nav a {
+        color: inherit;
+        text-decoration: none;
+        transition: color 0.15s ease;
+      }
+      .footer-nav a:hover { color: var(--fg); }
+      .footer-credits {
+        margin-top: 22px;
+        padding-top: 20px;
+        border-top: 1px solid var(--border);
+        font-size: 12.5px;
+        line-height: 2;
+      }
+      .footer-credits a {
+        color: var(--fg);
+        text-decoration: none;
+        border-bottom: 1px dashed var(--muted);
+        transition: border-color 0.15s ease;
+      }
+      .footer-credits a:hover {
+        border-bottom-color: var(--fg);
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 导航 -->
+    <nav>
+      <div class="container nav-inner">
+        <a class="logo" href="/">
+          <span class="logo-mark">
+            <img src="/favicon.svg" alt="ChatTtt AI Logo" />
+          </span>
+          ChatTtt&nbsp;AI
+        </a>
+        <div class="nav-links">
+          <a class="hide-sm" href="#capabilities">能力</a>
+          <a class="hide-sm" href="#demo">演示</a>
+          <a class="hide-sm" href="#specs">技术规格</a>
+          <a class="hide-sm" href="#faq">FAQ</a>
+          <a class="btn btn-primary btn-sm" href="/chat">立即体验</a>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Hero -->
+    <div class="hero-wrap">
+      <span class="bg-grid" aria-hidden="true"></span>
+      <span class="bg-glow" aria-hidden="true"></span>
+      <section class="hero">
+        <p class="eyebrow"><span class="pulse"></span>某家神秘公司 · 全新开源发布</p>
+        <h1>史上最没有<br /><span class="accent">AI 味儿</span>的大语言模型</h1>
+        <p class="subheadline">
+          ChatTtt AI —— 开源开放，接近一百二十万上下文，具备图片识别、语音理解与艺术家级文生图能力。无需注册，向所有用户免费开放。
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary btn-lg" href="/chat">立即体验 →</a>
+          <a class="btn btn-secondary btn-lg" href="#capabilities">了解能力</a>
+        </div>
+        <p class="hero-note">免注册 · 免费使用 · 打开即聊</p>
+      </section>
+    </div>
+
+    <!-- 数据条 -->
+    <div class="stats">
+      <div class="stat"><b>120 万</b><span>token 超长上下文</span></div>
+      <div class="stat"><b>多模态</b><span>图片识别 · 语音理解</span></div>
+      <div class="stat"><b>文生图</b><span>艺术家级图像生成</span></div>
+      <div class="stat"><b>¥0</b><span>无注册 · 完全免费</span></div>
+    </div>
+
+    <!-- 核心能力 -->
+    <section class="block container" id="capabilities">
+      <header class="section-head">
+        <p class="kicker">Capabilities</p>
+        <h2>它能做到的，比你想的多一点</h2>
+        <p>一个模型，装下对话、视觉与声音。</p>
+      </header>
+      <div class="features">
+        <div class="feature">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 8.5 4.8-8.5 4.8L3.5 6.8 12 2z"/><path d="m3.5 12 8.5 4.8 8.5-4.8"/><path d="m3.5 17.2 8.5 4.8 8.5-4.8"/></svg>
+          </div>
+          <h3>接近一百二十万上下文</h3>
+          <p>整本书、整个代码库丢进去，它依然记得住第一页写了什么。长文档分析、超长对话，统统不在话下。</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+          </div>
+          <h3>艺术家级文生图</h3>
+          <p>史上最没有 AI 味儿的图像生成——构图、光影、质感都像出自人手，看一眼很难相信是画出来的。</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </div>
+          <h3>看得见，听得懂</h3>
+          <p>原生图片识别与语音理解能力。截图丢进来直接聊，动动嘴也能得到回答。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 对话演示 -->
+    <div class="demo-wrap" id="demo">
+      <section class="block container" style="padding-inline: 24px;">
+        <header class="section-head">
+          <p class="kicker">Live Demo</p>
+          <h2>对话长什么样？往下看</h2>
+          <p>没有表演痕迹，因为它本来就不打算表现得像个 AI。</p>
+        </header>
+        <div class="demo">
+          <div class="demo-window" aria-label="ChatTtt AI 对话演示">
+            <div class="demo-titlebar">
+              <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+              <span class="title">ChatTtt AI</span>
+            </div>
+            <div class="demo-body">
+              <div class="bubble user">帮我把这份会议纪要压缩成三个要点，一句话一个。</div>
+              <div class="bubble ai">
+                好，提炼如下：
+                <ol>
+                  <li>Q3 上线时间锁定 9 月底，砍掉两个次要功能保进度；</li>
+                  <li>服务端迁移费用超预算 40%，改用按量计费方案；</li>
+                  <li>下周一前每人交一版竞品分析，开会直接过。</li>
+                </ol>
+              </div>
+              <div class="bubble user">第二点展开说说，为什么超了 40%？</div>
+              <div class="typing" aria-label="对方正在输入"><i></i><i></i><i></i></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 技术规格 -->
+    <section class="block container" id="specs">
+      <header class="section-head">
+        <p class="kicker">Specifications</p>
+        <h2>技术规格</h2>
+        <p>给想深究的你。</p>
+      </header>
+      <div class="specs">
+        <div class="spec-row"><span class="k">模型定位</span><span class="v">开源大语言模型 · 多模态</span></div>
+        <div class="spec-row"><span class="k">上下文窗口</span><span class="v">接近 1,200,000 tokens</span></div>
+        <div class="spec-row"><span class="k">输入模态</span><span class="v">文本 · 图片 · 语音</span></div>
+        <div class="spec-row"><span class="k">输出模态</span><span class="v">文本 · 图像（文生图）</span></div>
+        <div class="spec-row"><span class="k">图像生成</span><span class="v">艺术家级风格，低 AI 感</span></div>
+        <div class="spec-row"><span class="k">注册要求</span><span class="v">无需注册，打开即用</span></div>
+        <div class="spec-row"><span class="k">数据存储</span><span class="v">对话仅保存在本机浏览器</span></div>
+        <div class="spec-row"><span class="k">价格</span><span class="v">免费</span></div>
+      </div>
+    </section>
+
+    <!-- FAQ -->
+    <section class="block container" id="faq">
+      <header class="section-head">
+        <p class="kicker">FAQ</p>
+        <h2>常见问题</h2>
+      </header>
+      <div class="faq-list">
+        <details open>
+          <summary>ChatTtt AI 是免费的吗？</summary>
+          <p>是。无需注册、无需邀请码、没有任何付费墙——打开网页就能直接用。</p>
+        </details>
+        <details>
+          <summary>我的对话数据会被保存吗？</summary>
+          <p>不会上传云端。你的对话记录只保存在你自己的浏览器里，服务器不做持久化存储。</p>
+        </details>
+        <details>
+          <summary>支持哪些输入方式？</summary>
+          <p>文字、图片、语音均可。你可以直接粘贴截图提问，也可以按住语音按钮说句话。</p>
+        </details>
+        <details>
+          <summary>生成的图片可以商用吗？</summary>
+          <p>可以。由 ChatTtt AI 生成的图像归你自由使用，我们不对产出内容主张权利。</p>
+        </details>
+        <details>
+          <summary>和其他大模型有什么区别？</summary>
+          <p>一句话：史上最没有 AI 味儿。它的回答更像真人，也更懂玩笑——用过就知道。</p>
+        </details>
+      </div>
+    </section>
+
+    <!-- 底部 CTA -->
+    <section class="cta-invert">
+      <h2>准备好和它聊聊了吗？</h2>
+      <p>无需注册，打开就能开始对话。</p>
+      <a class="btn btn-lg" href="/chat">立即体验 →</a>
+    </section>
+
+    <!-- 页脚 -->
+    <footer>
+      <div class="container footer-inner">
+        <span class="footer-brand">
+          <img src="/favicon.svg" alt="ChatTtt AI Logo" />
+          ChatTtt AI
+        </span>
+        <div class="footer-nav">
+          <a href="#capabilities">能力</a>
+          <a href="#specs">技术规格</a>
+          <a href="/privacy.html">隐私政策</a>
+          <a href="/terms.html">服务条款</a>
+          <a href="/chat">立即体验</a>
+        </div>
+        <span>© 2026 ChatTtt AI · 由某家神秘公司荣誉出品</span>
+      </div>
+      <div class="container footer-credits">
+        聊天页面基于开源项目
+        <a
+          href="https://github.com/assistant-ui/assistant-ui"
+          target="_blank"
+          rel="noopener noreferrer"
+          >assistant-ui</a
+        >
+        修改 ·
+        落地页基于开源项目
+        <a
+          href="https://github.com/milzamsz/astro-emdash-sqlite-r2-starter"
+          target="_blank"
+          rel="noopener noreferrer"
+          >astro-emdash-sqlite-r2-starter</a
+        >
+        修改
+      </div>
+    </footer>
+  </body>
+</html>
