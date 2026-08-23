@@ -10,6 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = process.env.PORT || 3001;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "seegud123"; // 管理端口令，部署时用环境变量覆盖
+const MAX_PENDING = parseInt(process.env.MAX_PENDING || "20", 10); // 同时接待上限（等待回复的会话数）
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
@@ -97,6 +98,31 @@ function makeMsgId() {
   return `m${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * 并发接待统计：「占用中」= 访客在线、且最后一条消息还没等到管理端回复的会话。
+ * 管理端回复某会话后，该会话自动释放名额。
+ */
+function countPendingSessions() {
+  let n = 0;
+  for (const s of sessions.values()) {
+    if (
+      s.visitorSocketId &&
+      s.messages.length > 0 &&
+      s.messages[s.messages.length - 1].from === "user"
+    ) {
+      n++;
+    }
+  }
+  return n;
+}
+
+function broadcastStats() {
+  io.to("admins").emit("admin:stats", {
+    pending: countPendingSessions(),
+    limit: MAX_PENDING,
+  });
+}
+
 io.on("connection", (socket) => {
   let role = null; // 'visitor' | 'admin'
   let sessionId = null;
@@ -163,7 +189,7 @@ io.on("connection", (socket) => {
   // ----- 访客发消息 -----
   // 图片策略：前端压缩后以 dataURI 直传（imageData），服务器仅内存中转、不落盘；
   // 消息里的 imageUrl 是 `idb://<key>` 引用，双方各自把本体存进自己的 IndexedDB
-  socket.on("visitor:message", ({ type, text, imageUrl, imageKey, imageData }) => {
+  socket.on("visitor:message", ({ type, text, imageUrl, imageKey, imageData, audioKey, audioData, duration }) => {
     if (role !== "visitor" || !sessionId) return;
     const session = sessions.get(sessionId);
     if (!session) return;
@@ -171,10 +197,12 @@ io.on("connection", (socket) => {
     const msg = {
       id: makeMsgId(),
       from: "user",
-      type: type === "image" ? "image" : "text",
+      type: type === "image" ? "image" : type === "audio" ? "audio" : "text",
       ...(type === "image"
         ? { imageUrl: imageKey ? `idb://${imageKey}` : imageUrl, imageKey, imageData }
-        : { text }),
+        : type === "audio"
+          ? { imageUrl: audioKey ? `idb://${audioKey}` : undefined, audioKey, audioData, duration }
+          : { text }),
       at: Date.now(),
     };
     session.messages.push(msg);
@@ -186,6 +214,12 @@ io.on("connection", (socket) => {
 
     io.to("admins").emit("admin:new-message", { sessionId, message: msg });
     io.to("admins").emit("admin:session-updated", sessionSummary(session));
+
+    // 后台无人在线时告知访客当前无法收到回复
+    const adminCount = io.of("/").adapter.rooms.get("admins")?.size ?? 0;
+    if (adminCount === 0) {
+      socket.emit("visitor:error", { code: "admin-offline" });
+    }
   });
 
   // ----- 访客打字状态 -----
@@ -196,7 +230,7 @@ io.on("connection", (socket) => {
 
   // ----- 管理端回复 -----
   // 图片同访客：dataURI 直传内存中转，不落盘
-  socket.on("admin:message", ({ sessionId: sid, type, text, imageUrl, imageKey, imageData }) => {
+  socket.on("admin:message", ({ sessionId: sid, type, text, imageUrl, imageKey, imageData, audioKey, audioData, duration }) => {
     if (role !== "admin") return;
     const session = sessions.get(sid);
     if (!session) return;
@@ -204,10 +238,12 @@ io.on("connection", (socket) => {
     const msg = {
       id: makeMsgId(),
       from: "assistant",
-      type: type === "image" ? "image" : "text",
+      type: type === "image" ? "image" : type === "audio" ? "audio" : "text",
       ...(type === "image"
         ? { imageUrl: imageKey ? `idb://${imageKey}` : imageUrl, imageKey, imageData }
-        : { text }),
+        : type === "audio"
+          ? { imageUrl: audioKey ? `idb://${audioKey}` : undefined, audioKey, audioData, duration }
+          : { text }),
       at: Date.now(),
     };
     session.messages.push(msg);

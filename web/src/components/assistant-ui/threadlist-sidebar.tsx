@@ -28,7 +28,7 @@ export function ThreadListSidebar({
                 <img
                   src={logo}
                   alt="ChatTtt AI Logo"
-                  className="aui-sidebar-header-logo size-8 shrink-0"
+                  className="aui-sidebar-header-logo size-8 shrink-0 rounded-lg bg-white p-0.5 ring-1 ring-border"
                 />
                 <div className="aui-sidebar-header-heading me-6 flex flex-col gap-0.5 leading-none">
                   <span className="aui-sidebar-header-title font-semibold">

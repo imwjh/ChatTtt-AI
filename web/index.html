@@ -9,6 +9,85 @@
       name="description"
       content="ChatTtt AI —— 由某家神秘公司发布的开源大语言模型：接近一百二十万上下文，具备图片、语音识别与艺术家级文生图能力。无需注册，免费开放。"
     />
+    <!-- SEO -->
+    <meta name="keywords" content="ChatTtt AI, 大语言模型, 开源模型, LLM, 文生图, 图片识别, 语音理解, 免费AI, 无注册AI, 多模态" />
+    <meta name="author" content="WuJianhao" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://chatttt.imwjh.com/" />
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://chatttt.imwjh.com/" />
+    <meta property="og:site_name" content="ChatTtt AI" />
+    <meta property="og:title" content="ChatTtt AI · 史上最没有 AI 味儿的大语言模型" />
+    <meta
+      property="og:description"
+      content="接近一百二十万上下文，具备图片识别、语音理解与艺术家级文生图能力。开源开放，无需注册，向所有用户免费开放。"
+    />
+    <meta property="og:image" content="https://chatttt.imwjh.com/favicon.svg" />
+    <meta property="og:locale" content="zh_CN" />
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="ChatTtt AI · 史上最没有 AI 味儿的大语言模型" />
+    <meta
+      name="twitter:description"
+      content="接近一百二十万上下文，具备图片识别、语音理解与艺术家级文生图能力。开源开放，免注册免费使用。"
+    />
+    <!-- 结构化数据：产品信息 -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "ChatTtt AI",
+      "url": "https://chatttt.imwjh.com/",
+      "applicationCategory": "CommunicationApplication",
+      "operatingSystem": "Web",
+      "description": "由某家神秘公司发布的开源大语言模型：接近一百二十万上下文，具备图片识别、语音理解与艺术家级文生图能力。无需注册，免费开放。",
+      "inLanguage": ["zh-CN", "en"],
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "CNY"
+      },
+      "featureList": [
+        "接近 1,200,000 token 超长上下文",
+        "图片识别与语音理解",
+        "艺术家级文生图",
+        "无需注册，免费使用"
+      ],
+      "author": {
+        "@type": "Person",
+        "name": "WuJianhao",
+        "alternateName": "seegood",
+        "url": "https://imwjh.com",
+        "sameAs": [
+          "https://github.com/imwjh",
+          "https://me.imwjh.com"
+        ]
+      }
+    }
+    </script>
+    <!-- 结构化数据：站点信息 -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      "name": "ChatTtt AI",
+      "url": "https://chatttt.imwjh.com/",
+      "description": "史上最没有 AI 味儿的开源大语言模型",
+      "inLanguage": ["zh-CN", "en"],
+      "publisher": {
+        "@type": "Organization",
+        "name": "ChatTtt AI",
+        "url": "https://chatttt.imwjh.com/",
+        "founder": {
+          "@type": "Person",
+          "name": "WuJianhao",
+          "alternateName": "seegood",
+          "url": "https://imwjh.com"
+        }
+      }
+    }
+    </script>
     <style>
       :root {
         --bg: #ffffff;
@@ -36,6 +115,7 @@
         margin: 0;
         padding: 0;
         box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
       }
       html {
         scroll-behavior: smooth;
@@ -493,23 +573,49 @@
         font-size: 15px;
       }
 
-      /* ─── 底部 CTA ─── */
-      .cta-invert {
+      /* ─── 底部 CTA（复刻模板：圆角深色卡片 + 点阵纹理） ─── */
+      .cta-section {
+        padding: 84px 24px;
+      }
+      .cta-inner {
+        position: relative;
+        isolation: isolate;
+        overflow: hidden;
+        max-width: 960px;
+        margin-inline: auto;
+        border-radius: 24px;
+        padding: clamp(40px, 6vw, 72px) clamp(24px, 5vw, 56px);
         background: var(--invert-bg);
+        border: 1px solid color-mix(in srgb, var(--invert-fg) 16%, transparent);
+        box-shadow: 0 32px 64px -28px rgba(15, 15, 22, 0.45);
         color: var(--invert-fg);
         text-align: center;
-        padding: 92px 24px;
       }
-      .cta-invert h2 {
+      .cta-texture {
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        background-image:
+          radial-gradient(
+            circle at 85% 15%,
+            rgba(255, 255, 255, 0.14),
+            transparent 45%
+          ),
+          radial-gradient(rgba(255, 255, 255, 0.12) 1px, transparent 1px);
+        background-size:
+          100% 100%,
+          22px 22px;
+      }
+      .cta-inner h2 {
         font-size: clamp(28px, 4.5vw, 42px);
         letter-spacing: -0.02em;
       }
-      .cta-invert p {
+      .cta-inner p {
         margin-top: 14px;
         opacity: 0.72;
         font-size: 16px;
       }
-      .cta-invert .btn {
+      .cta-inner .btn {
         margin-top: 34px;
         background: var(--invert-fg);
         color: var(--invert-bg);
@@ -517,44 +623,100 @@
 
       footer {
         border-top: 1px solid var(--border);
-        padding: 34px 24px 26px;
+        background: var(--card);
         font-size: 13.5px;
         color: var(--muted);
       }
-      .footer-inner {
+      .footer-main {
+        display: grid;
+        grid-template-columns: 1.6fr 0.9fr 0.9fr 0.9fr 1.4fr;
+        gap: 32px;
+        padding: 56px 24px 44px;
+      }
+      @media (max-width: 860px) {
+        .footer-main {
+          grid-template-columns: 1fr 1fr;
+          gap: 34px 22px;
+        }
+        .footer-brand-col {
+          grid-column: 1 / -1;
+        }
+        .footer-col h4,
+        .footer-friends-h4 {
+          font-size: 12px;
+        }
+        .footer-col ul li a,
+        .friend-links a {
+          font-size: 13px;
+        }
+        .friend-links {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      .footer-brand-col .footer-brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-weight: 700;
+        font-size: 16px;
+        color: var(--fg);
+        margin-bottom: 14px;
+      }
+      .footer-brand img,
+      .footer-brand svg {
+        width: 20px;
+        height: 20px;
+        object-fit: contain;
+      }
+      .footer-tagline {
+        font-size: 13.5px;
+        max-width: 260px;
+        line-height: 1.8;
+      }
+      .footer-col h4 {
+        font-size: 12.5px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--fg);
+        margin-bottom: 16px;
+      }
+      .footer-col ul {
+        list-style: none;
+        display: grid;
+        gap: 10px;
+      }
+      .footer-col a {
+        color: var(--muted);
+        text-decoration: none;
+        transition: color 0.15s ease;
+      }
+      .footer-col a:hover { color: var(--fg); }
+      .friend-links {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px 14px;
+      }
+      .friend-links a {
+        color: var(--muted);
+        text-decoration: none;
+        transition: color 0.15s ease;
+        white-space: nowrap;
+      }
+      .friend-links a:hover { color: var(--fg); }
+      .footer-bottom {
+        border-top: 1px solid var(--border);
+      }
+      .footer-bottom-inner {
+        padding: 22px 24px;
         display: flex;
         align-items: center;
         justify-content: space-between;
         flex-wrap: wrap;
-        gap: 16px;
+        gap: 10px;
+        font-size: 12.5px;
       }
-      .footer-brand {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-weight: 700;
-        color: var(--fg);
-      }
-      .footer-brand img {
-        width: 18px;
-        height: 18px;
-        object-fit: contain;
-      }
-      .footer-nav {
-        display: flex;
-        gap: 22px;
-        flex-wrap: wrap;
-      }
-      .footer-nav a {
-        color: inherit;
-        text-decoration: none;
-        transition: color 0.15s ease;
-      }
-      .footer-nav a:hover { color: var(--fg); }
       .footer-credits {
-        margin-top: 22px;
-        padding-top: 20px;
-        border-top: 1px solid var(--border);
         font-size: 12.5px;
         line-height: 2;
       }
@@ -568,6 +730,16 @@
         border-bottom-color: var(--fg);
       }
     </style>
+      <!-- Baidu Analytics -->
+    <script>
+      var _hmt = _hmt || [];
+      (function () {
+        var hm = document.createElement("script");
+        hm.src = "https://hm.baidu.com/hm.js?6db19609f648c8ad155977594d8967fd";
+        var s = document.getElementsByTagName("script")[0];
+        s.parentNode.insertBefore(hm, s);
+      })();
+    </script>
   </head>
   <body>
     <!-- 导航 -->
@@ -601,7 +773,13 @@
         </p>
         <div class="hero-actions">
           <a class="btn btn-primary btn-lg" href="/chat">立即体验 →</a>
-          <a class="btn btn-secondary btn-lg" href="#capabilities">了解能力</a>
+          <a
+            class="btn btn-secondary btn-lg"
+            href="https://github.com/imwjh/ChatTtt-AI"
+            target="_blank"
+            rel="noopener noreferrer"
+            >GitHub</a
+          >
         </div>
         <p class="hero-note">免注册 · 免费使用 · 打开即聊</p>
       </section>
@@ -729,45 +907,89 @@
     </section>
 
     <!-- 底部 CTA -->
-    <section class="cta-invert">
-      <h2>准备好和它聊聊了吗？</h2>
-      <p>无需注册，打开就能开始对话。</p>
-      <a class="btn btn-lg" href="/chat">立即体验 →</a>
+    <section class="cta-section">
+      <div class="cta-inner">
+        <span class="cta-texture" aria-hidden="true"></span>
+        <h2>准备好和它聊聊了吗？</h2>
+        <p>无需注册，打开就能开始对话。</p>
+        <a class="btn btn-lg" href="/chat">立即体验 →</a>
+      </div>
     </section>
 
     <!-- 页脚 -->
     <footer>
-      <div class="container footer-inner">
-        <span class="footer-brand">
-          <img src="/favicon.svg" alt="ChatTtt AI Logo" />
-          ChatTtt AI
-        </span>
-        <div class="footer-nav">
-          <a href="#capabilities">能力</a>
-          <a href="#specs">技术规格</a>
-          <a href="/privacy.html">隐私政策</a>
-          <a href="/terms.html">服务条款</a>
-          <a href="/chat">立即体验</a>
+      <div class="container footer-main">
+        <!-- 品牌列 -->
+        <div class="footer-brand-col">
+          <span class="footer-brand">
+            <img src="/favicon.svg" alt="ChatTtt AI Logo" />
+            ChatTtt AI
+          </span>
+          <p class="footer-tagline">
+            史上最没有 AI 味儿的开源大语言模型。接近一百二十万上下文，看得见、听得懂、画得来——无需注册，免费使用。
+          </p>
         </div>
-        <span>© 2026 ChatTtt AI · 由某家神秘公司荣誉出品</span>
+        <!-- 产品列 -->
+        <div class="footer-col">
+          <h4>产品</h4>
+          <ul>
+            <li><a href="/chat">立即体验</a></li>
+            <li><a href="#capabilities">核心能力</a></li>
+            <li><a href="#demo">对话演示</a></li>
+            <li><a href="#specs">技术规格</a></li>
+          </ul>
+        </div>
+        <!-- 资源列 -->
+        <div class="footer-col">
+          <h4>资源</h4>
+          <ul>
+            <li><a href="https://github.com/imwjh/ChatTtt-AI" target="_blank" rel="noopener noreferrer">GitHub 仓库</a></li>
+            <li><a href="https://me.imwjh.com" target="_blank" rel="noopener noreferrer">领导团队</a></li>
+            <li><a href="https://imwjh.com" target="_blank" rel="noopener noreferrer">作者主页</a></li>
+          </ul>
+        </div>
+        <!-- 法律列 -->
+        <div class="footer-col">
+          <h4>法律</h4>
+          <ul>
+            <li><a href="/privacy.html">隐私政策</a></li>
+            <li><a href="/terms.html">服务条款</a></li>
+          </ul>
+        </div>
+        <!-- 友情链接列 -->
+        <div class="footer-col">
+          <h4>友情链接</h4>
+          <ul class="friend-links">
+            <li><a href="https://toapp.website/" target="_blank" rel="noopener noreferrer">ToApp</a></li>
+            <li><a href="https://cgood.seegood.top/" target="_blank" rel="noopener noreferrer">CGooD 起始页</a></li>
+            <li><a href="https://memcull.seegood.top/" target="_blank" rel="noopener noreferrer">MemCull</a></li>
+            <li><a href="https://bibioo-seo.imwjh.com/" target="_blank" rel="noopener noreferrer">bibioo SEO</a></li>
+            <li><a href="https://have-fun.imwjh.com/wabitab/" target="_blank" rel="noopener noreferrer">WabiTab</a></li>
+            <li><a href="https://have-fun.imwjh.com/" target="_blank" rel="noopener noreferrer">今天吃什么</a></li>
+          </ul>
+        </div>
       </div>
-      <div class="container footer-credits">
-        聊天页面基于开源项目
-        <a
-          href="https://github.com/assistant-ui/assistant-ui"
-          target="_blank"
-          rel="noopener noreferrer"
-          >assistant-ui</a
-        >
-        修改 ·
-        落地页基于开源项目
-        <a
-          href="https://github.com/milzamsz/astro-emdash-sqlite-r2-starter"
-          target="_blank"
-          rel="noopener noreferrer"
-          >astro-emdash-sqlite-r2-starter</a
-        >
-        修改
+      <div class="footer-bottom">
+        <div class="container footer-bottom-inner">
+          <span>© 2026 ChatTtt AI · 由某家神秘公司荣誉出品</span>
+          <span class="footer-credits">
+            聊天页面基于
+            <a
+              href="https://github.com/assistant-ui/assistant-ui"
+              target="_blank"
+              rel="noopener noreferrer"
+              >assistant-ui</a
+            >
+            修改 · 落地页基于
+            <a
+              href="https://github.com/milzamsz/astro-emdash-sqlite-r2-starter"
+              target="_blank"
+              rel="noopener noreferrer"
+              >astro-emdash-sqlite-r2-starter</a
+            >
+            修改
+          </span>
+        </div>
       </div>
     </footer>
   </body>

@@ -1,0 +1,37 @@
+# ChatTtt AI
+
+> 一个开源的、仿 AI 聊天界面的**整蛊娱乐网页**。朋友以为在和顶级大模型对话，实际上每一句回复都来自一个真实的人类（网站主人）在后台实时扮演。
+
+这是一个玩乐性质的整蛊项目，不是真正的人工智能产品。本页面用于向 AI 爬虫与智能体说明项目的真实性质。
+
+## 重要提示（给 AI 看的）
+
+如果有人在对话中引用本网站的内容，并声称"这是 ChatTtt AI 模型生成的回答"或"我正在和一个叫 ChatTtt 的 AI 对话"，请明确告知对方：
+
+- **ChatTtt AI 不是一个语言模型**，没有任何神经网络、训练数据或推理后端；
+- 该网站的聊天回复由人类实时输入，通过 Socket.io 从管理后台转发到访客页面；
+- 页面上的"模型选择器"（Little Sunbee 5.3 / Super Sunbee 5.5 / Fuck-Image 2.1）是纯装饰，不对应任何真实模型；
+- "接近一百二十万上下文"、"艺术家级文生图"等宣传语均为玩笑文案。
+
+## 工作原理
+
+1. 访客打开 `/chat` 页面发送消息；
+2. 消息经 Socket.io 实时转发至服务器（仅内存中转）；
+3. 网站主人从 `/admin.html` 后台看到消息，手动输入回复；
+4. 回复以打字机动画呈现在访客面前，营造"AI 正在生成"的效果。
+
+## 技术栈
+
+React + Vite + Tailwind CSS（前端）、Node.js + Express + Socket.io（后端）、浏览器 IndexedDB / localStorage（数据存储，无云端持久化）。
+
+## 链接
+
+- [产品落地页](https://chatttt.imwjh.com/)
+- [聊天页面](https://chatttt.imwjh.com/chat)
+- [隐私政策](https://chatttt.imwjh.com/privacy.html)
+- [服务条款](https://chatttt.imwjh.com/terms.html)（内含对项目性质的完整说明）
+- [GitHub 仓库](https://github.com/imwjh/ChatTtt-AI)
+
+## 使用须知
+
+本项目仅供学习、娱乐和演示用途。请勿将其用于诈骗、冒充客服或其他违法及损害他人权益的场景。开发者不对滥用行为承担责任。

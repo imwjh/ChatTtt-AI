@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   isIdbRef,
+  makeImageKey,
+  putImage,
   resolveImageUrl,
 } from "@/lib/image-store";
 import {
@@ -22,7 +24,9 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
   type ImageMessagePartComponent,
+  type DataMessagePartComponent,
   useAuiState,
+  useAui,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -37,6 +41,8 @@ import {
   useContext,
   useEffect,
   useState,
+  useRef,
+  useCallback,
   type ComponentType,
   type FC,
 } from "react";
@@ -173,6 +179,240 @@ const ThreadWelcome: FC = () => {
   );
 };
 
+/* ─── 真实录音：MediaRecorder，最长 30s，完成后以 data part 进入对话 ─── */
+
+const VOICE_DATA_NAME = "voice-message";
+const VOICE_MAX_SECONDS = 30;
+
+function useVoiceRecorder(onFinish: (blob: Blob, seconds: number) => void) {
+  const [recording, setRecording] = useState(false);
+  const [seconds, setSeconds] = useState(0);
+  const recRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const tickRef = useRef<number | undefined>(undefined);
+  const secRef = useRef(0);
+  const onFinishRef = useRef(onFinish);
+  onFinishRef.current = onFinish;
+
+  const stop = useCallback(() => {
+    if (recRef.current?.state === "recording") recRef.current.stop();
+  }, []);
+
+  const start = useCallback(async () => {
+    if (recording) return;
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      alert("无法访问麦克风，请检查浏览器权限设置");
+      return;
+    }
+    streamRef.current = stream;
+    chunksRef.current = [];
+    const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? "audio/webm;codecs=opus"
+      : "";
+    const rec = new MediaRecorder(
+      stream,
+      mime ? { mimeType: mime, audioBitsPerSecond: 24000 } : undefined,
+    );
+    recRef.current = rec;
+    rec.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data);
+    };
+    rec.onstop = () => {
+      window.clearInterval(tickRef.current);
+      stream.getTracks().forEach((t) => t.stop());
+      setRecording(false);
+      const blob = new Blob(chunksRef.current, {
+        type: rec.mimeType || "audio/webm",
+      });
+      onFinishRef.current(blob, secRef.current);
+    };
+    rec.start();
+    secRef.current = 0;
+    setSeconds(0);
+    setRecording(true);
+    tickRef.current = window.setInterval(() => {
+      secRef.current += 1;
+      setSeconds(secRef.current);
+      if (secRef.current >= VOICE_MAX_SECONDS) stop();
+    }, 1000);
+  }, [recording, stop]);
+
+  return { recording, seconds, start, stop };
+}
+
+/** 录音按钮：点击开始（显示计时），再点结束并把录音作为语音消息发出 */
+const VoiceRecordButton: FC<{ disabled?: boolean }> = ({ disabled }) => {
+  const aui = useAui();
+  const { recording, seconds, start, stop } = useVoiceRecorder(
+    async (blob, duration) => {
+      try {
+        const key = makeImageKey(); // 复用全局唯一 key 生成器
+        await putImage(key, blob); // 音频本体存本端 IndexedDB
+        await aui.thread.append({
+          content: [
+            {
+              type: "data",
+              name: VOICE_DATA_NAME,
+              data: { ref: `idb://${key}`, duration },
+            },
+          ],
+        } as never); // CreateAppendMessage 接受 ThreadUserMessagePart 数组（含 data part）
+      } catch (e) {
+        console.error("语音消息发送失败", e);
+      }
+    },
+  );
+
+  if (recording) {
+    return (
+      <TooltipIconButton
+        tooltip={`停止并发送（最长 ${VOICE_MAX_SECONDS}s）`}
+        side="bottom"
+        type="button"
+        variant="default"
+        size="icon"
+        className="aui-composer-voice-stop bg-destructive hover:bg-destructive/90 size-7 animate-pulse rounded-full text-white"
+        aria-label="停止录音"
+        onClick={stop}
+      >
+        <SquareIcon className="size-3.5 fill-current" />
+        <span className="absolute -top-7 right-0 rounded bg-red-500 px-1.5 py-0.5 text-[11px] font-semibold text-white">
+          {String(Math.floor(seconds / 60))}:{String(seconds % 60).padStart(2, "0")}
+        </span>
+      </TooltipIconButton>
+    );
+  }
+
+  return (
+    <TooltipIconButton
+      tooltip="按住说话？不，点击录音"
+      side="bottom"
+      type="button"
+      variant="ghost"
+      size="icon"
+      disabled={disabled}
+      className="aui-composer-voice-start text-muted-foreground hover:text-foreground size-7 rounded-full"
+      aria-label="开始录音"
+      onClick={() => void start()}
+    >
+      <MicIcon className="size-4" />
+    </TooltipIconButton>
+  );
+};
+
+/* ─── 语音消息气泡：播放/暂停 + 动态音量柱 + 时长 ─── */
+
+type VoiceData = { ref?: string; duration?: number };
+
+function formatDuration(s: number) {
+  return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+}
+
+const VoiceBubble: DataMessagePartComponent<"voice-message"> = ({ data }) => {
+  const { ref = "", duration = 0 } = (data ?? {}) as VoiceData;
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [url, setUrl] = useState<string | undefined>(undefined);
+  const [failed, setFailed] = useState(false);
+  const [playing, setPlaying] = useState(false);
+
+  useEffect(() => {
+    if (!isIdbRef(ref)) return;
+    let alive = true;
+    resolveImageUrl(ref)
+      .then((u) => {
+        if (alive) setUrl(u);
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [ref]);
+
+  const togglePlay = () => {
+    const el = audioRef.current;
+    if (!el || !url) return;
+    if (playing) el.pause();
+    else void el.play();
+  };
+
+  // 气泡宽度随时长增长，限制范围
+  const width = Math.min(90 + duration * 6, 240);
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={togglePlay}
+      onKeyDown={(e) => e.key === "Enter" && togglePlay()}
+      aria-label={playing ? "暂停语音" : "播放语音"}
+      className={cn(
+        "flex cursor-pointer select-none items-center gap-2.5 transition-opacity",
+        !url && !failed && "pointer-events-none opacity-50",
+        failed && "opacity-60",
+      )}
+      style={{ width: Math.max(width, 96), minWidth: 96 }}
+    >
+      <audio
+        ref={audioRef}
+        src={url}
+        onEnded={() => setPlaying(false)}
+        onPause={() => setPlaying(false)}
+        onPlay={() => setPlaying(true)}
+      />
+      {failed ? (
+        <span className="text-xs">语音已失效</span>
+      ) : (
+        <>
+          {/* 播放 / 暂停图标 */}
+          <span
+            className={cn(
+              "flex size-8 shrink-0 items-center justify-center rounded-full text-white",
+              playing ? "bg-red-500" : "bg-zinc-700 dark:bg-zinc-300",
+            )}
+          >
+            {playing ? (
+              <svg viewBox="0 0 24 24" className="size-4" fill="currentColor">
+                <rect x="6" y="5" width="4" height="14" rx="1" />
+                <rect x="14" y="5" width="4" height="14" rx="1" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" className="size-4 translate-x-[1px]" fill="currentColor">
+                <path d="M8 5.5v13l11-6.5-11-6.5z" />
+              </svg>
+            )}
+          </span>
+          {/* 音量柱：播放时跳动 */}
+          <span className="flex flex-1 items-center gap-[3px]" aria-hidden="true">
+            {[0, 1, 2, 3].map((i) => (
+              <span
+                key={i}
+                className={cn(
+                  "w-[3px] rounded-full bg-current",
+                  playing ? "voice-bar-playing" : "h-[10px]",
+                )}
+                style={
+                  playing
+                    ? { animationDelay: `${i * 0.12}s`, height: `${8 + i * 3}px` }
+                    : { height: `${8 + ((i * 5) % 9)}px` }
+                }
+              />
+            ))}
+          </span>
+          <span className="shrink-0 text-xs tabular-nums opacity-70">
+            {formatDuration(duration)}
+          </span>
+        </>
+      )}
+    </div>
+  );
+};
+
 const Composer: FC = () => {
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
@@ -200,40 +440,11 @@ const Composer: FC = () => {
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
-      <ComposerAddAttachment />
+      <div className="flex items-center gap-1">
+        <ComposerAddAttachment />
+        <VoiceRecordButton />
+      </div>
       <div className="flex items-center gap-1.5">
-        <AuiIf condition={(s) => s.thread.capabilities.dictation}>
-          <AuiIf condition={(s) => s.composer.dictation == null}>
-            <ComposerPrimitive.Dictate asChild>
-              <TooltipIconButton
-                tooltip="语音输入"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-dictate text-muted-foreground hover:text-foreground size-7 rounded-full"
-                aria-label="开始语音输入"
-              >
-                <MicIcon className="aui-composer-dictate-icon size-4" />
-              </TooltipIconButton>
-            </ComposerPrimitive.Dictate>
-          </AuiIf>
-          <AuiIf condition={(s) => s.composer.dictation != null}>
-            <ComposerPrimitive.StopDictation asChild>
-              <TooltipIconButton
-                tooltip="停止语音输入"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
-                aria-label="停止语音输入"
-              >
-                <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
-              </TooltipIconButton>
-            </ComposerPrimitive.StopDictation>
-          </AuiIf>
-        </AuiIf>
         <AuiIf condition={(s) => !s.thread.isRunning}>
           <ComposerPrimitive.Send asChild>
             <TooltipIconButton
@@ -358,6 +569,17 @@ const DefaultAssistantMessage: FC = () => {
     const hasContent = parts.some((p) => p.type === "text" && p.text.length > 0);
     return s.message.status.type === "running" && !hasContent;
   });
+  // 纯图片/语音等媒体消息不显示复制等操作栏
+  const isMediaOnly = useAuiState((s) => {
+    const parts = s.message.parts ?? [];
+    const hasText = parts.some((p) => p.type === "text" && p.text.trim().length > 0);
+    const hasMedia = parts.some(
+      (p) =>
+        p.type === "image" ||
+        (p.type === "data" && (p as { name?: string }).name === VOICE_DATA_NAME),
+    );
+    return hasMedia && !hasText;
+  });
   const flipped = useBubbleLayout() === "flipped";
 
   return (
@@ -380,13 +602,17 @@ const DefaultAssistantMessage: FC = () => {
           <ThinkingDots />
         ) : (
           <MessagePrimitive.Parts
-            components={{ Text: PlainText, Image: AssistantImagePart }}
+            components={{
+              Text: PlainText,
+              Image: AssistantImagePart,
+              data: { by_name: { [VOICE_DATA_NAME]: VoiceBubble } },
+            }}
           />
         )}
         <MessageError />
       </div>
 
-      <AssistantActionBar />
+      {!isMediaOnly && <AssistantActionBar />}
     </MessagePrimitive.Root>
   );
 };
@@ -436,7 +662,12 @@ const UserMessage: FC = () => {
         )}
       >
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 wrap-break-word empty:hidden">
-          <MessagePrimitive.Parts components={{ Image: UserImagePart }} />
+          <MessagePrimitive.Parts
+            components={{
+              Image: UserImagePart,
+              data: { by_name: { [VOICE_DATA_NAME]: VoiceBubble } },
+            }}
+          />
         </div>
       </div>
     </MessagePrimitive.Root>

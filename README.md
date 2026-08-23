@@ -217,6 +217,27 @@ $env:PORT=4000; $env:ADMIN_TOKEN="my-secret"; node server.js
 
 > 🔐 **安全提醒**：`seegud123` 只是本地开发的兜底默认值。**线上部署时务必通过平台环境变量设置自己的口令**（Render 见上文「部署上线」第 3 步），否则任何看过本仓库的人都能进你的后台。若口令意外泄露，直接更换环境变量并重新部署即可使其失效。
 
+## 🧹 移除作者自带的百度统计（自部署必读）
+
+本项目的 5 个页面（`index.html` / `chat.html` / `admin.html` / `public/privacy.html` / `public/terms.html`）中内置了作者的百度统计代码，用于作者自己统计访问量。如果你要自己部署，建议移除：
+
+在每个 HTML 文件的 `<head>` 中找到以下代码块并整体删除：
+
+```html
+<!-- Baidu Analytics -->
+<script>
+  var _hmt = _hmt || [];
+  (function () {
+    var hm = document.createElement("script");
+    hm.src = "https://hm.baidu.com/hm.js?6db19609f648c8ad155977594d8967fd";
+    var s = document.getElementsByTagName("script")[0];
+    s.parentNode.insertBefore(hm, s);
+  })();
+</script>
+```
+
+快速方法：在项目根目录全局搜索 `hm.baidu.com`，删除所有匹配的 `<script>` 块即可。若想换成自己的统计，把其中的站点 ID 替换为你在[百度统计平台](https://tongji.baidu.com/)创建应用后获得的 ID。
+
 ## 🖼️ 图片存储方案
 
 本项目对图片做了「去服务器化」处理：
@@ -240,12 +261,16 @@ $env:PORT=4000; $env:ADMIN_TOKEN="my-secret"; node server.js
 
 ## 🙏 致谢
 
-本项目的部分能力站在开源社区的肩膀上：
+本项目的大部分能力站在开源社区的肩膀上：
 
 - 聊天页面基于 [assistant-ui](https://github.com/assistant-ui/assistant-ui) 修改
 - 落地页基于 [astro-emdash-sqlite-r2-starter](https://github.com/milzamsz/astro-emdash-sqlite-r2-starter) 修改
 
 感谢这些优秀的开源项目。
+
+## 👨‍💻 开发
+
+项目开发由 ox-alpha、GLM5.3、[seegood](https://me.imwjh.com) 完成。
 
 ## 📄 License
 

@@ -129,3 +129,17 @@
 .animate-unread-flash {
   animation: unread-flash 0.55s ease-out;
 }
+
+/* 语音消息播放时的音量柱动画 */
+@keyframes voice-bar {
+  0%, 100% {
+    transform: scaleY(0.4);
+  }
+  50% {
+    transform: scaleY(1.25);
+  }
+}
+.voice-bar-playing {
+  animation: voice-bar 0.9s ease-in-out infinite;
+  transform-origin: center;
+}

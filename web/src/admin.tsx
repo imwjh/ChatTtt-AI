@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import {
   AssistantRuntimeProvider,
-  WebSpeechDictationAdapter,
   useExternalStoreRuntime,
   type AppendMessage,
   type ThreadMessageLike,
@@ -31,13 +30,34 @@ import {
 type Msg = {
   id?: string; // 服务器生成的唯一 id，用于本地与服务器历史去重
   from: "user" | "assistant";
-  type: "text" | "image";
+  type: "text" | "image" | "audio";
   text?: string;
   imageUrl?: string; // 图片为 `idb://<key>` 引用或外部 URL（不含 dataURI）
   imageKey?: string; // 图片在本端 IndexedDB 的 key
   imageData?: string; // 仅传输时携带的 dataURI 本体，落库前剥除
+  audioKey?: string; // 语音在本端 IndexedDB 的 key
+  audioData?: string; // 传输用 dataURI 本体
+  duration?: number; // 语音时长（秒）
   at: number;
 };
+
+/** 把消息转成本地线程渲染的 content parts */
+function msgToContent(m: Pick<Msg, "type" | "text" | "imageUrl" | "audioKey" | "duration">) {
+  if (m.type === "image" && m.imageUrl) {
+    return [{ type: "image" as const, image: m.imageUrl }];
+  }
+  if (m.type === "audio") {
+    const ref = m.audioKey ? `idb://${m.audioKey}` : (m.imageUrl ?? "");
+    return [
+      {
+        type: "data" as const,
+        name: "voice-message",
+        data: { ref, duration: m.duration ?? 0 },
+      },
+    ];
+  }
+  return [{ type: "text" as const, text: m.text ?? "" }];
+}
 
 type SessionSummary = {
   id: string;
@@ -131,15 +151,20 @@ export default function AdminApp() {
         const map = new Map(prev.map((s) => [s.id, s]));
         for (const s of list) {
           if (s.messages?.length) {
-            // 图片本体落 IndexedDB，剥除传输用 dataURI 后再合并
+            // 图片/语音本体落 IndexedDB，剥除传输用 dataURI 后再合并
             for (const m of s.messages) {
               if (m.imageKey && m.imageData) {
                 void putImage(m.imageKey, dataUriToBlob(m.imageData));
                 m.imageUrl = `idb://${m.imageKey}`;
               }
+              if (m.audioKey && m.audioData) {
+                void putImage(m.audioKey, dataUriToBlob(m.audioData));
+                m.imageUrl = `idb://${m.audioKey}`;
+              }
             }
-            const stripped = s.messages.map(({ imageData: _d, ...m }) => {
+            const stripped = s.messages.map(({ imageData: _d, audioData: _a, ...m }) => {
               void _d;
+              void _a;
               return m;
             });
             const mergedMsgs = mergeMessages(loadLocalMessages(s.id), stripped);
@@ -179,10 +204,14 @@ export default function AdminApp() {
 
     // 收到新消息（访客或自己回显）
     socket.on("admin:new-message", async ({ sessionId, message }: { sessionId: string; message: Msg }) => {
-      // 图片本体落本端 IndexedDB，消息里只留 idb:// 引用
+      // 图片/语音本体落本端 IndexedDB，消息里只留 idb:// 引用
       if (message.imageKey && message.imageData) {
         await putImage(message.imageKey, dataUriToBlob(message.imageData));
         message.imageUrl = `idb://${message.imageKey}`;
+      }
+      if (message.audioKey && message.audioData) {
+        await putImage(message.audioKey, dataUriToBlob(message.audioData));
+        message.imageUrl = `idb://${message.audioKey}`;
       }
 
       // 更新该会话标题（首条用户消息）
@@ -202,10 +231,7 @@ export default function AdminApp() {
         setMessages((prev) => {
           const nextMsg: ThreadMessageLike = {
             role: message.from === "user" ? "user" : "assistant",
-            content:
-              message.type === "image" && message.imageUrl
-                ? [{ type: "image", image: message.imageUrl }]
-                : [{ type: "text", text: message.text ?? "" }],
+            content: msgToContent(message),
           };
           const merged = [...prev, nextMsg];
           setIsRunning(false);
@@ -233,17 +259,22 @@ export default function AdminApp() {
 
     // 服务器返回的会话历史（打开会话时拉取）
     socket.on("admin:history-result", async ({ sessionId, messages: history }: { sessionId: string; messages: Msg[] }) => {
-      // 图片本体先落 IndexedDB，并剥除传输用 dataURI
+      // 图片/语音本体先落 IndexedDB，并剥除传输用 dataURI
       await Promise.all(
-        history
-          .filter((m) => m.imageKey && m.imageData)
-          .map(async (m) => {
-            await putImage(m.imageKey!, dataUriToBlob(m.imageData!));
+        history.map(async (m) => {
+          if (m.imageKey && m.imageData) {
+            await putImage(m.imageKey, dataUriToBlob(m.imageData));
             m.imageUrl = `idb://${m.imageKey}`;
-          }),
+          }
+          if (m.audioKey && m.audioData) {
+            await putImage(m.audioKey, dataUriToBlob(m.audioData));
+            m.imageUrl = `idb://${m.audioKey}`;
+          }
+        }),
       );
-      const stripped = history.map(({ imageData: _d, ...m }) => {
+      const stripped = history.map(({ imageData: _d, audioData: _a, ...m }) => {
         void _d;
+        void _a;
         return m;
       });
       const merged = mergeMessages(loadLocalMessages(sessionId), stripped);
@@ -252,10 +283,7 @@ export default function AdminApp() {
         setMessages(
           merged.map((m) => ({
             role: m.from === "user" ? ("user" as const) : ("assistant" as const),
-            content:
-              m.type === "image" && m.imageUrl
-                ? [{ type: "image" as const, image: m.imageUrl }]
-                : [{ type: "text" as const, text: m.text ?? "" }],
+            content: msgToContent(m),
           })),
         );
       }
@@ -303,14 +331,47 @@ export default function AdminApp() {
     if (!sessionId || !socket) return;
 
     const textPart = message.content.find((p) => p.type === "text");
-    const imagePart = message.content.find((p) => p.type === "image");
 
-    // 图片：本体在本端 IndexedDB（引用 idb://key），发送时取出转 dataURI 附带
-    let imageKey: string | undefined;
-    let imageData: string | undefined;
-    let imageUrl: string | undefined;
-    if (imagePart) {
-      const raw = String(imagePart.image);
+    // 图片提取：附件在 message.attachments（content 含 image part），content 里也可能有
+    type ImagePartLike = { type: string; image?: string };
+    type AttachmentLike = { content?: ReadonlyArray<ImagePartLike> };
+    const attachmentParts = (
+      (message as unknown as { attachments?: ReadonlyArray<AttachmentLike> })
+        .attachments ?? []
+    ).flatMap((a) => a.content ?? []);
+    const images = [
+      ...message.content.filter((p) => p.type === "image"),
+      ...attachmentParts.filter((p) => p.type === "image"),
+    ].map((p) => String((p as ImagePartLike).image));
+
+    // 文本消息
+    if (textPart && textPart.text.trim()) {
+      socket.emit("admin:message", {
+        sessionId,
+        type: "text",
+        text: textPart.text,
+      });
+      const localText: Msg = {
+        id: `local-${Date.now().toString(36)}-t`,
+        from: "assistant",
+        type: "text",
+        text: textPart.text,
+        at: Date.now(),
+      };
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: [{ type: "text", text: textPart.text }] },
+      ]);
+      const local = loadLocalMessages(sessionId);
+      local.push(localText);
+      saveLocalMessages(sessionId, local);
+    }
+
+    // 图片消息：逐张发送（压缩与存储已由适配器在本端 IndexedDB 完成）
+    for (const [i, raw] of images.entries()) {
+      let imageKey: string | undefined;
+      let imageData: string | undefined;
+      let imageUrl: string | undefined;
       if (isIdbRef(raw)) {
         imageKey = idbKeyOf(raw);
         const blob = await getImage(imageKey);
@@ -319,34 +380,81 @@ export default function AdminApp() {
       } else {
         imageUrl = raw;
       }
+
+      const msg: Msg = {
+        id: `local-${Date.now().toString(36)}-${i}`,
+        from: "assistant",
+        type: "image",
+        imageUrl,
+        imageKey,
+        at: Date.now(),
+      };
+
+      socket.emit("admin:message", {
+        sessionId,
+        type: "image",
+        ...(isIdbRef(raw) ? { imageKey, imageData } : { imageUrl }),
+      });
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: [{ type: "image", image: raw }],
+        },
+      ]);
+      const local = loadLocalMessages(sessionId);
+      local.push(msg);
+      saveLocalMessages(sessionId, local);
     }
 
-    const localId = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    const msg: Msg = imagePart
-      ? { id: localId, from: "assistant", type: "image", imageUrl, imageKey, at: Date.now() }
-      : { id: localId, from: "assistant", type: "text", text: textPart?.text ?? "", at: Date.now() };
+    // 语音消息（录音按钮产生）：从本端 IndexedDB 取出本体发送，无需等待回复
+    const voicePart = message.content.find(
+      (p) =>
+        (p as { type?: string; name?: string }).type === "data" &&
+        (p as { name?: string }).name === "voice-message",
+    ) as { data?: { ref?: string; duration?: number } } | undefined;
+    if (voicePart?.data) {
+      const { ref, duration } = voicePart.data;
+      let audioKey: string | undefined;
+      let audioData: string | undefined;
+      if (ref && isIdbRef(ref)) {
+        audioKey = idbKeyOf(ref);
+        const blob = await getImage(audioKey);
+        audioData = blob ? await blobToDataUri(blob) : undefined;
+      }
+      socket.emit("admin:message", {
+        sessionId,
+        type: "audio",
+        imageUrl: ref,
+        audioKey,
+        audioData,
+        duration,
+      });
+      const localVoice: Msg = {
+        id: `local-${Date.now().toString(36)}-v`,
+        from: "assistant",
+        type: "audio",
+        imageUrl: ref,
+        audioKey,
+        duration,
+        at: Date.now(),
+      };
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant" as const,
+          content: msgToContent(localVoice),
+        },
+      ]);
+      const localV = loadLocalMessages(sessionId);
+      localV.push(localVoice);
+      saveLocalMessages(sessionId, localV);
+      return;
+    }
 
-    socket.emit("admin:message", {
-      sessionId,
-      type: msg.type,
-      ...(msg.type === "image"
-        ? { imageUrl: isIdbRef(msg.imageUrl ?? "") ? undefined : msg.imageUrl, imageKey, imageData }
-        : { text: msg.text }),
-    });
-
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "assistant",
-        content:
-          msg.type === "image" && msg.imageUrl
-            ? [{ type: "image", image: msg.imageUrl }]
-            : [{ type: "text", text: msg.text ?? "" }],
-      },
-    ]);
-    const local = loadLocalMessages(sessionId);
-    local.push(msg);
-    saveLocalMessages(sessionId, local);
+    // 纯空消息保护
+    if (!images.length && !textPart?.text?.trim()) return;
   };
 
   const runtime = useExternalStoreRuntime({
@@ -356,7 +464,6 @@ export default function AdminApp() {
     onNew: onSend,
     onCancel: async () => {},
     adapters: {
-      dictation: new WebSpeechDictationAdapter({ language: "zh-CN" }),
       attachments: new UploadImageAttachmentAdapter(),
     },
   });
@@ -385,7 +492,7 @@ export default function AdminApp() {
           }}
         >
           <div className="flex items-center justify-center gap-2 pb-1">
-            <img src={logo} alt="" className="size-8" />
+            <img src={logo} alt="" className="size-8 rounded-lg bg-white p-0.5 ring-1 ring-border" />
             <span className="font-semibold">ChatTtt AI · 管理后台</span>
           </div>
           <Input

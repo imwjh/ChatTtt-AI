@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { io, type Socket } from "socket.io-client";
 import {
   AssistantRuntimeProvider,
-  WebSpeechDictationAdapter,
+  useAui,
   useLocalRuntime,
   useRemoteThreadListRuntime,
   type ChatModelAdapter,
@@ -71,11 +71,31 @@ type ServerMsg = {
   imageUrl?: string;
   imageKey?: string; // 图片在本端 IndexedDB 的 key（双端同 key）
   imageData?: string; // 传输用 dataURI 本体，接收后落 IndexedDB
+  audioKey?: string; // 语音在本端 IndexedDB 的 key
+  audioData?: string; // 传输用 dataURI 本体
+  duration?: number; // 语音时长（秒）
   at: number;
 };
 
-/** 把漏掉的后台回复合并进本地会话存储（落到最近活跃的会话；无会话时新建） */
-function mergeMissedReplies(missed: ServerMsg[]): boolean {
+/** 把服务器消息转成本地线程存储的 content parts */
+function serverMsgToContent(m: ServerMsg): Array<Record<string, unknown>> {
+  if (m.type === "image") {
+    return [{ type: "image", image: m.imageUrl ?? `idb://${m.audioKey}` }];
+  }
+  if (m.type === "audio") {
+    return [
+      {
+        type: "data",
+        name: "voice-message",
+        data: { ref: m.imageUrl ?? `idb://${m.audioKey}`, duration: m.duration ?? 0 },
+      },
+    ];
+  }
+  return [{ type: "text", text: m.text ?? "" }];
+}
+
+/** 把漏掉的后台回复合并进本地会话存储；返回目标会话 remoteId（失败返回 null） */
+function mergeMissedReplies(missed: ServerMsg[]): string | null {
   try {
     const threads: {
       remoteId: string;
@@ -115,30 +135,35 @@ function mergeMissedReplies(missed: ServerMsg[]): boolean {
     const repo = JSON.parse(localStorage.getItem(key) ?? "{}");
     const list: { parentId: string | null; message: Record<string, unknown> }[] =
       repo.messages ?? [];
+    // 按生成 id 去重：同一条服务器消息只落一次
+    const existingIds = new Set(list.map((x) => String(x.message.id)));
+    let added = false;
     for (const m of missed) {
+      const id = `srv-${m.id ?? m.at}`;
+      if (existingIds.has(id)) continue;
       list.push({
         parentId: list.length ? (list[list.length - 1].message.id as string) : null,
         message: {
-          id: `srv-${m.id ?? m.at}`,
+          id,
           createdAt: new Date(m.at).toISOString(),
           role: "assistant",
-          content:
-            m.type === "image"
-              ? [{ type: "image", image: m.imageUrl }]
-              : [{ type: "text", text: m.text ?? "" }],
+          content: serverMsgToContent(m),
           // assistant 消息必须带 status 才会被存储适配器解析
           status: { type: "complete", reason: "stop" },
           attachments: [],
           metadata: { custom: {} },
         },
       });
+      existingIds.add(id);
+      added = true;
     }
+    if (!added) return null;
     repo.messages = list;
     repo.headId = list.length ? list[list.length - 1].message.id : undefined;
     localStorage.setItem(key, JSON.stringify(repo));
-    return true;
+    return targetId;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -150,19 +175,72 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
   async *run({ messages, abortSignal }) {
     const socket = getSocket();
     const last = messages[messages.length - 1];
+    // TODO: 调试日志，修复后删除
+    try {
+      const dbg = {
+        role: (last as { role?: string })?.role,
+        contentParts: (last?.content ?? []).map((p) => p.type),
+        attachments: (
+          (last as unknown as { attachments?: Array<Record<string, unknown>> })
+            ?.attachments ?? []
+        ).map((a) => ({
+          keys: Object.keys(a),
+          name: a.name,
+          contentTypes: Array.isArray(a.content)
+            ? (a.content as Array<{ type: string }>).map((p) => p.type)
+            : "no-content",
+        })),
+      };
+      console.log("[chat-debug]", JSON.stringify(dbg));
+    } catch (e) {
+      console.log("[chat-debug] logging failed", e);
+    }
     const textPart = last?.content.find((p) => p.type === "text");
-    const imagePart = last?.content.find((p) => p.type === "image");
+
+    // 图片提取：assistant-ui 把附件放在 message.attachments（其 content 含 image part），
+    // 老版本/部分路径也可能直接放进 content，两处都取
+    const attachmentParts = (
+      (last as { attachments?: ReadonlyArray<{ content?: ReadonlyArray<{ type: string; image?: string }> }> })
+        ?.attachments ?? []
+    ).flatMap((a) => a.content ?? []);
+    const images = [
+      ...(last?.content ?? []).filter((p) => p.type === "image"),
+      ...attachmentParts.filter((p) => p.type === "image"),
+    ].map((p) => String((p as { image?: string }).image));
 
     if (!socket) {
       yield { content: [{ type: "text", text: "（服务未连接，请稍后重试）" }] };
       return;
     }
 
-    // 发送给后台
-    if (imagePart) {
+    // 语音消息（录音按钮产生）：从本端 IndexedDB 取出本体发送，无需等待回复
+    const voicePart = (last?.content ?? []).find(
+      (p) => (p as { type?: string; name?: string }).type === "data" &&
+             (p as { name?: string }).name === "voice-message",
+    ) as { data?: { ref?: string; duration?: number } } | undefined;
+    if (voicePart?.data) {
+      const { ref, duration } = voicePart.data;
+      let imageKey: string | undefined;
+      let imageData: string | undefined;
+      if (ref && isIdbRef(ref)) {
+        imageKey = idbKeyOf(ref);
+        const blob = await getImage(imageKey);
+        imageData = blob ? await blobToDataUri(blob) : undefined;
+      }
+      socket.emit("visitor:message", {
+        type: "audio",
+        imageUrl: ref,
+        audioKey: imageKey,
+        audioData: imageData,
+        duration,
+      });
+      return; // 语音不需要等待文字回复
+    }
+
+    // 发送给后台：每张图片单独一条消息
+    for (const raw of images) {
       // 图片本体存本端 IndexedDB（引用 idb://key）；
       // 发送时从 IndexedDB 取出转 dataURI 附带，接收方落自己的 IndexedDB
-      const raw = String(imagePart.image);
       let imageKey: string | undefined;
       let imageData: string | undefined;
       let imageUrl: string | undefined;
@@ -183,7 +261,7 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
     if (textPart && textPart.text.trim()) {
       socket.emit("visitor:message", { type: "text", text: textPart.text });
     }
-    if (!textPart?.text?.trim() && !imagePart) return;
+    if (!textPart?.text?.trim() && !images.length) return;
 
     // 等待真人回复（流式：这里按整条接收；后台逐条发时前端自然分段）
     const reply = await new Promise<
@@ -194,6 +272,9 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
         imageUrl?: string;
         imageKey?: string;
         imageData?: string;
+        audioKey?: string;
+        audioData?: string;
+        duration?: number;
       } | null
     >((resolve) => {
         const onMessage = (payload: { message: ServerMsg & { at?: number } }) => {
@@ -208,14 +289,26 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
           cleanup();
           resolve(null);
         };
+        // 后台无人在线：服务器立即回 visitor:error
+        const onError = () => {
+          cleanup();
+          resolve({ from: "system", type: "error" });
+        };
         const cleanup = () => {
           socket.off("visitor:new-message", onMessage);
+          socket.off("visitor:error", onError);
           abortSignal?.removeEventListener("abort", onAbort);
         };
         socket.on("visitor:new-message", onMessage);
+        socket.on("visitor:error", onError);
         abortSignal?.addEventListener("abort", onAbort);
       },
     );
+
+    if (reply && (reply as { from?: string }).from === "system") {
+      // 后台离线：抛错走 assistant-ui 预设的网络错误提示（与真实网络断连同款样式与文案）
+      throw new TypeError("Failed to fetch");
+    }
 
     if (!reply || abortSignal?.aborted) return;
 
@@ -235,6 +328,24 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
       };
       return;
     }
+    if (reply.type === "audio") {
+      // 语音回复：本体落本端 IndexedDB，渲染为语音气泡
+      let ref = reply.imageUrl ?? "";
+      if (reply.audioKey && reply.audioData) {
+        await putImage(reply.audioKey, dataUriToBlob(reply.audioData));
+        ref = `idb://${reply.audioKey}`;
+      }
+      yield {
+        content: [
+          {
+            type: "data",
+            name: "voice-message",
+            data: { ref, duration: reply.duration ?? 0 },
+          },
+        ],
+      };
+      return;
+    }
     const full = reply.text ?? "";
     let acc = "";
     for (const char of full) {
@@ -243,7 +354,6 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
       yield { content: [{ type: "text", text: acc }] };
       await new Promise((r) => setTimeout(r, 12 + Math.random() * 20));
     }
-    void imagePart;
   },
 });
 
@@ -292,18 +402,26 @@ function useAppRuntime() {
         (m) => m.from === "assistant" && m.at > lastAt,
       );
       if (missed.length) {
-        // 图片本体先落 IndexedDB（消息里只有 idb:// 引用）
+        // 图片/语音本体先落 IndexedDB（消息里只有 idb:// 引用）
         void Promise.all(
           missed
-            .filter((m) => m.imageKey && m.imageData)
-            .map((m) => putImage(m.imageKey!, dataUriToBlob(m.imageData!))),
+            .map((m) => {
+              if (m.imageKey && m.imageData)
+                return putImage(m.imageKey, dataUriToBlob(m.imageData));
+              if (m.audioKey && m.audioData)
+                return putImage(m.audioKey, dataUriToBlob(m.audioData));
+              return undefined;
+            })
+            .filter(Boolean),
         ).then(() => {
-          if (mergeMissedReplies(missed)) {
+          const targetId = mergeMissedReplies(missed);
+          if (targetId) {
             localStorage.setItem(
               LAST_ASSISTANT_AT_KEY,
               String(Math.max(...missed.map((m) => m.at))),
             );
-            // 数据已直写 localStorage，刷新页面即可看到；这里直接 reload 保证展示一致
+            // reload 后自动恢复到收到消息的会话
+            sessionStorage.setItem("chattt:reopen-thread", targetId);
             window.location.reload();
           } else {
             const latestAssistant = history
@@ -335,12 +453,18 @@ function useAppRuntime() {
         return;
       window.setTimeout(async () => {
         if (m.at <= Number(localStorage.getItem(LAST_ASSISTANT_AT_KEY) ?? 0)) return;
-        // 图片本体先落 IndexedDB
+        // 图片/语音本体先落 IndexedDB
         if (m.imageKey && m.imageData) {
           await putImage(m.imageKey, dataUriToBlob(m.imageData));
         }
-        if (mergeMissedReplies([m])) {
+        if (m.audioKey && m.audioData) {
+          await putImage(m.audioKey, dataUriToBlob(m.audioData));
+        }
+        const targetId = mergeMissedReplies([m]);
+        if (targetId) {
           localStorage.setItem(LAST_ASSISTANT_AT_KEY, String(m.at));
+          // reload 后自动恢复到该会话
+          sessionStorage.setItem("chattt:reopen-thread", targetId);
           window.location.reload();
         }
       }, 300);
@@ -367,12 +491,39 @@ function useAppRuntime() {
     runtimeHook: function RuntimeHook() {
       return useLocalRuntime(adapterRef.current, {
         adapters: {
-          dictation: new WebSpeechDictationAdapter({ language: "zh-CN" }),
           attachments: new UploadImageAttachmentAdapter(),
         },
       });
     },
   });
+}
+
+/** 刷新后自动恢复到收到消息的会话（配合 sessionStorage 标记） */
+function ReopenThread() {
+  const aui = useAui();
+  useEffect(() => {
+    const id = sessionStorage.getItem("chattt:reopen-thread");
+    if (!id) return;
+    sessionStorage.removeItem("chattt:reopen-thread");
+    let cancelled = false;
+    const trySwitch = async () => {
+      // 等线程列表加载完成后再切换，最多重试若干次
+      for (let i = 0; i < 20 && !cancelled; i++) {
+        try {
+          await aui.threads.getLoadThreadsPromise();
+          await aui.threads.switchToThread(id, { unarchive: true });
+          return;
+        } catch {
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
+    };
+    void trySwitch();
+    return () => {
+      cancelled = true;
+    };
+  }, [aui]);
+  return null;
 }
 
 function ChatShell() {
@@ -385,7 +536,7 @@ function ChatShell() {
         <SidebarInset>
           <header className="flex h-14 shrink-0 items-center gap-2 border-b px-3">
             <SidebarTrigger />
-            <img src={logo} alt="ChatTtt AI" className="size-6" />
+            <img src={logo} alt="ChatTtt AI" className="size-6 rounded-md bg-white p-0.5 ring-1 ring-border" />
             <ModelSelector models={MODELS} defaultValue={modelId} variant="ghost" size="sm" searchable />
           </header>
           <div className="flex-1 overflow-hidden">
@@ -414,6 +565,7 @@ export default function App() {
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
+      <ReopenThread />
       <ChatShell />
     </AssistantRuntimeProvider>
   );
