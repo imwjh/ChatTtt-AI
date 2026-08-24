@@ -343,12 +343,11 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
   },
 });
 
-/** 会话命名规则：首句超过 10 个字符截断加 ...，否则显示完整内容 */
+/** 会话命名规则：跟随最新的用户文本消息，>10 字符截断加 ...，≤10 显示全文 */
 const TITLE_GENERATOR: TitleGenerationAdapter = {
   async generateTitle(messages) {
-    const firstUser = messages.find((m) => m.role === "user");
-    const text =
-      firstUser?.content.find((p) => p.type === "text")?.text ?? "";
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    const text = lastUser?.content.find((p) => p.type === "text")?.text ?? "";
     const trimmed = text.trim();
     if (!trimmed) return "新对话";
     return trimmed.length > 10 ? `${trimmed.slice(0, 10)}...` : trimmed;

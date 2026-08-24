@@ -72,7 +72,7 @@ if (fs.existsSync(distDir)) {
  * sessions: Map<sessionId, {
  *   visitorSocketId | null,   // 访客当前连接
  *   messages: [{ from, type, text?, imageUrl?, at }],
- *   title,                    // 首条消息前5字符+…
+ *   title,                    // 最新用户文本消息（>10 字符截断加 ...）
  * }>
  */
 const sessions = new Map();
@@ -218,8 +218,8 @@ io.on("connection", (socket) => {
     };
     session.messages.push(msg);
 
-    // 首条消息生成标题
-    if (session.title === "新对话" && msg.type === "text") {
+    // 标题跟随最新的用户文本消息（>10 字符截断加 ...，≤10 显示全文）
+    if (msg.type === "text") {
       session.title = makeTitle(msg.text);
     }
 

@@ -99,21 +99,25 @@ function mergeMessages(local: Msg[], remote: Msg[]): Msg[] {
   const contentKeyOf = (m: Msg) =>
     `${m.from}:${m.type}:${m.text ?? m.imageUrl ?? m.audioKey ?? ""}`;
   // 服务器回显可能与本地自发记录内容一致（本地 id 是 local-xxx）：
-  // 用「内容键 + 时间」识别这类重复，仅去掉紧跟其后的同内容本地占位条目，
-  // 避免误删访客真正连发的重复消息
-  const remoteKeys = new Map(
-    remote.map((m) => [contentKeyOf(m) + "|" + Math.round(m.at / 5000), m]),
-  );
-  for (const m of [...local, ...remote]) {
-    const key = m.id ?? `${m.at}:${m.from}:${m.text ?? m.imageUrl ?? ""}`;
-    const ck = contentKeyOf(m) + "|" + Math.round(m.at / 5000);
-    if (
-      m.id?.startsWith("local-") &&
-      remoteKeys.has(ck) &&
-      Math.abs(remoteKeys.get(ck)!.at - m.at) < 5000
-    ) {
-      continue; // 本地占位条目，服务器版本已存在，跳过
+  // 按「内容键 + ±5 秒内时间差」识别这类重复并消耗掉对应服务器条目，
+  // 不再依赖 5 秒时间桶（桶边界会导致偶发去重失败、消息成双）
+  const remotesByContent = new Map<string, Msg[]>();
+  for (const m of remote) {
+    const ck = contentKeyOf(m);
+    const arr = remotesByContent.get(ck);
+    if (arr) arr.push(m);
+    else remotesByContent.set(ck, [m]);
+  }
+  for (const m of [...remote, ...local]) {
+    if (m.id?.startsWith("local-")) {
+      const cands = remotesByContent.get(contentKeyOf(m));
+      const idx = cands?.findIndex((r) => Math.abs(r.at - m.at) < 5000) ?? -1;
+      if (idx >= 0) {
+        cands!.splice(idx, 1); // 消耗掉配对的服务器条目
+        continue; // 本地占位条目，服务器版本已存在，跳过
+      }
     }
+    const key = m.id ?? `${m.at}:${m.from}:${m.text ?? m.imageUrl ?? ""}`;
     byKey.set(key, m.id ? m : { ...m, id: key });
   }
   return [...byKey.values()].sort((a, b) => a.at - b.at);
@@ -252,7 +256,8 @@ export default function AdminApp() {
           next = [...prev];
           next[idx] = { ...next[idx], ...summary };
         } else {
-          next = [{ ...summary, title: "新对话" }, ...prev];
+          // 新会话：沿用服务器已生成的标题（最新用户文本消息）
+          next = [{ ...summary }, ...prev];
         }
         next.sort((a, b) => b.lastAt - a.lastAt);
         localStorage.setItem("chattt-admin:sessions", JSON.stringify(next));
@@ -274,11 +279,11 @@ export default function AdminApp() {
         await resolveImageUrl(message.imageUrl);
       }
 
-      // 更新该会话标题（首条用户消息：>10 字符截断加 ...，≤10 显示全文）
+      // 更新该会话标题（跟随最新的用户文本消息：>10 字符截断加 ...，≤10 显示全文）
       if (message.from === "user" && message.type === "text") {
         setSessions((prev) => {
           const idx = prev.findIndex((s) => s.id === sessionId);
-          if (idx < 0 || prev[idx].title !== "新对话") return prev;
+          if (idx < 0) return prev;
           const t = (message.text ?? "").trim();
           const title = t.length > 10 ? `${t.slice(0, 10)}...` : (t || "新对话");
           const next = [...prev];
