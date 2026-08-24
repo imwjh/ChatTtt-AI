@@ -765,7 +765,7 @@ export default function AdminApp() {
                         />
                       )}
                     </button>
-                    {/* 悬停显示的删除按钮（位置恒定，不随选中状态位移） */}
+                    {/* 删除按钮：桌面端悬停显示；移动端无 hover，常显 */}
                     <button
                       onClick={() => deleteSession(s.id)}
                       aria-label="删除会话"
@@ -774,6 +774,7 @@ export default function AdminApp() {
                         "text-muted-foreground hover:text-destructive hover:bg-sidebar-accent absolute end-1 z-10 hidden rounded-md p-1.5 group-hover/session:block",
                         activeId === s.id && "bg-sidebar-accent text-foreground",
                         collapsed && "!hidden",
+                        isMobile && "!block",
                       )}
                     >
                       <svg
