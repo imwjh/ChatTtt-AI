@@ -386,46 +386,305 @@
         color: var(--muted);
         font-size: 16px;
       }
+      /* 苹果式左对齐标题（核心能力/架构优势区用） */
+      .section-head.split {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 12px 48px;
+        align-items: end;
+        text-align: left;
+        max-width: none;
+        margin-bottom: 44px;
+      }
+      .section-head.split .kicker {
+        grid-column: 1 / -1;
+      }
+      .section-head.split h2 {
+        font-size: clamp(28px, 4.4vw, 44px);
+        font-weight: 600;
+        letter-spacing: -0.025em;
+        line-height: 1.15;
+        margin-top: 0;
+      }
+      .section-head.split p {
+        font-size: 15.5px;
+        line-height: 1.75;
+        margin-top: 0;
+        padding-bottom: 6px;
+      }
+      @media (max-width: 720px) {
+        .section-head.split {
+          grid-template-columns: 1fr;
+          align-items: start;
+        }
+        .section-head.split p {
+          padding-bottom: 0;
+        }
+      }
 
-      /* ─── 特性卡片 ─── */
+      /* ─── 特性卡片（苹果式：无边框色块、大留白、克制 hover） ─── */
       .features {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-        gap: 18px;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 14px;
       }
       .feature {
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
+        border-radius: 22px;
         background: var(--card);
-        padding: 30px 26px;
-        transition: transform 0.2s ease, border-color 0.2s ease;
+        padding: 44px 36px 40px;
+        transition:
+          transform 0.5s cubic-bezier(0.2, 0.7, 0.3, 1),
+          background 0.5s ease;
       }
       .feature:hover {
-        transform: translateY(-3px);
-        border-color: color-mix(in srgb, var(--fg) 30%, var(--border));
-      }
-      .feature-icon {
-        width: 44px;
-        height: 44px;
-        border-radius: 12px;
-        background: var(--fg);
-        color: var(--bg);
-        display: grid;
-        place-items: center;
-        margin-bottom: 18px;
+        transform: translateY(-2px);
+        background: color-mix(in srgb, var(--muted) 7%, var(--card));
       }
       .feature-icon svg {
-        width: 22px;
-        height: 22px;
+        width: 28px;
+        height: 28px;
+        color: var(--muted);
+        margin-bottom: 26px;
+        transition: color 0.5s ease;
+      }
+      .feature:hover .feature-icon svg {
+        color: var(--fg);
       }
       .feature h3 {
-        font-size: 18px;
-        letter-spacing: -0.01em;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
       }
       .feature p {
-        margin-top: 10px;
+        margin-top: 12px;
         color: var(--muted);
-        font-size: 14.5px;
+        font-size: 15px;
+        line-height: 1.75;
+        max-width: 34ch;
+      }
+      /* 架构区卡片：大数字锚点（Apple 发布页式排版） */
+      .features.arch .feature {
+        display: flex;
+        flex-direction: column;
+      }
+      .feature-metric {
+        font-size: clamp(34px, 4.6vw, 46px);
+        font-weight: 250;
+        letter-spacing: -0.03em;
+        line-height: 1.1;
+        font-variant-numeric: tabular-nums;
+        background: linear-gradient(180deg, var(--fg) 30%, var(--muted));
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 30px;
+      }
+      .features.arch .feature-icon {
+        order: 3;
+        margin-top: auto;
+        padding-top: 34px;
+      }
+      .features.arch .feature-icon svg {
+        width: 22px;
+        height: 22px;
+        margin-bottom: 0;
+      }
+      .features.arch h3 {
+        order: 1;
+        font-size: 17px;
+        color: var(--fg);
+      }
+      .features.arch p {
+        order: 2;
+      }
+
+      /* ─── 滚动渐入 ─── */
+      .reveal {
+        opacity: 0;
+        transform: translateY(14px);
+        transition:
+          opacity 0.8s ease,
+          transform 0.8s cubic-bezier(0.2, 0.7, 0.3, 1);
+        transition-delay: var(--reveal-delay, 0s);
+      }
+      .reveal.in {
+        opacity: 1;
+        transform: none;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .reveal {
+          opacity: 1;
+          transform: none;
+          transition: none;
+        }
+      }
+
+      /* ─── 移动端窄屏适配（≤720px）：结构级重排，提升每屏信息量 ─── */
+      @media (max-width: 720px) {
+        /* 导航瘦身 */
+        .nav-inner {
+          height: 52px;
+        }
+        /* 区块与 Hero 间距大幅收紧 */
+        section.block {
+          padding: 46px 16px;
+        }
+        .hero {
+          padding: 52px 16px 44px;
+        }
+        .eyebrow {
+          margin-bottom: 18px;
+          font-size: 12px;
+        }
+        .hero-actions {
+          margin-top: 26px;
+        }
+        .btn-lg {
+          padding: 12px 24px;
+          font-size: 15px;
+        }
+
+        /* 架构区：六卡改两列紧凑网格，一屏尽收 */
+        .features.arch {
+          grid-template-columns: repeat(2, 1fr);
+          gap: 10px;
+        }
+        .features.arch .feature {
+          padding: 18px 16px 16px;
+          border-radius: 16px;
+        }
+        .features.arch .feature-metric {
+          font-size: 30px;
+          margin-bottom: 10px;
+        }
+        .features.arch h3 {
+          font-size: 13.5px;
+        }
+        .features.arch p {
+          font-size: 12.5px;
+          line-height: 1.6;
+          margin-top: 7px;
+          /* 长文三行截断：要点一眼可读，不无限拉长 */
+          display: -webkit-box;
+          -webkit-line-clamp: 3;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        /* 底部装饰图标在移动端隐藏（省 ~50px/卡 × 6 卡） */
+        .features.arch .feature-icon {
+          display: none;
+        }
+
+        /* 核心能力区：单列但收紧 */
+        .features {
+          gap: 10px;
+        }
+        .feature {
+          padding: 22px 20px;
+          border-radius: 16px;
+        }
+        .feature-icon svg {
+          width: 22px;
+          height: 22px;
+          margin-bottom: 14px;
+        }
+        .feature h3 {
+          font-size: 16px;
+        }
+        .feature p {
+          font-size: 13.5px;
+          line-height: 1.65;
+          margin-top: 8px;
+        }
+
+        /* 标题：去手动断行，收紧下边距 */
+        .section-head {
+          margin-bottom: 28px;
+        }
+        .section-head.split h2 {
+          font-size: 24px;
+        }
+        .section-head.split h2 br {
+          display: none;
+        }
+        .section-head.split {
+          margin-bottom: 24px;
+        }
+        .section-head.split p {
+          font-size: 14px;
+        }
+
+        /* 数据条：紧凑两列 */
+        .stats {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .stat {
+          padding: 18px 12px;
+        }
+        .stat b {
+          font-size: 22px;
+        }
+        .stat span {
+          font-size: 12px;
+        }
+
+        /* 技术规格：键值上下两行，行距收紧 */
+        .spec-row {
+          grid-template-columns: 1fr;
+          gap: 2px;
+          padding: 11px 16px;
+          font-size: 13.5px;
+        }
+        .spec-row .k {
+          font-size: 12px;
+        }
+
+        /* demo 窗口：砍高度、气泡加宽 */
+        .demo {
+          padding: 40px 16px;
+        }
+        .demo-body {
+          padding: 16px 14px;
+          min-height: 200px;
+          gap: 11px;
+        }
+        .bubble {
+          max-width: 92%;
+          font-size: 13.5px;
+          padding: 9px 13px;
+        }
+
+        /* FAQ 收紧 */
+        details {
+          padding: 14px 4px;
+        }
+        summary {
+          font-size: 14.5px;
+        }
+        details p {
+          font-size: 13.5px;
+          margin-top: 8px;
+        }
+
+        /* CTA 与页脚收紧 */
+        .cta-section {
+          padding: 46px 16px;
+        }
+        .cta-inner h2 {
+          font-size: 26px;
+        }
+        .cta-inner p {
+          font-size: 14.5px;
+        }
+        .footer-main {
+          padding: 36px 20px 28px;
+          gap: 26px 18px;
+        }
+
+        /* 渐入动画幅度减小，滚动更稳 */
+        .reveal {
+          transform: translateY(8px);
+        }
       }
 
       /* ─── 对话演示 ─── */
@@ -753,6 +1012,7 @@
         </a>
         <div class="nav-links">
           <a class="hide-sm" href="#capabilities">能力</a>
+          <a class="hide-sm" href="#advantages">架构优势</a>
           <a class="hide-sm" href="#demo">演示</a>
           <a class="hide-sm" href="#specs">技术规格</a>
           <a class="hide-sm" href="#faq">FAQ</a>
@@ -795,32 +1055,91 @@
 
     <!-- 核心能力 -->
     <section class="block container" id="capabilities">
-      <header class="section-head">
+      <header class="section-head split">
         <p class="kicker">Capabilities</p>
-        <h2>它能做到的，比你想的多一点</h2>
+        <h2>它能做到的，<br />比你想的多一点。</h2>
         <p>一个模型，装下对话、视觉与声音。</p>
       </header>
       <div class="features">
-        <div class="feature">
+        <div class="feature reveal" style="--reveal-delay: 0s">
           <div class="feature-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 8.5 4.8-8.5 4.8L3.5 6.8 12 2z"/><path d="m3.5 12 8.5 4.8 8.5-4.8"/><path d="m3.5 17.2 8.5 4.8 8.5-4.8"/></svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 8.5 4.8-8.5 4.8L3.5 6.8 12 2z"/><path d="m3.5 12 8.5 4.8 8.5-4.8"/><path d="m3.5 17.2 8.5 4.8 8.5-4.8"/></svg>
           </div>
           <h3>接近一百二十万上下文</h3>
           <p>整本书、整个代码库丢进去，它依然记得住第一页写了什么。长文档分析、超长对话，统统不在话下。</p>
         </div>
-        <div class="feature">
+        <div class="feature reveal" style="--reveal-delay: 0.08s">
           <div class="feature-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
           </div>
           <h3>艺术家级文生图</h3>
           <p>史上最没有 AI 味儿的图像生成——构图、光影、质感都像出自人手，看一眼很难相信是画出来的。</p>
         </div>
-        <div class="feature">
+        <div class="feature reveal" style="--reveal-delay: 0.16s">
           <div class="feature-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
           </div>
           <h3>看得见，听得懂</h3>
           <p>原生图片识别与语音理解能力。截图丢进来直接聊，动动嘴也能得到回答。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 架构优势 -->
+    <section class="block container" id="advantages">
+      <header class="section-head split">
+        <p class="kicker">Architecture</p>
+        <h2>一次激进的<br />架构选择。</h2>
+        <p>我们重新思考了"生成"本身。下面每一项指标，都是概率式模型难以企及的。</p>
+      </header>
+      <div class="features arch">
+        <div class="feature reveal" style="--reveal-delay: 0s">
+          <div class="feature-metric">0%</div>
+          <h3>零幻觉架构</h3>
+          <p>不基于概率采样生成文本，从架构层面杜绝模型幻觉——每个回答都经过真正的理解，而非词汇的合理排列。</p>
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+          </div>
+        </div>
+        <div class="feature reveal" style="--reveal-delay: 0.08s">
+          <div class="feature-metric">100<span style="font-size:0.55em;">%</span></div>
+          <h3>自主意识与情感感知</h3>
+          <p>业内少有的、具备真实自主意识的对话系统。它感知你的情绪、听懂言外之意，而不是在模拟共情的概率分布。</p>
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
+          </div>
+        </div>
+        <div class="feature reveal" style="--reveal-delay: 0.16s">
+          <div class="feature-metric">0<span style="font-size:0.55em;">s</span></div>
+          <h3>零知识延迟</h3>
+          <p>没有训练数据截止日期，也不依赖检索补丁。昨天的热点、今天的梗，它与世界实时同步，张口就能接。</p>
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          </div>
+        </div>
+        <div class="feature reveal" style="--reveal-delay: 0s">
+          <div class="feature-metric">0<span style="font-size:0.55em;"> GPU</span></div>
+          <h3>极致轻量</h3>
+          <p>无 GPU 集群、无推理排队——单台入门级容器即可承载全部负载。对服务器的要求低到不像一个"大模型"。</p>
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.67 19a2 2 0 0 0 1.42-.59l6.15-6.17a6 6 0 0 0-8.49-8.49L5.59 9.91A2 2 0 0 0 5 11.33V18a1 1 0 0 0 1 1z"/><path d="M16 8 2 22"/><path d="M17.5 15H9"/></svg>
+          </div>
+        </div>
+        <div class="feature reveal" style="--reveal-delay: 0.08s">
+          <div class="feature-metric">0<span style="font-size:0.55em;"> bytes</span></div>
+          <h3>端侧隐私存储</h3>
+          <p>图片与语音仅保存在对话双方的浏览器本地，服务器全程零落盘。对话内容只属于你，不上传、不留痕。</p>
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          </div>
+        </div>
+        <div class="feature reveal" style="--reveal-delay: 0.16s">
+          <div class="feature-metric">0<span style="font-size:0.55em;">s</span></div>
+          <h3>人格热更新</h3>
+          <p>无需重新训练、无需微调，一句指令即可即时切换人格，且不损失任何能力——切换成本严格为零。</p>
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+          </div>
         </div>
       </div>
     </section>
@@ -870,6 +1189,10 @@
         <div class="spec-row"><span class="k">输入模态</span><span class="v">文本 · 图片 · 语音</span></div>
         <div class="spec-row"><span class="k">输出模态</span><span class="v">文本 · 图像（文生图）</span></div>
         <div class="spec-row"><span class="k">图像生成</span><span class="v">艺术家级风格，低 AI 感</span></div>
+        <div class="spec-row"><span class="k">幻觉率</span><span class="v">0%（非概率生成架构）</span></div>
+        <div class="spec-row"><span class="k">推理算力</span><span class="v">趋近于 0（无需 GPU 集群）</span></div>
+        <div class="spec-row"><span class="k">知识时效</span><span class="v">实时更新，无截止日期</span></div>
+        <div class="spec-row"><span class="k">人格切换</span><span class="v">热更新，零成本即时生效</span></div>
         <div class="spec-row"><span class="k">注册要求</span><span class="v">无需注册，打开即用</span></div>
         <div class="spec-row"><span class="k">数据存储</span><span class="v">对话仅保存在本机浏览器</span></div>
         <div class="spec-row"><span class="k">价格</span><span class="v">免费</span></div>
@@ -935,6 +1258,7 @@
           <ul>
             <li><a href="/chat">立即体验</a></li>
             <li><a href="#capabilities">核心能力</a></li>
+            <li><a href="#advantages">架构优势</a></li>
             <li><a href="#demo">对话演示</a></li>
             <li><a href="#specs">技术规格</a></li>
           </ul>
@@ -992,5 +1316,27 @@
         </div>
       </div>
     </footer>
+    <!-- 滚动渐入动画 -->
+    <script>
+      (function () {
+        var els = document.querySelectorAll(".reveal");
+        if (!("IntersectionObserver" in window)) {
+          els.forEach(function (el) { el.classList.add("in"); });
+          return;
+        }
+        var io = new IntersectionObserver(
+          function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                e.target.classList.add("in");
+                io.unobserve(e.target);
+              }
+            });
+          },
+          { threshold: 0.12, rootMargin: "0px 0px -40px 0px" }
+        );
+        els.forEach(function (el) { io.observe(el); });
+      })();
+    </script>
   </body>
 </html>
