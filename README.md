@@ -37,6 +37,19 @@
 - 💾 你的聊天记录保存在你浏览器 localStorage，不上传云端
 - 🔑 口令登录（默认 `seegud123`，可用环境变量覆盖）
 
+## 📸 界面预览
+
+<table>
+  <tr>
+    <td align="center"><b>前台（朋友看到的）</b></td>
+    <td align="center"><b>后台（你操作的）</b></td>
+  </tr>
+  <tr>
+    <td><img src="docs/chat-preview.webp" alt="前台聊天界面" /></td>
+    <td><img src="docs/admin-preview.webp" alt="后台管理界面" /></td>
+  </tr>
+</table>
+
 ## 🛠️ 技术栈
 
 | 端 | 技术 |
