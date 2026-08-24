@@ -23,14 +23,17 @@
 - 💬 实时收发消息（Socket.io），回复带打字机动画 + "AI 正在思考"指示点
 - 🤖 以假乱真的模型选择器与聊天界面
 - 🖼️ 发送图片：前端自动压缩到几百 KB，图片只存双方浏览器 IndexedDB，服务器不落盘
-- 🎤 语音输入（Web Speech API）
+- 🎤 语音消息：真实录音（MediaRecorder，最长 30s），音频同样只存双方浏览器 IndexedDB
 - 🌗 深色 / 浅色主题
 - 📝 会话本地持久化：新建、重命名、删除会话，刷新不丢
+- 🔌 断线重连自动补收：掉线期间漏掉的后台回复会在重连后自动补进对话，不丢消息
+- ⚠️ 后台无人在线时，前台显示与真实网络断连同款的错误提示（整蛊真实感 +1）
 
 **后台（给你用的）**
 - 👥 受害者列表：以其首条消息自动命名，绿点标记在线状态
 - 🔔 未读提醒：侧边栏折叠时新消息触发红点闪烁
 - 📂 侧边栏可折叠收起（状态持久化）
+- 💬 与前台互通：文字 / 图片 / 语音三种消息双向互发，访客"正在输入"实时可见
 - 💾 你的聊天记录保存在你浏览器 localStorage，不上传云端
 - 🔑 口令登录（默认 `seegud123`，可用环境变量覆盖）
 
@@ -40,7 +43,7 @@
 |---|---|
 | 前端 | React 19 · Vite · TypeScript · Tailwind CSS 4 · [@assistant-ui/react](https://www.assistant-ui.com/) |
 | 后端 | Node.js · Express 5 · Socket.io |
-| 图片存储 | 双方浏览器 IndexedDB（canvas 压缩至 ~280KB WebP） |
+| 媒体存储 | 图片/语音存双方浏览器 IndexedDB（图片 canvas 压缩至 ~280KB WebP，语音 WebM/Opus） |
 | 文字记录 | 各自浏览器 localStorage |
 
 > ⚠️ 注意：服务器只在内存中转消息，**重启后未送达的离线消息会丢失**；各端的聊天记录都存在各自的浏览器里。这是刻意为之的设计——不建数据库，零云端依赖。
@@ -51,12 +54,14 @@
 ChatTtt/
 ├── web/                # 前端（前台 + 后台双入口）
 │   ├── index.html      # 前台入口（给朋友的）
+│   ├── chat.html       # 聊天页入口（/chat）
 │   ├── admin.html      # 后台入口（给你的）
+│   ├── public/         # 静态资源（OG 图、robots.txt、sitemap.xml、llms.txt、隐私政策、服务条款）
 │   └── src/
 │       ├── App.tsx     # 前台主逻辑（Socket 接入、断线补收）
 │       ├── admin.tsx   # 后台主逻辑（多受害者切换、未读红点）
-│       ├── lib/image-store.ts        # IndexedDB 存储 + 图片压缩
-│       └── components/assistant-ui/  # 聊天 UI 组件（气泡、输入框等）
+│       ├── lib/image-store.ts        # IndexedDB 存储 + 图片压缩 + idb:// 引用解析
+│       └── components/assistant-ui/  # 聊天 UI 组件（气泡、输入框、录音按钮等）
 └── server/
     └── server.js       # Express + Socket.io 服务（内存中转）
 ```
@@ -198,7 +203,7 @@ Value: 你的口令（字母数字符号混搭，12 位以上，别用默认值�
 
 - 🌙 **15 分钟无访问自动休眠**，下次唤醒需 20~40 秒——朋友第一次打开慢属正常，先自己刷一遍热身
 - 😴 容器重启后服务器内存清空，**未送达的离线消息会丢失**（各端已收到的本地记录不受影响）
-- 💸 每月 750 小时免费时长，个人使用完全够
+- 💸 每月 750 小时免费实例时长 + 100 GB 流量，个人使用完全够
 
 ## ⚙️ 配置项（环境变量）
 
@@ -240,16 +245,16 @@ $env:PORT=4000; $env:ADMIN_TOKEN="my-secret"; node server.js
 
 快速方法：在项目根目录全局搜索 `hm.baidu.com`，删除所有匹配的 `<script>` 块即可。若想换成自己的统计，把其中的站点 ID 替换为你在[百度统计平台](https://tongji.baidu.com/)创建应用后获得的 ID。
 
-## 🖼️ 图片存储方案
+## 🖼️ 图片与语音存储方案
 
-本项目对图片做了「去服务器化」处理：
+本项目对图片和语音做了「去服务器化」处理：
 
 ```
-发送方选图 → canvas 压缩（最长边 1600px，WebP ≤280KB）
-         → 存入本端浏览器 IndexedDB
-         → socket 直传数据给对方（消息里只携带 idb://key 引用）
-接收方收到 → 存入自己的 IndexedDB → 渲染时解析为 blob URL
-服务器    → 仅内存中转，不写磁盘
+发送方选图/录音 → 图片 canvas 压缩（最长边 1600px，WebP ≤280KB）/ 语音 WebM
+              → 存入本端浏览器 IndexedDB
+              → socket 直传数据给对方（消息里只携带 idb://key 引用）
+接收方收到   → 存入自己的 IndexedDB → 渲染时解析为 blob URL
+服务器       → 仅内存中转，不写磁盘
 ```
 
 好处：localStorage 不膨胀、服务器无存储压力、换设备图片自然消失（聊天记录随浏览器走，不留把柄 🙂）。
@@ -257,7 +262,7 @@ $env:PORT=4000; $env:ADMIN_TOKEN="my-secret"; node server.js
 
 ## 🗺️ Roadmap
 
-- [ ] 部署上线（公网也能整，不止局域网）
+- [x] 部署上线（Render 免费部署，代码零改动，见上文「部署上线」）
 - [ ] 预设"AI 人格"快捷回复脚本
 - [ ] 消息撤回与已读回执
 

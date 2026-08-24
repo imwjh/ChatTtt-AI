@@ -196,7 +196,8 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
       return;
     }
 
-    // 语音消息（录音按钮产生）：从本端 IndexedDB 取出本体发送，无需等待回复
+    // 语音消息（录音按钮产生）：从本端 IndexedDB 取出本体发送。
+    // 与文字/图片一致：发完后同样挂起等待真人回复（思考动画 + 回复直接渲染，不整页刷新）
     const voicePart = (last?.content ?? []).find(
       (p) => (p as { type?: string; name?: string }).type === "data" &&
              (p as { name?: string }).name === "voice-message",
@@ -217,7 +218,7 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
         audioData: imageData,
         duration,
       });
-      return; // 语音不需要等待文字回复
+      // 不 return：继续走下面的等待回复流程
     }
 
     // 发送给后台：每张图片单独一条消息
@@ -244,7 +245,8 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
     if (textPart && textPart.text.trim()) {
       socket.emit("visitor:message", { type: "text", text: textPart.text });
     }
-    if (!textPart?.text?.trim() && !images.length) return;
+    // 语音也算已发送的消息（否则纯语音会被提前 return，无法进入等待回复）
+    if (!textPart?.text?.trim() && !images.length && !voicePart?.data) return;
 
     // 等待真人回复（流式：这里按整条接收；后台逐条发时前端自然分段）
     const reply = await new Promise<
