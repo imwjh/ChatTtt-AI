@@ -17,6 +17,7 @@ import {
   SidebarInset,
   SidebarProvider,
 } from "@/components/ui/sidebar";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import {
   blobToDataUri,
@@ -147,6 +148,8 @@ export default function AdminApp() {
   const [flash, setFlash] = useState(0);
   const activeRef = useRef<string | null>(null);
   const typingTimerRef = useRef<number | undefined>(undefined);
+  // 窄屏（<768px，与用户端 Sheet 抽屉同一断点）下展开的侧边栏改为浮层覆盖
+  const isMobile = useIsMobile();
 
   activeRef.current = activeId;
 
@@ -415,6 +418,11 @@ export default function AdminApp() {
   function openSession(id: string) {
     setActiveId(id);
     activeRef.current = id;
+    // 窄屏浮层模式下选中会话后收起侧边栏，露出聊天区
+    if (isMobile) {
+      setCollapsed(true);
+      localStorage.setItem("chattt-admin:sidebar-collapsed", "1");
+    }
     setVisitorTyping(false);
     // 打开会话即清除未读
     setUnread((prev) => {
@@ -647,12 +655,24 @@ export default function AdminApp() {
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <SidebarProvider>
-        <div className="flex h-dvh w-full pr-0.5">
-          {/* 左侧：访客列表（可折叠） */}
+        <div className="relative flex h-dvh w-full pr-0.5">
+          {/* 窄屏浮层模式：展开时遮罩，点击收起 */}
+          {isMobile && !collapsed && (
+            <div
+              aria-hidden
+              onClick={() => {
+                setCollapsed(true);
+                localStorage.setItem("chattt-admin:sidebar-collapsed", "1");
+              }}
+              className="absolute inset-0 z-20 bg-black/40"
+            />
+          )}
+          {/* 左侧：访客列表（可折叠；窄屏展开时为覆盖式抽屉） */}
           <aside
             className={cn(
               "border-border/60 bg-sidebar text-sidebar-foreground flex shrink-0 flex-col border-e transition-[width] duration-200",
               collapsed ? "w-14" : "w-64",
+              isMobile && !collapsed && "absolute inset-y-0 left-0 z-30 w-64 shadow-lg",
             )}
           >
             <div
