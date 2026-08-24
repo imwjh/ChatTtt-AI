@@ -693,6 +693,13 @@ export default function AdminApp() {
               )}
               {sessions.map((s) => {
                 const hasUnread = unread.has(s.id);
+                // 标题拆成「正文 + 省略号」两段：未读红点上标插在两者之间，
+                // 即贴在最后一个字符（截断时为 … 前那个字）的右上角
+                const ellipsisMatch = /(\.{3}|…)$/.exec(s.title);
+                const titleHead = ellipsisMatch
+                  ? s.title.slice(0, -ellipsisMatch[1].length)
+                  : s.title;
+                const titleEllipsis = ellipsisMatch ? ellipsisMatch[1] : "";
                 return (
                   <div
                     key={s.id}
@@ -716,13 +723,19 @@ export default function AdminApp() {
                       />
                       {!collapsed && (
                         <>
-                          <span className="min-w-0 flex-1 truncate">{s.title}</span>
-                          {hasUnread && (
-                            <span
-                              key={flash}
-                              className="animate-unread-flash size-1.5 shrink-0 rounded-full bg-red-500"
-                            />
-                          )}
+                          <span className="flex min-w-0 flex-1 items-baseline truncate">
+                            {titleHead}
+                            {hasUnread && (
+                              <span
+                                key={flash}
+                                aria-label="未读"
+                                className="animate-unread-flash mx-0.5 inline-block size-1.5 shrink-0 translate-y-[-4px] rounded-full bg-red-500"
+                              />
+                            )}
+                            {titleEllipsis && (
+                              <span className="shrink-0">{titleEllipsis}</span>
+                            )}
+                          </span>
                         </>
                       )}
                       {collapsed && hasUnread && (
