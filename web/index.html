@@ -1065,7 +1065,7 @@ footer{ padding:clamp(4rem,8vw,6rem) var(--pad) 2.5rem; border-top:1px solid var
       if(session !== demoSession) return;
       const msg = document.createElement('div');
       msg.className = 'msg' + (m.role === 'user' ? ' user' : '');
-      if(m.role === 'ai'){
+      if(m.role !== 'user'){
         const who = document.createElement('div');
         who.className = 'who';
         const img = document.createElement('img');
