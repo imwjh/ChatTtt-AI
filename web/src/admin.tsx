@@ -652,14 +652,16 @@ export default function AdminApp() {
           >
             <div
               className={cn(
-                "border-b p-2",
-                collapsed ? "flex flex-col items-center gap-1" : "flex items-center justify-between",
+                "border-b p-2 flex items-center justify-between overflow-hidden",
+                collapsed && "justify-center",
               )}
             >
               {!collapsed && (
-                <span className="px-1 text-sm font-semibold">访客会话</span>
+                <span className="whitespace-nowrap px-1 text-sm font-semibold">
+                  访客会话
+                </span>
               )}
-              <div className={cn("flex items-center", collapsed && "flex-col gap-1")}>
+              <div className="flex items-center">
                 {/* 折叠开关；折叠且有未读时图标右上角红点 */}
                 <button
                   onClick={toggleCollapsed}
