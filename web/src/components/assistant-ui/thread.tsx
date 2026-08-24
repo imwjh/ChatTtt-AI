@@ -395,8 +395,8 @@ const VoiceBubble: DataMessagePartComponent<"voice-message"> = ({ data }) => {
                 <rect x="14" y="5" width="4" height="14" rx="1" />
               </svg>
             ) : (
-              <svg viewBox="0 0 24 24" className="size-4 -translate-x-[1px]" fill="currentColor">
-                <path d="M8 5.5v13l11-6.5-11-6.5z" />
+              <svg viewBox="0 0 24 24" className="size-4" fill="currentColor" stroke="currentColor" stroke-width="4" stroke-linejoin="round" stroke-linecap="round">
+                <path d="M9 7v10.5l8.5-5.25L9 7z" />
               </svg>
             )}
           </span>
@@ -568,11 +568,15 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
   </div>
 );
 
-const AssistantImagePart: ImageMessagePartComponent = (part) => (
-  <div data-slot="aui_assistant-message-image" className="py-1">
-    <IdbAwareImage {...part} />
-  </div>
-);
+const AssistantImagePart: ImageMessagePartComponent = (part) => {
+  // TODO: 调试日志，修复后删除
+  console.log("[img-debug] AssistantImagePart", JSON.stringify(part));
+  return (
+    <div data-slot="aui_assistant-message-image" className="py-1">
+      <IdbAwareImage {...part} />
+    </div>
+  );
+};
 
 const DefaultAssistantMessage: FC = () => {
   // 正在运行且还没有任何文本内容 → 显示思考动画

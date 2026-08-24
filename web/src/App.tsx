@@ -16,10 +16,13 @@ import { UploadImageAttachmentAdapter } from "@/components/assistant-ui/upload-i
 import {
   blobToDataUri,
   dataUriToBlob,
+  expandIdbRefs,
   getImage,
   idbKeyOf,
   isIdbRef,
   putImage,
+  resolveImageUrl,
+  shrinkObjectUrls,
 } from "@/lib/image-store";
 import {
   ModelSelector,
@@ -294,16 +297,17 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
 
     // 打字机效果输出真人回复
     if (reply.type === "image") {
-      // 图片本体落本端 IndexedDB，消息里存 idb:// 引用
+      // 图片本体落本端 IndexedDB；显示用 blob URL（可通过 assistant-ui 校验）
       let ref = reply.imageUrl ?? "";
       if (reply.imageKey && reply.imageData) {
         await putImage(reply.imageKey, dataUriToBlob(reply.imageData));
         ref = `idb://${reply.imageKey}`;
       }
+      const displayUrl = await resolveImageUrl(ref);
       yield {
         content: [
           { type: "text", text: "" },
-          { type: "image", image: ref },
+          { type: "image", image: displayUrl },
         ],
       };
       return;
@@ -351,8 +355,17 @@ const TITLE_GENERATOR: TitleGenerationAdapter = {
 /** 浏览器本地存储适配器：会话与消息持久化，刷新不丢 */
 const storageAdapter = createLocalStorageAdapter({
   storage: {
-    getItem: async (key) => localStorage.getItem(key),
-    setItem: async (key, value) => localStorage.setItem(key, value),
+    // 读取时把 idb:// 引用展开成 blob URL；写入时把 blob URL 还原为 idb:// 引用
+    getItem: async (key) => {
+      const raw = localStorage.getItem(key);
+      if (!raw || key.startsWith("chattt:messages:")) {
+        return raw ? await expandIdbRefs(raw) : raw;
+      }
+      return raw;
+    },
+    setItem: async (key, value) => {
+      localStorage.setItem(key, shrinkObjectUrls(value));
+    },
     removeItem: async (key) => localStorage.removeItem(key),
   },
   prefix: "chattt:",

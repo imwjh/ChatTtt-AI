@@ -21,10 +21,12 @@ import { cn } from "@/lib/utils";
 import {
   blobToDataUri,
   dataUriToBlob,
+  expandIdbRefsSync,
   getImage,
   idbKeyOf,
   isIdbRef,
   putImage,
+  resolveImageUrl,
 } from "@/lib/image-store";
 
 type Msg = {
@@ -41,8 +43,7 @@ type Msg = {
   at: number;
 };
 
-/** 把消息转成本地线程渲染的 content parts */
-function msgToContent(m: Pick<Msg, "type" | "text" | "imageUrl" | "audioKey" | "duration">) {
+function msgToContentParts(m: Pick<Msg, "type" | "text" | "imageUrl" | "audioKey" | "duration">) {
   if (m.type === "image" && m.imageUrl) {
     return [{ type: "image" as const, image: m.imageUrl }];
   }
@@ -57,6 +58,11 @@ function msgToContent(m: Pick<Msg, "type" | "text" | "imageUrl" | "audioKey" | "
     ];
   }
   return [{ type: "text" as const, text: m.text ?? "" }];
+}
+
+/** 同上，并把已缓存的 idb:// 引用替换为 blob URL（渲染可用） */
+function msgToContent(m: Pick<Msg, "type" | "text" | "imageUrl" | "audioKey" | "duration">) {
+  return JSON.parse(expandIdbRefsSync(JSON.stringify(msgToContentParts(m))));
 }
 
 type SessionSummary = {
@@ -154,11 +160,15 @@ export default function AdminApp() {
             // 图片/语音本体落 IndexedDB，剥除传输用 dataURI 后再合并
             for (const m of s.messages) {
               if (m.imageKey && m.imageData) {
-                void putImage(m.imageKey, dataUriToBlob(m.imageData));
+                void putImage(m.imageKey, dataUriToBlob(m.imageData)).then(() =>
+                  resolveImageUrl(`idb://${m.imageKey}`).catch(() => undefined),
+                );
                 m.imageUrl = `idb://${m.imageKey}`;
               }
               if (m.audioKey && m.audioData) {
-                void putImage(m.audioKey, dataUriToBlob(m.audioData));
+                void putImage(m.audioKey, dataUriToBlob(m.audioData)).then(() =>
+                  resolveImageUrl(`idb://${m.audioKey}`).catch(() => undefined),
+                );
                 m.imageUrl = `idb://${m.audioKey}`;
               }
             }
@@ -208,10 +218,12 @@ export default function AdminApp() {
       if (message.imageKey && message.imageData) {
         await putImage(message.imageKey, dataUriToBlob(message.imageData));
         message.imageUrl = `idb://${message.imageKey}`;
+        await resolveImageUrl(message.imageUrl);
       }
       if (message.audioKey && message.audioData) {
         await putImage(message.audioKey, dataUriToBlob(message.audioData));
         message.imageUrl = `idb://${message.audioKey}`;
+        await resolveImageUrl(message.imageUrl);
       }
 
       // 更新该会话标题（首条用户消息）
@@ -265,10 +277,12 @@ export default function AdminApp() {
           if (m.imageKey && m.imageData) {
             await putImage(m.imageKey, dataUriToBlob(m.imageData));
             m.imageUrl = `idb://${m.imageKey}`;
+            await resolveImageUrl(m.imageUrl).catch(() => undefined);
           }
           if (m.audioKey && m.audioData) {
             await putImage(m.audioKey, dataUriToBlob(m.audioData));
             m.imageUrl = `idb://${m.audioKey}`;
+            await resolveImageUrl(m.imageUrl).catch(() => undefined);
           }
         }),
       );
@@ -379,6 +393,10 @@ export default function AdminApp() {
         imageUrl = raw;
       } else {
         imageUrl = raw;
+      }
+
+      if (imageUrl && isIdbRef(imageUrl)) {
+        await resolveImageUrl(imageUrl).catch(() => undefined);
       }
 
       const msg: Msg = {

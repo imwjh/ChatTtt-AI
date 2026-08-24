@@ -57,6 +57,8 @@ export const idbKeyOf = (ref: string) => ref.slice("idb://".length);
 
 // objectURL 会话级缓存：同一张图多处引用只创建一次
 const objUrlCache = new Map<string, string>();
+// objectURL → idb:// 引用的反查表（localStorage 持久化时还原用）
+const urlToRef = new Map<string, string>();
 
 /** 把任意图片引用解析成 <img src> 可用的 URL；找不到时抛错 */
 export async function resolveImageUrl(ref: string): Promise<string> {
@@ -68,7 +70,45 @@ export async function resolveImageUrl(ref: string): Promise<string> {
   if (!blob) throw new Error(`IndexedDB 中没有图片 ${key}`);
   const url = URL.createObjectURL(blob);
   objUrlCache.set(key, url);
+  urlToRef.set(url, ref);
   return url;
+}
+
+/**
+ * 把文本中的 idb:// 引用批量展开为可直接渲染的 blob URL。
+ * 用于从 localStorage 加载消息后、交给 runtime 渲染之前。
+ */
+export async function expandIdbRefs(text: string): Promise<string> {
+  const matches = [...text.matchAll(/idb:\/\/[a-z0-9-]+/g)].map((m) => m[0]);
+  if (!matches.length) return text;
+  await Promise.all(
+    [...new Set(matches)].map((ref) =>
+      resolveImageUrl(ref).catch(() => undefined),
+    ),
+  );
+  let out = text;
+  for (const [url, ref] of urlToRef) {
+    if (out.includes(url)) out = out.split(url).join(ref);
+  }
+  return out;
+}
+
+/** 把文本中的 objectURL 还原为 idb:// 引用（写入 localStorage 前，避免存储膨胀与失效链接） */
+export function shrinkObjectUrls(text: string): string {
+  let out = text;
+  for (const [url, ref] of urlToRef) {
+    out = out.split(url).join(ref);
+  }
+  return out;
+}
+
+/** 同步版：把文本中已缓存解析过的 idb:// 引用替换为 blob URL */
+export function expandIdbRefsSync(text: string): string {
+  let out = text;
+  for (const [url, ref] of urlToRef) {
+    if (out.includes(ref)) out = out.split(ref).join(url);
+  }
+  return out;
 }
 
 export function blobToDataUri(blob: Blob): Promise<string> {
