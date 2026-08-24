@@ -328,7 +328,10 @@ function formatDuration(s: number) {
 const VoiceBubble: DataMessagePartComponent<"voice-message"> = ({ data }) => {
   const { ref = "", duration = 0 } = (data ?? {}) as VoiceData;
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [url, setUrl] = useState<string | undefined>(undefined);
+  const [url, setUrl] = useState<string | undefined>(
+    // 已展开的 blob URL 可直接用，无需解析
+    ref && !isIdbRef(ref) ? ref : undefined,
+  );
   const [failed, setFailed] = useState(false);
   const [playing, setPlaying] = useState(false);
 
@@ -568,15 +571,11 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
   </div>
 );
 
-const AssistantImagePart: ImageMessagePartComponent = (part) => {
-  // TODO: 调试日志，修复后删除
-  console.log("[img-debug] AssistantImagePart", JSON.stringify(part));
-  return (
-    <div data-slot="aui_assistant-message-image" className="py-1">
-      <IdbAwareImage {...part} />
-    </div>
-  );
-};
+const AssistantImagePart: ImageMessagePartComponent = (part) => (
+  <div data-slot="aui_assistant-message-image" className="py-1">
+    <IdbAwareImage {...part} />
+  </div>
+);
 
 const DefaultAssistantMessage: FC = () => {
   // 正在运行且还没有任何文本内容 → 显示思考动画

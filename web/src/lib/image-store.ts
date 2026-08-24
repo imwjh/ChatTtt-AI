@@ -86,9 +86,10 @@ export async function expandIdbRefs(text: string): Promise<string> {
       resolveImageUrl(ref).catch(() => undefined),
     ),
   );
+  // 注意方向：把文本里的 idb:// 引用替换成刚生成的 blob URL
   let out = text;
   for (const [url, ref] of urlToRef) {
-    if (out.includes(url)) out = out.split(url).join(ref);
+    if (out.includes(ref)) out = out.split(ref).join(url);
   }
   return out;
 }

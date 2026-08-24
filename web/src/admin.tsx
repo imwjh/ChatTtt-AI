@@ -92,8 +92,24 @@ function saveLocalMessages(sessionId: string, messages: Msg[]) {
 /** 合并本地与服务器历史（按 id / at 去重），按时间排序 */
 function mergeMessages(local: Msg[], remote: Msg[]): Msg[] {
   const byKey = new Map<string, Msg>();
+  const contentKeyOf = (m: Msg) =>
+    `${m.from}:${m.type}:${m.text ?? m.imageUrl ?? m.audioKey ?? ""}`;
+  // 服务器回显可能与本地自发记录内容一致（本地 id 是 local-xxx）：
+  // 用「内容键 + 时间」识别这类重复，仅去掉紧跟其后的同内容本地占位条目，
+  // 避免误删访客真正连发的重复消息
+  const remoteKeys = new Map(
+    remote.map((m) => [contentKeyOf(m) + "|" + Math.round(m.at / 5000), m]),
+  );
   for (const m of [...local, ...remote]) {
     const key = m.id ?? `${m.at}:${m.from}:${m.text ?? m.imageUrl ?? ""}`;
+    const ck = contentKeyOf(m) + "|" + Math.round(m.at / 5000);
+    if (
+      m.id?.startsWith("local-") &&
+      remoteKeys.has(ck) &&
+      Math.abs(remoteKeys.get(ck)!.at - m.at) < 5000
+    ) {
+      continue; // 本地占位条目，服务器版本已存在，跳过
+    }
     byKey.set(key, m.id ? m : { ...m, id: key });
   }
   return [...byKey.values()].sort((a, b) => a.at - b.at);
@@ -323,16 +339,32 @@ export default function AdminApp() {
       next.delete(id);
       return next;
     });
-    // 本地记录优先展示
+    // 本地记录优先展示：先预热图片缓存（idb:// → blob URL），再交给渲染层
     const local = loadLocalMessages(id);
+    void Promise.all(
+      local.map((m) =>
+        m.imageUrl && isIdbRef(m.imageUrl)
+          ? resolveImageUrl(m.imageUrl).catch(() => undefined)
+          : undefined,
+      ),
+    ).then(() => {
+      // 仅在用户仍停留在该会话时更新（切换快时避免串台）
+      if (activeRef.current !== id) return;
+      setMessages(
+        local.map((m) => ({
+          role: m.from === "user" ? ("user" as const) : ("assistant" as const),
+          content: msgToContent(m),
+        })),
+      );
+    });
+    // 先用文本消息占位渲染，避免空白
     setMessages(
-      local.map((m) => ({
-        role: m.from === "user" ? ("user" as const) : ("assistant" as const),
-        content:
-          m.type === "image" && m.imageUrl
-            ? [{ type: "image" as const, image: m.imageUrl }]
-            : [{ type: "text" as const, text: m.text ?? "" }],
-      })),
+      local
+        .filter((m) => m.type === "text")
+        .map((m) => ({
+          role: m.from === "user" ? ("user" as const) : ("assistant" as const),
+          content: msgToContent(m),
+        })),
     );
     // 再向服务器拉全量历史合并（覆盖管理端离线期间漏掉的消息）
     socketRef.current?.emit("admin:history", { sessionId: id });
@@ -414,11 +446,12 @@ export default function AdminApp() {
         ...(isIdbRef(raw) ? { imageKey, imageData } : { imageUrl }),
       });
 
+      // 立即显示：必须用展开后的 blob URL（idb:// 会被 assistant-ui 丢弃）
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: [{ type: "image", image: raw }],
+          content: msgToContent(msg),
         },
       ]);
       const local = loadLocalMessages(sessionId);
