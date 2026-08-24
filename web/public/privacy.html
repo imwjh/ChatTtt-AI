@@ -1,183 +1,262 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>隐私政策 · ChatTtt AI</title>
-    <style>
-      :root {
-        --bg: #ffffff;
-        --fg: #22222a;
-        --muted: #6b6b76;
-        --border: #e6e6ea;
-        --card: #fafafa;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #131317;
-          --fg: #f2f2f4;
-          --muted: #9a9aa4;
-          --border: #2a2a32;
-          --card: #1a1a20;
-        }
-      }
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body {
-        font-family: Outfit, Manrope, -apple-system, BlinkMacSystemFont, "Segoe UI",
-          "PingFang SC", "Microsoft YaHei", sans-serif;
-        background: var(--bg);
-        color: var(--fg);
-        line-height: 1.85;
-        -webkit-font-smoothing: antialiased;
-      }
-      nav {
-        position: sticky; top: 0; z-index: 10;
-        backdrop-filter: blur(12px);
-        background: color-mix(in srgb, var(--bg) 82%, transparent);
-        border-bottom: 1px solid var(--border);
-      }
-      .nav-inner {
-        max-width: 860px; margin-inline: auto; padding-inline: 24px;
-        display: flex; align-items: center; justify-content: space-between; height: 60px;
-      }
-      .logo {
-        display: flex; align-items: center; gap: 9px;
-        font-weight: 700; font-size: 16px; text-decoration: none; color: var(--fg);
-      }
-      .logo svg { width: 18px; height: 18px; }
-      .back { font-size: 14px; color: var(--muted); text-decoration: none; }
-      .back:hover { color: var(--fg); }
-      main { max-width: 760px; margin-inline: auto; padding: 56px 24px 96px; }
-      h1 { font-size: clamp(28px, 4vw, 40px); letter-spacing: -0.02em; }
-      .updated { margin-top: 10px; color: var(--muted); font-size: 14px; }
-      .toc {
-        margin: 30px 0; padding: 20px 24px;
-        border: 1px solid var(--border); border-radius: 14px; background: var(--card);
-      }
-      .toc b { font-size: 14px; letter-spacing: 0.05em; color: var(--muted); }
-      .toc ol { margin: 10px 0 0 18px; font-size: 14.5px; }
-      .toc a { color: inherit; text-decoration: none; }
-      .toc a:hover { text-decoration: underline; }
-      h2 {
-        font-size: 21px; margin: 44px 0 14px; letter-spacing: -0.01em;
-        padding-top: 12px; border-top: 1px solid var(--border);
-      }
-      p, li { font-size: 15.5px; color: color-mix(in srgb, var(--fg) 86%, var(--muted)); }
-      ul, ol { padding-left: 22px; margin: 10px 0; }
-      li { margin-block: 4px; }
-      strong { color: var(--fg); }
-      .note {
-        margin: 18px 0; padding: 14px 18px;
-        border-left: 3px solid var(--muted);
-        background: var(--card); border-radius: 0 10px 10px 0;
-        font-size: 14.5px; color: var(--muted);
-      }
-    </style>
-      <!-- Baidu Analytics -->
-    <script>
-      var _hmt = _hmt || [];
-      (function () {
-        var hm = document.createElement("script");
-        hm.src = "https://hm.baidu.com/hm.js?6db19609f648c8ad155977594d8967fd";
-        var s = document.getElementsByTagName("script")[0];
-        s.parentNode.insertBefore(hm, s);
-      })();
-    </script>
-  </head>
-  <body>
-    <nav>
-      <div class="nav-inner">
-        <a class="logo" href="/">
-          <img src="/favicon.svg" alt="ChatTtt AI Logo" style="width:18px;height:18px;object-fit:contain;" />
-          ChatTtt AI
-        </a>
-        <a class="back" href="/">← 返回首页</a>
-      </div>
-    </nav>
+<head>
+<meta charset="UTF-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>隐私政策 · ChatTtt AI</title>
+<meta name="description" content="ChatTtt AI 隐私政策：我们不收集个人身份信息，对话仅保存在你的浏览器本地，服务器零落盘。">
 
-    <main>
-      <h1>隐私政策</h1>
-      <p class="updated">生效日期：2026 年 8 月 24 日</p>
+<!-- 字体：与落地页一致 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=IBM+Plex+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-      <p>
-        ChatTtt AI（以下简称“本服务”）由神秘的 ChatTtt 团队（以下简称“我们”）提供。我们非常重视你的隐私。本政策说明当你使用本服务时，哪些信息会被处理、如何被处理，以及你拥有哪些控制权。请在使用前仔细阅读。
-      </p>
+<style>
+:root{
+  --paper: #F6F4EE;
+  --ink:   #161513;
+  --ink-60: rgba(22,21,19,.62);
+  --ink-40: rgba(22,21,19,.42);
+  --line:  rgba(22,21,19,.16);
+  --serif: "Cormorant Garamond","Noto Serif SC","Songti SC",serif;
+  --mono:  "IBM Plex Mono", ui-monospace, monospace;
+  --pad:   clamp(1.25rem, 5vw, 4.5rem);
+}
+*{ margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+body{
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-weight: 400;
+  letter-spacing: .02em;
+  line-height: 2;
+  -webkit-font-smoothing: antialiased;
+}
+::selection{ background: var(--ink); color: var(--paper); }
+a{ color: inherit; text-decoration: none; }
+img{ display:block; }
+::-webkit-scrollbar{ width:4px; }
+::-webkit-scrollbar-track{ background:var(--paper); }
+::-webkit-scrollbar-thumb{ background:var(--ink); }
 
-      <div class="toc">
-        <b>目录</b>
-        <ol>
-          <li><a href="#collect">我们收集哪些信息</a></li>
-          <li><a href="#local">本地存储说明</a></li>
-          <li><a href="#transit">消息传输方式</a></li>
-          <li><a href="#image">图片的处理</a></li>
-          <li><a href="#cookie">Cookie 与类似技术</a></li>
-          <li><a href="#third">第三方服务</a></li>
-          <li><a href="#children">未成年人</a></li>
-          <li><a href="#security">数据安全</a></li>
-          <li><a href="#rights">你的权利</a></li>
-          <li><a href="#changes">政策变更</a></li>
-        </ol>
-      </div>
+/* 纸张噪点 */
+.page-noise{
+  position:fixed; inset:0; z-index:9000; pointer-events:none; opacity:.035;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
 
-      <h2 id="collect">一、我们收集哪些信息</h2>
-      <p><strong>我们不要求注册，不收集手机号、邮箱、姓名等任何个人身份信息。</strong>使用本服务不需要创建账户。</p>
+/* 导航 */
+nav{
+  position:sticky; top:0; z-index:1000;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0 var(--pad); height:72px;
+  background:rgba(246,244,238,.88); backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);
+}
+.nav-brand{
+  display:flex; align-items:center; gap:.7rem;
+  font-weight:600; font-size:1.05rem; letter-spacing:.04em;
+}
+.nav-brand img{ width:22px; height:22px; filter:grayscale(100%); }
+.back-link{
+  font-family:var(--mono); font-size:.7rem; letter-spacing:.28em;
+  color:var(--ink-60); padding:.4rem 0; position:relative;
+}
+.back-link::after{
+  content:""; position:absolute; left:0; bottom:0; width:100%; height:1px;
+  background:var(--ink); transform:scaleX(0); transform-origin:right; transition:transform .45s cubic-bezier(.77,0,.18,1);
+}
+.back-link:hover::after{ transform:scaleX(1); transform-origin:left; }
 
-      <h2 id="local">二、本地存储说明</h2>
-      <p>为了实现“刷新页面后对话记录不丢失”等功能，以下数据<strong>仅保存在你自己的浏览器中</strong>：</p>
-      <ul>
-        <li><strong>对话记录</strong>：通过浏览器 localStorage 保存在你的设备上；</li>
-        <li><strong>图片</strong>：通过浏览器 IndexedDB 保存在你的设备上；</li>
-        <li><strong>偏好设置</strong>：如主题模式、侧边栏折叠状态等。</li>
-      </ul>
-      <p>
-        这些数据与你的浏览器绑定，我们无法访问，也不会同步到任何云端。清除浏览器数据或更换设备后，这些数据将不可恢复，请自行知悉。
-      </p>
+/* 正文版心 */
+main{ max-width:800px; margin:0 auto; padding:clamp(3rem,7vw,5.5rem) var(--pad) clamp(5rem,9vw,8rem); }
 
-      <h2 id="transit">三、消息传输方式</h2>
-      <p>
-        当你发送一条消息时，消息内容会经由我们的服务器<strong>实时转发</strong>给正在处理该会话的客服端。需要特别说明的是：
-      </p>
-      <ul>
-        <li>消息仅保存在服务器内存中，用于在线转发；</li>
-        <li>我们<strong>不对消息做持久化存储</strong>，不写入任何数据库或磁盘文件；</li>
-        <li>服务器重启或内存释放后，未被接收的暂存消息将被删除。</li>
-      </ul>
+.doc-label{
+  display:flex; align-items:center; gap:1.4rem;
+  font-family:var(--mono); font-size:.68rem; letter-spacing:.32em; color:var(--ink-60);
+  margin-bottom:2.6rem;
+}
+.doc-label::after{ content:""; flex:1; height:1px; background:var(--line); }
 
-      <h2 id="image">四、图片的处理</h2>
-      <p>
-        你发送的图片会在发送前于<strong>你自己的浏览器内完成压缩</strong>（Canvas 处理），随后通过实时通道传输。图片本体只保存在发送双方各自的浏览器 IndexedDB 中，
-        <strong>服务器不会将任何图片写入磁盘</strong>。
-      </p>
+h1{
+  font-size:clamp(2.2rem, 5vw, 3.6rem); font-weight:600; line-height:1.25; letter-spacing:.03em;
+}
+.updated{
+  margin-top:1rem; font-family:var(--mono); font-size:.66rem; letter-spacing:.26em; color:var(--ink-40);
+}
 
-      <h2 id="cookie">五、Cookie 与类似技术</h2>
-      <p>本服务不使用跟踪型 Cookie，也不接入任何广告或用户行为分析 SDK。页面可能使用的浏览器存储技术（localStorage / IndexedDB）仅用于上述本地功能，不用于识别或追踪你的身份。</p>
+.lede{ margin-top:2.4rem; max-width:38em; color:var(--ink-60); font-size:1.02rem; }
 
-      <h2 id="third">六、第三方服务</h2>
-      <p>本服务不嵌入任何第三方统计、广告或社交组件。页面字体等静态资源可能由内容分发网络（CDN）加载，此类请求不包含你的个人信息。</p>
+/* 目录 */
+.toc{
+  margin-top:3rem; border-top:1px solid var(--ink); padding-top:1.6rem;
+}
+.toc b{
+  display:block; font-family:var(--mono); font-size:.64rem; font-weight:500;
+  letter-spacing:.3em; color:var(--ink-40); margin-bottom:1rem;
+}
+.toc ol{ list-style:none; counter-reset:toc; columns:2; column-gap:3rem; }
+.toc li{
+  counter-increment:toc; break-inside:avoid;
+  border-bottom:1px solid var(--line);
+}
+.toc a{
+  display:flex; align-items:baseline; gap:1rem; padding:.65rem 0; font-size:.98rem;
+  transition:padding-left .35s cubic-bezier(.77,0,.18,1), color .35s;
+}
+.toc a::before{
+  content:counter(toc, decimal-leading-zero);
+  font-family:var(--mono); font-size:.62rem; letter-spacing:.14em; color:var(--ink-40);
+}
+.toc a:hover{ padding-left:.5rem; }
+@media (max-width:760px){ .toc ol{ columns:1; } }
 
-      <h2 id="children">七、未成年人</h2>
-      <p>本服务面向一般用户。我们不会刻意收集未成年人的个人信息。如果你是监护人并认为有相关情况需要处理，请通过文末方式与我们联系。</p>
+/* 章节：序号悬挂在左侧，标题走正常文档流（避免 flex 压缩截断） */
+h2{
+  position:relative;
+  font-size:clamp(1.45rem, 3vw, 1.95rem); font-weight:600; letter-spacing:.03em; line-height:1.5;
+  margin:4rem 0 1.4rem; padding-top:2.6rem; padding-left:2.6rem; border-top:1px solid var(--line);
+}
+h2 .no{
+  position:absolute; left:0; top:2.75rem;
+  font-family:var(--mono); font-size:.72rem; font-weight:400; letter-spacing:.2em; color:var(--ink-40);
+}
+@media (max-width:600px){
+  h2{ padding-left:2rem; }
+  h2 .no{ top:2.7rem; }
+}
+main p{ color:color-mix(in srgb, var(--ink) 82%, transparent); font-size:1rem; }
+main p + p{ margin-top:.9rem; }
+strong{ font-weight:700; color:var(--ink); }
+ul{ list-style:none; margin:1rem 0 0; }
+ul li{
+  position:relative; padding-left:1.5rem; margin-block:.55rem;
+  color:color-mix(in srgb, var(--ink) 82%, transparent); font-size:1rem;
+}
+ul li::before{
+  content:"—"; position:absolute; left:0; top:0;
+  font-family:var(--serif); color:var(--ink-40);
+}
 
-      <h2 id="security">八、数据安全</h2>
-      <p>
-        由于本服务几乎不持有任何用户数据，面临的泄露风险天然很低。页面通过 HTTPS 加密传输（以实际部署配置为准）。同时请你理解：任何在线服务都无法承诺绝对安全，请不要在对话中提交敏感个人信息（如身份证号、银行卡号、密码等）。
-      </p>
+/* 结语黑底注 */
+.note{
+  margin-top:4.5rem; background:var(--ink); color:rgba(246,244,238,.82);
+  padding:2rem 2.2rem; font-size:.95rem;
+}
+.note strong{ color:var(--paper); font-weight:600; }
 
-      <h2 id="rights">九、你的权利</h2>
-      <p>因为你的一切数据都保存在本地，你可以随时完全控制它们：</p>
-      <ul>
-        <li><strong>查看</strong>：通过浏览器开发者工具查看 localStorage 与 IndexedDB 内容；</li>
-        <li><strong>删除</strong>：清除浏览器站点数据即可一次性删除全部本地记录；</li>
-        <li><strong>携带</strong>：记录不绑定账户，随你的设备与浏览器存在。</li>
-      </ul>
+@media (max-width:600px){
+  nav{ height:60px; }
+  main p, ul li{ font-size:.95rem; }
+}
+</style>
+<!-- Baidu Analytics -->
+<script>
+  var _hmt = _hmt || [];
+  (function () {
+    var hm = document.createElement("script");
+    hm.src = "https://hm.baidu.com/hm.js?6db19609f648c8ad155977594d8967fd";
+    var s = document.getElementsByTagName("script")[0];
+    s.parentNode.insertBefore(hm, s);
+  })();
+</script>
+</head>
+<body>
 
-      <h2 id="changes">十、政策变更</h2>
-      <p>若本政策发生重大变更，我们将在本页面更新并修改顶部的生效日期。继续使用本服务即视为你接受更新后的政策。</p>
+<div class="page-noise"></div>
 
-      <div class="note">
-        如对本政策有任何疑问，可通过开源项目仓库的 Issue 区联系我们。
-      </div>
-    </main>
-  </body>
+<nav>
+  <a class="nav-brand" href="/">
+    <img src="/favicon.svg" alt="ChatTtt AI Logo">
+    <span>ChatTtt AI</span>
+  </a>
+  <a class="back-link" href="/">← RETURN</a>
+</nav>
+
+<main>
+  <div class="doc-label">LEGAL — PRIVACY POLICY</div>
+  <h1>隐私政策</h1>
+  <p class="updated">EFFECTIVE DATE — 2026.08.24</p>
+
+  <p class="lede">
+    ChatTtt AI（以下简称"本服务"）由神秘的 ChatTtt 团队（以下简称"我们"）提供。我们非常重视你的隐私。本政策说明当你使用本服务时，哪些信息会被处理、如何被处理，以及你拥有哪些控制权。请在使用前仔细阅读。
+  </p>
+
+  <div class="toc">
+    <b>CONTENTS</b>
+    <ol>
+      <li><a href="#collect">我们收集哪些信息</a></li>
+      <li><a href="#local">本地存储说明</a></li>
+      <li><a href="#transit">消息传输方式</a></li>
+      <li><a href="#image">图片的处理</a></li>
+      <li><a href="#cookie">Cookie 与类似技术</a></li>
+      <li><a href="#third">第三方服务</a></li>
+      <li><a href="#children">未成年人</a></li>
+      <li><a href="#security">数据安全</a></li>
+      <li><a href="#rights">你的权利</a></li>
+      <li><a href="#changes">政策变更</a></li>
+    </ol>
+  </div>
+
+  <h2 id="collect"><span class="no">01</span>我们收集哪些信息</h2>
+  <p><strong>我们不要求注册，不收集手机号、邮箱、姓名等任何个人身份信息。</strong>使用本服务不需要创建账户。</p>
+
+  <h2 id="local"><span class="no">02</span>本地存储说明</h2>
+  <p>为了实现"刷新页面后对话记录不丢失"等功能，以下数据<strong>仅保存在你自己的浏览器中</strong>：</p>
+  <ul>
+    <li><strong>对话记录</strong>：通过浏览器 localStorage 保存在你的设备上；</li>
+    <li><strong>图片</strong>：通过浏览器 IndexedDB 保存在你的设备上；</li>
+    <li><strong>偏好设置</strong>：如主题模式、侧边栏折叠状态等。</li>
+  </ul>
+  <p style="margin-top:.9rem;">
+    这些数据与你的浏览器绑定，我们无法访问，也不会同步到任何云端。清除浏览器数据或更换设备后，这些数据将不可恢复，请自行知悉。
+  </p>
+
+  <h2 id="transit"><span class="no">03</span>消息传输方式</h2>
+  <p>
+    当你发送一条消息时，消息内容会经由我们的服务器<strong>实时转发</strong>给正在处理该会话的客服端。需要特别说明的是：
+  </p>
+  <ul>
+    <li>消息仅保存在服务器内存中，用于在线转发；</li>
+    <li>我们<strong>不对消息做持久化存储</strong>，不写入任何数据库或磁盘文件；</li>
+    <li>服务器重启或内存释放后，未被接收的暂存消息将被删除。</li>
+  </ul>
+
+  <h2 id="image"><span class="no">04</span>图片的处理</h2>
+  <p>
+    你发送的图片会在发送前于<strong>你自己的浏览器内完成压缩</strong>（Canvas 处理），随后通过实时通道传输。图片本体只保存在发送双方各自的浏览器 IndexedDB 中，
+    <strong>服务器不会将任何图片写入磁盘</strong>。
+  </p>
+
+  <h2 id="cookie"><span class="no">05</span>Cookie 与类似技术</h2>
+  <p>本服务不使用跟踪型 Cookie，也不接入任何广告或用户行为分析 SDK。页面可能使用的浏览器存储技术（localStorage / IndexedDB）仅用于上述本地功能，不用于识别或追踪你的身份。</p>
+
+  <h2 id="third"><span class="no">06</span>第三方服务</h2>
+  <p>本服务不嵌入任何第三方统计、广告或社交组件。页面字体等静态资源可能由内容分发网络（CDN）加载，此类请求不包含你的个人信息。</p>
+
+  <h2 id="children"><span class="no">07</span>未成年人</h2>
+  <p>本服务面向一般用户。我们不会刻意收集未成年人的个人信息。如果你是监护人并认为有相关情况需要处理，请通过文末方式与我们联系。</p>
+
+  <h2 id="security"><span class="no">08</span>数据安全</h2>
+  <p>
+    由于本服务几乎不持有任何用户数据，面临的泄露风险天然很低。页面通过 HTTPS 加密传输（以实际部署配置为准）。同时请你理解：任何在线服务都无法承诺绝对安全，请不要在对话中提交敏感个人信息（如身份证号、银行卡号、密码等）。
+  </p>
+
+  <h2 id="rights"><span class="no">09</span>你的权利</h2>
+  <p>因为你的一切数据都保存在本地，你可以随时完全控制它们：</p>
+  <ul>
+    <li><strong>查看</strong>：通过浏览器开发者工具查看 localStorage 与 IndexedDB 内容；</li>
+    <li><strong>删除</strong>：清除浏览器站点数据即可一次性删除全部本地记录；</li>
+    <li><strong>携带</strong>：记录不绑定账户，随你的设备与浏览器存在。</li>
+  </ul>
+
+  <h2 id="changes"><span class="no">10</span>政策变更</h2>
+  <p>若本政策发生重大变更，我们将在本页面更新并修改顶部的生效日期。继续使用本服务即视为你接受更新后的政策。</p>
+
+  <div class="note">
+    如对本政策有任何疑问，可通过<strong>开源项目仓库的 Issue 区</strong>联系我们。
+  </div>
+</main>
+</body>
 </html>

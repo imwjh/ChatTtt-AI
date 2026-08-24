@@ -1,198 +1,291 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>服务条款 · ChatTtt AI</title>
-    <style>
-      :root {
-        --bg: #ffffff;
-        --fg: #22222a;
-        --muted: #6b6b76;
-        --border: #e6e6ea;
-        --card: #fafafa;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #131317;
-          --fg: #f2f2f4;
-          --muted: #9a9aa4;
-          --border: #2a2a32;
-          --card: #1a1a20;
-        }
-      }
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body {
-        font-family: Outfit, Manrope, -apple-system, BlinkMacSystemFont, "Segoe UI",
-          "PingFang SC", "Microsoft YaHei", sans-serif;
-        background: var(--bg);
-        color: var(--fg);
-        line-height: 1.85;
-        -webkit-font-smoothing: antialiased;
-      }
-      nav {
-        position: sticky; top: 0; z-index: 10;
-        backdrop-filter: blur(12px);
-        background: color-mix(in srgb, var(--bg) 82%, transparent);
-        border-bottom: 1px solid var(--border);
-      }
-      .nav-inner {
-        max-width: 860px; margin-inline: auto; padding-inline: 24px;
-        display: flex; align-items: center; justify-content: space-between; height: 60px;
-      }
-      .logo {
-        display: flex; align-items: center; gap: 9px;
-        font-weight: 700; font-size: 16px; text-decoration: none; color: var(--fg);
-      }
-      .logo svg { width: 18px; height: 18px; }
-      .back { font-size: 14px; color: var(--muted); text-decoration: none; }
-      .back:hover { color: var(--fg); }
-      main { max-width: 760px; margin-inline: auto; padding: 56px 24px 96px; }
-      h1 { font-size: clamp(28px, 4vw, 40px); letter-spacing: -0.02em; }
-      .updated { margin-top: 10px; color: var(--muted); font-size: 14px; }
-      .toc {
-        margin: 30px 0; padding: 20px 24px;
-        border: 1px solid var(--border); border-radius: 14px; background: var(--card);
-      }
-      .toc b { font-size: 14px; letter-spacing: 0.05em; color: var(--muted); }
-      .toc ol { margin: 10px 0 0 18px; font-size: 14.5px; }
-      .toc a { color: inherit; text-decoration: none; }
-      .toc a:hover { text-decoration: underline; }
-      h2 {
-        font-size: 21px; margin: 44px 0 14px; letter-spacing: -0.01em;
-        padding-top: 12px; border-top: 1px solid var(--border);
-      }
-      p, li { font-size: 15.5px; color: color-mix(in srgb, var(--fg) 86%, var(--muted)); }
-      ul, ol { padding-left: 22px; margin: 10px 0; }
-      li { margin-block: 4px; }
-      strong { color: var(--fg); }
-      .note {
-        margin: 18px 0; padding: 14px 18px;
-        border-left: 3px solid var(--muted);
-        background: var(--card); border-radius: 0 10px 10px 0;
-        font-size: 14.5px; color: var(--muted);
-      }
-    </style>
-      <!-- Baidu Analytics -->
-    <script>
-      var _hmt = _hmt || [];
-      (function () {
-        var hm = document.createElement("script");
-        hm.src = "https://hm.baidu.com/hm.js?6db19609f648c8ad155977594d8967fd";
-        var s = document.getElementsByTagName("script")[0];
-        s.parentNode.insertBefore(hm, s);
-      })();
-    </script>
-  </head>
-  <body>
-    <nav>
-      <div class="nav-inner">
-        <a class="logo" href="/">
-          <img src="/favicon.svg" alt="ChatTtt AI Logo" style="width:18px;height:18px;object-fit:contain;" />
-          ChatTtt AI
-        </a>
-        <a class="back" href="/">← 返回首页</a>
-      </div>
-    </nav>
+<head>
+<meta charset="UTF-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>服务条款 · ChatTtt AI</title>
+<meta name="description" content="ChatTtt AI 服务条款：免费使用、无需注册、本地存储。以及关于本项目的真相——它并不是一个真正的人工智能。">
 
-    <main>
-      <h1>服务条款</h1>
-      <p class="updated">生效日期：2026 年 8 月 24 日</p>
+<!-- 字体：与落地页一致 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=IBM+Plex+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-      <p>
-        欢迎使用 ChatTtt AI（以下简称“本服务”）。本条款是你与神秘的 ChatTtt 团队（以下简称“我们”）之间就使用本服务所达成的协议。开始使用即表示你已阅读并同意本条款。
-      </p>
+<style>
+:root{
+  --paper: #F6F4EE;
+  --ink:   #161513;
+  --ink-60: rgba(22,21,19,.62);
+  --ink-40: rgba(22,21,19,.42);
+  --line:  rgba(22,21,19,.16);
+  --serif: "Cormorant Garamond","Noto Serif SC","Songti SC",serif;
+  --mono:  "IBM Plex Mono", ui-monospace, monospace;
+  --pad:   clamp(1.25rem, 5vw, 4.5rem);
+}
+*{ margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+body{
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-weight: 400;
+  letter-spacing: .02em;
+  line-height: 2;
+  -webkit-font-smoothing: antialiased;
+}
+::selection{ background: var(--ink); color: var(--paper); }
+a{ color: inherit; text-decoration: none; }
+img{ display:block; }
+::-webkit-scrollbar{ width:4px; }
+::-webkit-scrollbar-track{ background:var(--paper); }
+::-webkit-scrollbar-thumb{ background:var(--ink); }
 
-      <div class="toc">
-        <b>目录</b>
-        <ol>
-          <li><a href="#desc">服务描述</a></li>
-          <li><a href="#free">免费使用</a></li>
-          <li><a href="#account">账户与注册</a></li>
-          <li><a href="#acceptable">可接受使用</a></li>
-          <li><a href="#content">用户内容</a></li>
-          <li><a href="#truth">关于本项目的真相</a></li>
-          <li><a href="#ip">知识产权</a></li>
-          <li><a href="#disclaimer">免责声明</a></li>
-          <li><a href="#liability">责任限制</a></li>
-          <li><a href="#termination">服务变更与终止</a></li>
-          <li><a href="#law">法律适用</a></li>
-        </ol>
-      </div>
+/* 纸张噪点 */
+.page-noise{
+  position:fixed; inset:0; z-index:9000; pointer-events:none; opacity:.035;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
 
-      <h2 id="desc">一、服务描述</h2>
-      <p>
-        本服务是一款基于网页的对话式人工智能产品，提供文本对话、图片识别、语音理解与文生图等能力。本服务按“现状”提供，我们持续改进，但不承诺功能永远不变。
-      </p>
+/* 导航 */
+nav{
+  position:sticky; top:0; z-index:1000;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0 var(--pad); height:72px;
+  background:rgba(246,244,238,.88); backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);
+}
+.nav-brand{
+  display:flex; align-items:center; gap:.7rem;
+  font-weight:600; font-size:1.05rem; letter-spacing:.04em;
+}
+.nav-brand img{ width:22px; height:22px; filter:grayscale(100%); }
+.back-link{
+  font-family:var(--mono); font-size:.7rem; letter-spacing:.28em;
+  color:var(--ink-60); padding:.4rem 0; position:relative;
+}
+.back-link::after{
+  content:""; position:absolute; left:0; bottom:0; width:100%; height:1px;
+  background:var(--ink); transform:scaleX(0); transform-origin:right; transition:transform .45s cubic-bezier(.77,0,.18,1);
+}
+.back-link:hover::after{ transform:scaleX(1); transform-origin:left; }
 
-      <h2 id="free">二、免费使用</h2>
-      <p>
-        本服务现阶段完全免费，且<strong>不要求注册账户</strong>。这意味着我们没有付费用户协议、订阅关系或自动续费机制；未来若推出收费功能，我们将在本页面提前公告，且不会影响你已保存在本地的数据。
-      </p>
+/* 正文版心 */
+main{ max-width:800px; margin:0 auto; padding:clamp(3rem,7vw,5.5rem) var(--pad) clamp(5rem,9vw,8rem); }
 
-      <h2 id="account">三、账户与注册</h2>
-      <p>本服务无需注册。你通过浏览器使用服务的全部状态均保存在本地，因此你有责任妥善保管自己的设备与浏览器环境。</p>
+.doc-label{
+  display:flex; align-items:center; gap:1.4rem;
+  font-family:var(--mono); font-size:.68rem; letter-spacing:.32em; color:var(--ink-60);
+  margin-bottom:2.6rem;
+}
+.doc-label::after{ content:""; flex:1; height:1px; background:var(--line); }
 
-      <h2 id="acceptable">四、可接受使用</h2>
-      <p>在使用本服务时，你承诺<strong>不</strong>利用本服务从事以下行为：</p>
-      <ul>
-        <li>违反任何适用法律法规的活动，包括但不限于制作、传播违法违规内容；</li>
-        <li>生成或传播侵犯他人知识产权、肖像权、隐私权的内容；</li>
-        <li>对他人进行骚扰、欺诈、诽谤或其他不当行为；</li>
-        <li>以自动化手段对本服务发起攻击性、高频率请求，或试图破坏、逆向干扰服务的正常运行；</li>
-        <li>将本服务用于任何危险、非法或对我们或第三方造成损害的目的。</li>
-      </ul>
-      <p>若你违反上述约定，我们有权随时限制或终止你对本服务的访问。</p>
+h1{
+  font-size:clamp(2.2rem, 5vw, 3.6rem); font-weight:600; line-height:1.25; letter-spacing:.03em;
+}
+.updated{
+  margin-top:1rem; font-family:var(--mono); font-size:.66rem; letter-spacing:.26em; color:var(--ink-40);
+}
 
-      <h2 id="content">五、用户内容</h2>
-      <ul>
-        <li><strong>归属</strong>：你在对话中输入的内容归你所有；由模型生成的输出（包括图像）在适用法律允许的范围内可供你自由使用，我们不主张权利。</li>
-        <li><strong>责任</strong>：你对输入的内容以及你对生成内容的使用方式负责。模型输出可能存在错误、遗漏或不准确之处，<strong>不应被视为专业建议</strong>（包括但不限于医疗、法律、金融建议），重要决策请务必自行核实。</li>
-      </ul>
+.lede{ margin-top:2.4rem; max-width:38em; color:var(--ink-60); font-size:1.02rem; }
 
-      <h2 id="ip">六、知识产权</h2>
-      <p>本服务的软件、界面设计、标识（Logo）与文案内容的权利归我们或相应权利人所有。本项目以开源方式发布时，你可以在遵循其开源许可证的前提下使用源代码。</p>
+/* 目录 */
+.toc{
+  margin-top:3rem; border-top:1px solid var(--ink); padding-top:1.6rem;
+}
+.toc b{
+  display:block; font-family:var(--mono); font-size:.64rem; font-weight:500;
+  letter-spacing:.3em; color:var(--ink-40); margin-bottom:1rem;
+}
+.toc ol{ list-style:none; counter-reset:toc; columns:2; column-gap:3rem; }
+.toc li{
+  counter-increment:toc; break-inside:avoid;
+  border-bottom:1px solid var(--line);
+}
+.toc a{
+  display:flex; align-items:baseline; gap:1rem; padding:.65rem 0; font-size:.98rem;
+  transition:padding-left .35s cubic-bezier(.77,0,.18,1), color .35s;
+}
+.toc a::before{
+  content:counter(toc, decimal-leading-zero);
+  font-family:var(--mono); font-size:.62rem; letter-spacing:.14em; color:var(--ink-40);
+}
+.toc a:hover{ padding-left:.5rem; }
+@media (max-width:760px){ .toc ol{ columns:1; } }
 
-      <h2 id="truth">七、关于本项目的真相（请务必阅读）</h2>
-      <p>
-        好了，戏演到这里可以揭开了。<strong>ChatTtt AI 并不是一个真正的人工智能。</strong>
-      </p>
-      <p>
-        你在网页上看到的"模型选择器"——Little Sunbee 5.3、Super Sunbee 5.5、Fuck-Image 2.1——全部是装饰品，背后没有任何神经网络、GPU 集群或深度学习框架。那些逐字出现的回答，来自一个真实的人类，正坐在某台电脑前敲键盘，并努力让自己的语气显得不像他自己。
-      </p>
-      <p>换句话说：</p>
-      <ul>
-        <li>它之所以"懂你"，是因为对方认识你；</li>
-        <li>它之所以"对答如流"，是因为对面是个活人；</li>
-        <li>它之所以偶尔"思考很久"，可能只是那个人去倒了杯水。</li>
-      </ul>
-      <p>
-        本项目是一个<strong>纯玩乐性质的开源实验</strong>，仅供学习、娱乐和演示使用。它展示了如何用 Web 实时通信技术搭建一个双端聊天系统，以及如何把界面做得足够以假乱真。我们不建议、也不支持你把它用于任何严肃场合——比如冒充客服诈骗、假装自己有 AI 团队融资，或者在朋友面前维持"技术大牛"人设超过 24 小时。
-      </p>
-      <p>
-        <strong>温馨提示：</strong>开发者不对以下事项承担责任：因沉迷扮演 AI 导致的社交关系变化、因玩笑过度引发的友情裂痕、朋友发现真相后的追责，以及任何因使用或滥用本项目而产生的直接或间接损失。玩得开心，但请善良。
-      </p>
+/* 章节：序号悬挂在左侧，标题走正常文档流（避免 flex 压缩截断） */
+h2{
+  position:relative;
+  font-size:clamp(1.45rem, 3vw, 1.95rem); font-weight:600; letter-spacing:.03em; line-height:1.5;
+  margin:4rem 0 1.4rem; padding-top:2.6rem; padding-left:2.6rem; border-top:1px solid var(--line);
+}
+h2 .no{
+  position:absolute; left:0; top:2.75rem;
+  font-family:var(--mono); font-size:.72rem; font-weight:400; letter-spacing:.2em; color:var(--ink-40);
+}
+@media (max-width:600px){
+  h2{ padding-left:2rem; }
+  h2 .no{ top:2.7rem; }
+}
+main p{ color:color-mix(in srgb, var(--ink) 82%, transparent); font-size:1rem; }
+main p + p{ margin-top:.9rem; }
+strong{ font-weight:700; color:var(--ink); }
+ul{ list-style:none; margin:1rem 0 0; }
+ul li{
+  position:relative; padding-left:1.5rem; margin-block:.55rem;
+  color:color-mix(in srgb, var(--ink) 82%, transparent); font-size:1rem;
+}
+ul li::before{
+  content:"—"; position:absolute; left:0; top:0;
+  font-family:var(--serif); color:var(--ink-40);
+}
 
-      <h2 id="disclaimer">八、免责声明</h2>
-      <p><strong>本服务按“现状”与“可用”的基础提供，不作任何形式的明示或默示担保</strong>，包括但不限于对适销性、特定用途适用性、不间断运行、准确性的担保。你不应依赖本服务输出的内容做出重大决策。</p>
+/* 真相章节：黑底强调块 */
+.truth{
+  margin-top:1.6rem; background:var(--ink); color:rgba(246,244,238,.82);
+  padding:2.2rem 2.4rem;
+}
+/* main p 的深墨色会压过父级继承，黑底块内必须显式还原为浅色 */
+.truth p{ color:inherit; max-width:none; }
+.truth p + p{ margin-top:1rem; }
+.truth strong{ color:var(--paper); font-weight:600; }
+.truth em{ color:rgba(246,244,238,.92); }
 
-      <h2 id="liability">九、责任限制</h2>
-      <p>
-        在适用法律允许的最大范围内，对于因使用或无法使用本服务而导致的任何直接、间接、附带、特殊或后果性损失（包括数据丢失、利润损失等），我们不承担责任。你理解并同意：本服务免费提供，双方的权利义务安排与此免费性质相匹配。
-      </p>
+/* 结语黑底注 */
+.note{
+  margin-top:4.5rem; background:var(--ink); color:rgba(246,244,238,.82);
+  padding:2rem 2.2rem; font-size:.95rem;
+}
+.note strong{ color:var(--paper); font-weight:600; }
 
-      <h2 id="termination">十、服务变更与终止</h2>
-      <p>
-        我们可以随时修改、暂停或终止本服务的全部或部分功能，且无需事先通知。你可以随时停止使用本服务，并通过清除浏览器数据删除你的全部本地记录。
-      </p>
+@media (max-width:600px){
+  nav{ height:60px; }
+  main p, ul li{ font-size:.95rem; }
+  .truth{ padding:1.7rem 1.5rem; }
+}
+</style>
+<!-- Baidu Analytics -->
+<script>
+  var _hmt = _hmt || [];
+  (function () {
+    var hm = document.createElement("script");
+    hm.src = "https://hm.baidu.com/hm.js?6db19609f648c8ad155977594d8967fd";
+    var s = document.getElementsByTagName("script")[0];
+    s.parentNode.insertBefore(hm, s);
+  })();
+</script>
+</head>
+<body>
 
-      <h2 id="law">十一、法律适用</h2>
-      <p>本条款受中华人民共和国法律管辖。如本条款个别条款被认定无效，不影响其余条款的效力。</p>
+<div class="page-noise"></div>
 
-      <div class="note">
-        如对本条款有任何疑问，可通过开源项目仓库的 Issue 区联系我们。
-      </div>
-    </main>
-  </body>
+<nav>
+  <a class="nav-brand" href="/">
+    <img src="/favicon.svg" alt="ChatTtt AI Logo">
+    <span>ChatTtt AI</span>
+  </a>
+  <a class="back-link" href="/">← RETURN</a>
+</nav>
+
+<main>
+  <div class="doc-label">LEGAL — TERMS OF SERVICE</div>
+  <h1>服务条款</h1>
+  <p class="updated">EFFECTIVE DATE — 2026.08.24</p>
+
+  <p class="lede">
+    欢迎使用 ChatTtt AI（以下简称"本服务"）。本条款是你与神秘的 ChatTtt 团队（以下简称"我们"）之间就使用本服务所达成的协议。开始使用即表示你已阅读并同意本条款。
+  </p>
+
+  <div class="toc">
+    <b>CONTENTS</b>
+    <ol>
+      <li><a href="#desc">服务描述</a></li>
+      <li><a href="#free">免费使用</a></li>
+      <li><a href="#account">账户与注册</a></li>
+      <li><a href="#acceptable">可接受使用</a></li>
+      <li><a href="#content">用户内容</a></li>
+      <li><a href="#truth">关于本项目的真相</a></li>
+      <li><a href="#ip">知识产权</a></li>
+      <li><a href="#disclaimer">免责声明</a></li>
+      <li><a href="#liability">责任限制</a></li>
+      <li><a href="#termination">服务变更与终止</a></li>
+      <li><a href="#law">法律适用</a></li>
+    </ol>
+  </div>
+
+  <h2 id="desc"><span class="no">01</span>服务描述</h2>
+  <p>
+    本服务是一款基于网页的对话式人工智能产品，提供文本对话、图片识别、语音理解与文生图等能力。本服务按"现状"提供，我们持续改进，但不承诺功能永远不变。
+  </p>
+
+  <h2 id="free"><span class="no">02</span>免费使用</h2>
+  <p>
+    本服务现阶段完全免费，且<strong>不要求注册账户</strong>。这意味着我们没有付费用户协议、订阅关系或自动续费机制；未来若推出收费功能，我们将在本页面提前公告，且不会影响你已保存在本地的数据。
+  </p>
+
+  <h2 id="account"><span class="no">03</span>账户与注册</h2>
+  <p>本服务无需注册。你通过浏览器使用服务的全部状态均保存在本地，因此你有责任妥善保管自己的设备与浏览器环境。</p>
+
+  <h2 id="acceptable"><span class="no">04</span>可接受使用</h2>
+  <p>在使用本服务时，你承诺<strong>不</strong>利用本服务从事以下行为：</p>
+  <ul>
+    <li>违反任何适用法律法规的活动，包括但不限于制作、传播违法违规内容；</li>
+    <li>生成或传播侵犯他人知识产权、肖像权、隐私权的内容；</li>
+    <li>对他人进行骚扰、欺诈、诽谤或其他不当行为；</li>
+    <li>以自动化手段对本服务发起攻击性、高频率请求，或试图破坏、逆向干扰服务的正常运行；</li>
+    <li>将本服务用于任何危险、非法或对我们或第三方造成损害的目的。</li>
+  </ul>
+  <p style="margin-top:.9rem;">若你违反上述约定，我们有权随时限制或终止你对本服务的访问。</p>
+
+  <h2 id="content"><span class="no">05</span>用户内容</h2>
+  <ul>
+    <li><strong>归属</strong>：你在对话中输入的内容归你所有；由模型生成的输出（包括图像）在适用法律允许的范围内可供你自由使用，我们不主张权利。</li>
+    <li><strong>责任</strong>：你对输入的内容以及你对生成内容的使用方式负责。模型输出可能存在错误、遗漏或不准确之处，<strong>不应被视为专业建议</strong>（包括但不限于医疗、法律、金融建议），重要决策请务必自行核实。</li>
+  </ul>
+
+  <h2 id="ip"><span class="no">06</span>知识产权</h2>
+  <p>本服务的软件、界面设计、标识（Logo）与文案内容的权利归我们或相应权利人所有。本项目以开源方式发布时，你可以在遵循其开源许可证的前提下使用源代码。</p>
+
+  <h2 id="truth"><span class="no">07</span>关于本项目的真相（请务必阅读）</h2>
+  <p>
+    好了，戏演到这里可以揭开了。<strong>ChatTtt AI 并不是一个真正的人工智能。</strong>
+  </p>
+  <div class="truth">
+    <p>
+      你在网页上看到的"模型选择器"——Little Sunbee 5.3、Super Sunbee 5.5、Fuck-Image 2.1——全部是装饰品，背后没有任何神经网络、GPU 集群或深度学习框架。那些逐字出现的回答，来自一个真实的人类，正坐在某台电脑前敲键盘，并努力让自己的语气显得不像他自己。
+    </p>
+    <p>换句话说：</p>
+    <p>
+      — 它之所以"懂你"，是因为对方认识你；<br>
+      — 它之所以"对答如流"，是因为对面是个活人；<br>
+      — 它之所以偶尔"思考很久"，可能只是那个人去倒了杯水。
+    </p>
+  </div>
+  <p style="margin-top:1.4rem;">
+    本项目是一个<strong>纯玩乐性质的开源实验</strong>，仅供学习、娱乐和演示使用。它展示了如何用 Web 实时通信技术搭建一个双端聊天系统，以及如何把界面做得足够以假乱真。我们不建议、也不支持你把它用于任何严肃场合——比如冒充客服诈骗、假装自己有 AI 团队融资，或者在朋友面前维持"技术大牛"人设超过 24 小时。
+  </p>
+  <p>
+    <strong>温馨提示：</strong>开发者不对以下事项承担责任：因沉迷扮演 AI 导致的社交关系变化、因玩笑过度引发的友情裂痕、朋友发现真相后的追责，以及任何因使用或滥用本项目而产生的直接或间接损失。玩得开心，但请善良。
+  </p>
+
+  <h2 id="disclaimer"><span class="no">08</span>免责声明</h2>
+  <p><strong>本服务按"现状"与"可用"的基础提供，不作任何形式的明示或默示担保</strong>，包括但不限于对适销性、特定用途适用性、不间断运行、准确性的担保。你不应依赖本服务输出的内容做出重大决策。</p>
+
+  <h2 id="liability"><span class="no">09</span>责任限制</h2>
+  <p>
+    在适用法律允许的最大范围内，对于因使用或无法使用本服务而导致的任何直接、间接、附带、特殊或后果性损失（包括数据丢失、利润损失等），我们不承担责任。你理解并同意：本服务免费提供，双方的权利义务安排与此免费性质相匹配。
+  </p>
+
+  <h2 id="termination"><span class="no">10</span>服务变更与终止</h2>
+  <p>
+    我们可以随时修改、暂停或终止本服务的全部或部分功能，且无需事先通知。你可以随时停止使用本服务，并通过清除浏览器数据删除你的全部本地记录。
+  </p>
+
+  <h2 id="law"><span class="no">11</span>法律适用</h2>
+  <p>本条款受中华人民共和国法律管辖。如本条款个别条款被认定无效，不影响其余条款的效力。</p>
+
+  <div class="note">
+    如对本条款有任何疑问，可通过<strong>开源项目仓库的 Issue 区</strong>联系我们。
+  </div>
+</main>
+</body>
 </html>

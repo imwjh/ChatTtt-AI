@@ -284,9 +284,7 @@ $env:PORT=4000; $env:ADMIN_TOKEN="my-secret"; node server.js
 本项目的大部分能力站在开源社区的肩膀上：
 
 - 聊天页面基于 [assistant-ui](https://github.com/assistant-ui/assistant-ui) 修改
-- 落地页基于 [astro-emdash-sqlite-r2-starter](https://github.com/milzamsz/astro-emdash-sqlite-r2-starter) 修改
-
-感谢这些优秀的开源项目。
+- 落地页设计 GLM-5.3，修改完善 Ox-Alpha
 
 ## 👨‍💻 开发
 
