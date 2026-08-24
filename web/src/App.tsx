@@ -343,14 +343,15 @@ const createSocketAdapter = (getSocket: () => Socket | null): ChatModelAdapter =
   },
 });
 
-/** 会话命名规则：用户第一句话的前 5 个字符加 … */
+/** 会话命名规则：首句超过 10 个字符截断加 ...，否则显示完整内容 */
 const TITLE_GENERATOR: TitleGenerationAdapter = {
   async generateTitle(messages) {
     const firstUser = messages.find((m) => m.role === "user");
     const text =
       firstUser?.content.find((p) => p.type === "text")?.text ?? "";
     const trimmed = text.trim();
-    return trimmed ? `${trimmed.slice(0, 5)}…` : "新对话";
+    if (!trimmed) return "新对话";
+    return trimmed.length > 10 ? `${trimmed.slice(0, 10)}...` : trimmed;
   },
 };
 

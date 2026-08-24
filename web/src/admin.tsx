@@ -242,13 +242,15 @@ export default function AdminApp() {
         await resolveImageUrl(message.imageUrl);
       }
 
-      // 更新该会话标题（首条用户消息）
+      // 更新该会话标题（首条用户消息：>10 字符截断加 ...，≤10 显示全文）
       if (message.from === "user" && message.type === "text") {
         setSessions((prev) => {
           const idx = prev.findIndex((s) => s.id === sessionId);
           if (idx < 0 || prev[idx].title !== "新对话") return prev;
+          const t = (message.text ?? "").trim();
+          const title = t.length > 10 ? `${t.slice(0, 10)}...` : (t || "新对话");
           const next = [...prev];
-          next[idx] = { ...next[idx], title: `${message.text?.trim().slice(0, 5)}…` };
+          next[idx] = { ...next[idx], title };
           localStorage.setItem("chattt-admin:sessions", JSON.stringify(next));
           return next;
         });
@@ -325,6 +327,42 @@ export default function AdminApp() {
       window.clearTimeout(typingTimerRef.current);
       typingTimerRef.current = window.setTimeout(() => setVisitorTyping(false), 2500);
     });
+
+    // 服务器确认删除（任意管理窗口触发）：列表移除 + 本地记录清理
+    socket.on("admin:session-deleted", ({ sessionId }: { sessionId: string }) => {
+      removeSessionLocal(sessionId);
+    });
+  }
+
+  /** 删除会话：通知服务器 + 本地列表/记录/未读清理（本地立即生效，不等服务器回包） */
+  function deleteSession(id: string) {
+    // 防误删：确认一次
+    if (!window.confirm("确定删除这个会话吗？聊天记录将一并清除。")) return;
+    socketRef.current?.emit("admin:delete-session", { sessionId: id });
+    removeSessionLocal(id);
+  }
+
+  function removeSessionLocal(id: string) {
+    // 正在查看该会话 → 清空对话区并取消选中
+    if (activeRef.current === id) {
+      setActiveId(null);
+      activeRef.current = null;
+      setMessages([]);
+      setVisitorTyping(false);
+    }
+    setSessions((prev) => {
+      const next = prev.filter((s) => s.id !== id);
+      localStorage.setItem("chattt-admin:sessions", JSON.stringify(next));
+      return next;
+    });
+    setUnread((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    // 清理该会话的本地聊天记录
+    localStorage.removeItem(`chattt-admin:msg:${id}`);
   }
 
   // ---------- 切换会话 ----------
@@ -608,41 +646,71 @@ export default function AdminApp() {
               {sessions.map((s) => {
                 const hasUnread = unread.has(s.id);
                 return (
-                  <button
+                  <div
                     key={s.id}
-                    onClick={() => openSession(s.id)}
-                    title={collapsed ? s.title : undefined}
-                    className={cn(
-                      "hover:bg-sidebar-accent relative mb-0.5 flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-start text-sm transition-colors",
-                      activeId === s.id && "bg-sidebar-accent",
-                      collapsed && "justify-center px-0",
-                    )}
+                    className="group/session relative mb-0.5 flex items-center"
                   >
-                    <span
+                    <button
+                      onClick={() => openSession(s.id)}
+                      title={collapsed ? s.title : undefined}
                       className={cn(
-                        "size-2 shrink-0 rounded-full",
-                        s.online ? "bg-green-500" : "bg-zinc-400",
+                        "hover:bg-sidebar-accent flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-2 text-start text-sm transition-colors",
+                        activeId === s.id && "bg-sidebar-accent",
+                        collapsed && "justify-center px-0",
                       )}
-                      aria-label={s.online ? "在线" : "离线"}
-                    />
-                    {!collapsed && (
-                      <>
-                        <span className="min-w-0 flex-1 truncate">{s.title}</span>
-                        {hasUnread && (
-                          <span
-                            key={flash}
-                            className="animate-unread-flash size-1.5 shrink-0 rounded-full bg-red-500"
-                          />
-                        )}
-                      </>
-                    )}
-                    {collapsed && hasUnread && (
+                    >
                       <span
-                        key={flash}
-                        className="animate-unread-flash absolute -top-0.5 right-1 size-2 rounded-full bg-red-500"
+                        className={cn(
+                          "size-2 shrink-0 rounded-full",
+                          s.online ? "bg-green-500" : "bg-zinc-400",
+                        )}
+                        aria-label={s.online ? "在线" : "离线"}
                       />
-                    )}
-                  </button>
+                      {!collapsed && (
+                        <>
+                          <span className="min-w-0 flex-1 truncate">{s.title}</span>
+                          {hasUnread && (
+                            <span
+                              key={flash}
+                              className="animate-unread-flash size-1.5 shrink-0 rounded-full bg-red-500"
+                            />
+                          )}
+                        </>
+                      )}
+                      {collapsed && hasUnread && (
+                        <span
+                          key={flash}
+                          className="animate-unread-flash absolute -top-0.5 right-1 size-2 rounded-full bg-red-500"
+                        />
+                      )}
+                    </button>
+                    {/* 悬停显示的删除按钮 */}
+                    <button
+                      onClick={() => deleteSession(s.id)}
+                      aria-label="删除会话"
+                      title="删除会话"
+                      className={cn(
+                        "text-muted-foreground hover:text-destructive hover:bg-sidebar-accent absolute end-1 z-10 hidden rounded-md p-1.5 group-hover/session:block",
+                        activeId === s.id && "end-9 bg-sidebar-accent",
+                      )}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="size-4"
+                      >
+                        <path d="M3 6h18" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        <path d="M10 11v6" />
+                        <path d="M14 11v6" />
+                      </svg>
+                    </button>
+                  </div>
                 );
               })}
             </div>

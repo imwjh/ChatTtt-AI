@@ -79,7 +79,9 @@ const sessions = new Map();
 
 function makeTitle(text) {
   const t = (text ?? "").trim();
-  return t ? `${t.slice(0, 5)}…` : "新对话";
+  // 超过 10 个字符截断加 ...，否则显示完整内容
+  if (!t) return "新对话";
+  return t.length > 10 ? `${t.slice(0, 10)}...` : t;
 }
 
 function sessionSummary(s) {
@@ -184,6 +186,15 @@ io.on("connection", (socket) => {
       sessionId: sid,
       messages: session.messages,
     });
+  });
+
+  // ----- 管理端删除会话 -----
+  socket.on("admin:delete-session", ({ sessionId: sid }) => {
+    if (role !== "admin") return;
+    if (!sessions.has(sid)) return;
+    sessions.delete(sid);
+    // 通知所有管理窗口从列表移除
+    io.to("admins").emit("admin:session-deleted", { sessionId: sid });
   });
 
   // ----- 访客发消息 -----
