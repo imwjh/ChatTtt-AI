@@ -773,8 +773,8 @@ export default function AdminApp() {
                       className={cn(
                         "text-muted-foreground hover:text-destructive hover:bg-sidebar-accent absolute end-1 z-10 hidden rounded-md p-1.5 group-hover/session:block",
                         activeId === s.id && "bg-sidebar-accent text-foreground",
-                        collapsed && "!hidden",
                         isMobile && "!block",
+                        collapsed && "!hidden",
                       )}
                     >
                       <svg
