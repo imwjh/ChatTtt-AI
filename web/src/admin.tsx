@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 import {
   blobToDataUri,
   dataUriToBlob,
+  deleteImages,
   expandIdbRefsSync,
   getImage,
   idbKeyOf,
@@ -343,6 +344,11 @@ export default function AdminApp() {
   }
 
   function removeSessionLocal(id: string) {
+    // 先收集该会话所有媒体 key（必须在删除记录前读，删除后就读不到了）
+    const msgs = loadLocalMessages(id);
+    const mediaKeys = msgs
+      .flatMap((m) => [m.imageKey, m.audioKey])
+      .filter((k): k is string => Boolean(k));
     // 正在查看该会话 → 清空对话区并取消选中
     if (activeRef.current === id) {
       setActiveId(null);
@@ -363,6 +369,10 @@ export default function AdminApp() {
     });
     // 清理该会话的本地聊天记录
     localStorage.removeItem(`chattt-admin:msg:${id}`);
+    // 清理该会话在 IndexedDB 里的图片/语音本体
+    if (mediaKeys.length) {
+      void deleteImages(mediaKeys);
+    }
   }
 
   // ---------- 切换会话 ----------

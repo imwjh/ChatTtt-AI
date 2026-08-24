@@ -50,6 +50,25 @@ export async function getImage(key: string): Promise<Blob | undefined> {
   return blob;
 }
 
+/** 删除单条媒体记录（key 不存在时静默成功） */
+export async function deleteImage(key: string): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+/** 批量删除媒体记录：逐条删除，任何一条失败不影响其余 */
+export async function deleteImages(keys: string[]): Promise<void> {
+  await Promise.all(
+    keys.map((k) => deleteImage(k).catch(() => undefined)),
+  );
+}
+
 /** 是否为本端 IndexedDB 引用 */
 export const isIdbRef = (v: string) => v.startsWith("idb://");
 
