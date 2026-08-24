@@ -75,6 +75,9 @@ type SessionSummary = {
 };
 
 const ADMIN_TOKEN_KEY = "chattt-admin-token";
+/** 登录有效期：72 小时未打开后台则自动退出（滑动窗口，每次打开刷新计时） */
+const AUTH_TTL_MS = 72 * 60 * 60 * 1000;
+const AUTH_LAST_ACTIVE_KEY = "chattt-admin:last-active";
 
 /** 管理端本地存储：每个会话的聊天记录存浏览器 localStorage */
 function loadLocalMessages(sessionId: string): Msg[] {
@@ -154,9 +157,36 @@ export default function AdminApp() {
   useEffect(() => {
     const saved = localStorage.getItem(ADMIN_TOKEN_KEY);
     if (!saved) return;
+    // 72 小时未打开后台 → 本地凭证过期，要求重新登录
+    const lastActive = Number(localStorage.getItem(AUTH_LAST_ACTIVE_KEY) ?? "0");
+    if (!lastActive || Date.now() - lastActive > AUTH_TTL_MS) {
+      logoutLocal();
+      return;
+    }
+    touchAuth();
     connect(saved);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** 清除本地登录凭证（不主动断开 socket） */
+  function logoutLocal() {
+    localStorage.removeItem(ADMIN_TOKEN_KEY);
+    localStorage.removeItem(AUTH_LAST_ACTIVE_KEY);
+    setAuthed(false);
+  }
+
+  /** 刷新 72 小时活跃时间戳 */
+  function touchAuth() {
+    localStorage.setItem(AUTH_LAST_ACTIVE_KEY, String(Date.now()));
+  }
+
+  /** 点击"退出"：断开 socket、清凭证，回到登录界面 */
+  function logout() {
+    socketRef.current?.disconnect();
+    socketRef.current = null;
+    logoutLocal();
+    setTokenInput("");
+  }
 
   function connect(token: string) {
     const socket = io("/");
@@ -169,6 +199,7 @@ export default function AdminApp() {
     socket.on("admin:joined", ({ sessions: list }: { sessions: SessionSummary[] }) => {
       setAuthed(true);
       localStorage.setItem(ADMIN_TOKEN_KEY, token);
+      touchAuth();
       // 合并服务器列表与本地记录（保留历史离线会话），并把服务器历史消息并入本地
       setSessions((prev) => {
         const map = new Map(prev.map((s) => [s.id, s]));
@@ -208,7 +239,7 @@ export default function AdminApp() {
     });
 
     socket.on("admin:denied", () => {
-      localStorage.removeItem(ADMIN_TOKEN_KEY);
+      logoutLocal();
       alert("口令错误");
     });
 
@@ -700,10 +731,9 @@ export default function AdminApp() {
                       aria-label="删除会话"
                       title="删除会话"
                       className={cn(
-                        "text-muted-foreground hover:text-destructive absolute end-1 z-10 hidden rounded-md p-1.5 group-hover/session:block",
-                        activeId === s.id
-                          ? "bg-sidebar-accent text-foreground"
-                          : "hover:bg-sidebar-accent",
+                        "text-muted-foreground hover:text-destructive hover:bg-sidebar-accent absolute end-1 z-10 hidden rounded-md p-1.5 group-hover/session:block",
+                        activeId === s.id && "bg-sidebar-accent text-foreground",
+                        collapsed && "!hidden",
                       )}
                     >
                       <svg
@@ -744,6 +774,14 @@ export default function AdminApp() {
                   {visitorTyping ? "对方正在输入…" : sessions.find((s) => s.id === activeId)?.title}
                 </span>
               )}
+              <button
+                onClick={logout}
+                aria-label="退出登录"
+                title="退出登录"
+                className="text-muted-foreground hover:bg-sidebar-accent hover:text-foreground ms-auto rounded-md px-2.5 py-1.5 text-sm transition-colors"
+              >
+                退出
+              </button>
             </header>
             <div className="relative flex-1 overflow-hidden">
               {activeId ? (
