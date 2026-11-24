@@ -1,0 +1,531 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+import 'package:provider/provider.dart';
+
+import '../../../icons/lucide_adapter.dart' as lucide;
+import '../../../l10n/app_localizations.dart';
+import '../../../core/models/translation_language.dart';
+import '../../home/widgets/model_icon.dart';
+import '../../../core/providers/settings_provider.dart';
+import '../../../core/providers/assistant_provider.dart';
+import '../../../core/services/api/chat_api_service.dart';
+import '../../../core/services/api/stream/stream_chunk.dart';
+import '../../../shared/widgets/ios_tactile.dart';
+import '../../../shared/widgets/snackbar.dart';
+import '../../settings/widgets/language_select_sheet.dart'
+    show languageDisplayName, showLanguageSelector;
+import '../../../core/services/haptics.dart';
+import '../../model/widgets/model_select_sheet.dart' show showModelSelector;
+import '../../../theme/app_font_weights.dart';
+import '../widgets/translation_output.dart';
+import 'translation_languages_page.dart';
+
+class TranslatePage extends StatefulWidget {
+  const TranslatePage({super.key});
+
+  @override
+  State<TranslatePage> createState() => _TranslatePageState();
+}
+
+class _TranslatePageState extends State<TranslatePage> {
+  final TextEditingController _src = TextEditingController();
+  final ValueNotifier<String> _dst = ValueNotifier('');
+  String? _providerKey;
+  String? _modelId;
+  StreamSubscription? _sub;
+  bool _loading = false;
+  late final String _requestId = 'translate-page-${identityHashCode(this)}';
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initDefaults());
+  }
+
+  @override
+  void dispose() {
+    ChatApiService.cancelRequest(_requestId);
+    _sub?.cancel();
+    _src.dispose();
+    _dst.dispose();
+    super.dispose();
+  }
+
+  void _initDefaults() {
+    final settings = context.read<SettingsProvider>();
+    final assistant = context.read<AssistantProvider>().currentAssistant;
+    setState(() {
+      _providerKey =
+          settings.translateModelProvider ??
+          assistant?.chatModelProvider ??
+          settings.currentModelProvider;
+      _modelId =
+          settings.translateModelId ??
+          assistant?.chatModelId ??
+          settings.currentModelId;
+    });
+  }
+
+  Future<void> _pickModel() async {
+    if (_loading) return;
+    final sel = await showModelSelector(
+      context,
+      initialProviderKey: _providerKey,
+      initialModelId: _modelId,
+    );
+    if (!mounted) return;
+    if (sel != null) {
+      setState(() {
+        _providerKey = sel.providerKey;
+        _modelId = sel.modelId;
+      });
+      // Persist translate model selection so it’s remembered next time
+      await context.read<SettingsProvider>().setTranslateModel(
+        sel.providerKey,
+        sel.modelId,
+      );
+    }
+  }
+
+  Future<void> _pickLanguage() async {
+    if (_loading) return;
+    final settings = context.read<SettingsProvider>();
+    final lang = await showLanguageSelector(
+      context,
+      languages: settings.visibleTranslationLanguages,
+    );
+    if (!mounted || lang == null) return;
+    if (lang.code == '__clear__') {
+      _dst.value = '';
+      return;
+    }
+    await settings.setTranslateTargetLang(lang.code);
+  }
+
+  Future<void> _translate(LanguageOption target) async {
+    final l10n = AppLocalizations.of(context)!;
+    final txt = _src.text.trim();
+    if (txt.isEmpty) return;
+    final pk = _providerKey;
+    final mid = _modelId;
+    if (pk == null || mid == null) {
+      showAppSnackBar(
+        context,
+        message: l10n.homePagePleaseSetupTranslateModel,
+        type: NotificationType.warning,
+      );
+      return;
+    }
+    final settings = context.read<SettingsProvider>();
+    final cfg = settings.getProviderConfig(pk);
+    final p = settings.translatePrompt
+        .replaceAll('{source_text}', txt)
+        .replaceAll('{target_lang}', languageDisplayName(l10n, target.code));
+
+    setState(() {
+      _loading = true;
+      _dst.value = '';
+    });
+
+    try {
+      final stream = ChatApiService.sendMessageStream(
+        config: cfg,
+        modelId: mid,
+        messages: [
+          {'role': 'user', 'content': p},
+        ],
+        reasoning: settings.translateGenerationReasoningFor(
+          context.read<AssistantProvider>().currentAssistant,
+        ),
+        requestId: _requestId,
+        parseMarkdownImageLinks: settings.sendMarkdownImageLinksAsImages,
+      );
+      _sub = stream.listen(
+        (chunk) {
+          if (chunk is! TextDelta) return;
+          _dst.value += chunk.text;
+        },
+        onError: (e) {
+          if (!mounted) return;
+          setState(() => _loading = false);
+          showAppSnackBar(
+            context,
+            message: l10n.homePageTranslateFailed(e.toString()),
+            type: NotificationType.error,
+          );
+        },
+        onDone: () {
+          if (!mounted) return;
+          setState(() => _loading = false);
+        },
+        cancelOnError: true,
+      );
+    } catch (e) {
+      setState(() => _loading = false);
+      showAppSnackBar(
+        context,
+        message: l10n.homePageTranslateFailed(e.toString()),
+        type: NotificationType.error,
+      );
+    }
+  }
+
+  Future<void> _stop() async {
+    ChatApiService.cancelRequest(_requestId);
+    try {
+      await _sub?.cancel();
+    } catch (_) {}
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _pasteFromClipboard() async {
+    final data = await Clipboard.getData('text/plain');
+    final text = data?.text ?? '';
+    if (text.isEmpty) return;
+    setState(() {
+      _src.text = text;
+    });
+  }
+
+  Future<void> _copyResult() async {
+    await Clipboard.setData(ClipboardData(text: _dst.value));
+    if (!mounted) return;
+    showAppSnackBar(
+      context,
+      message: AppLocalizations.of(context)!.chatMessageWidgetCopiedToClipboard,
+      type: NotificationType.success,
+    );
+  }
+
+  Future<void> _clearAll() async {
+    await _stop();
+    setState(() {
+      _src.clear();
+      _dst.value = '';
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final (languages, selectedCode) = context.select(
+      (SettingsProvider settings) =>
+          (settings.visibleTranslationLanguages, settings.translateTargetLang),
+    );
+    final target = standaloneTranslationLanguage(
+      languages,
+      selectedCode: selectedCode,
+      localeLanguageCode: Localizations.localeOf(context).languageCode,
+    );
+    return Scaffold(
+      appBar: AppBar(
+        leading: Tooltip(
+          message: l10n.settingsPageBackButton,
+          child: _TactileIconButton(
+            icon: lucide.Lucide.ArrowLeft,
+            color: cs.onSurface,
+            size: 22,
+            onTap: () => Navigator.of(context).maybePop(),
+          ),
+        ),
+        title: Text(l10n.desktopNavTranslateTooltip),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: IosIconButton(
+              icon: lucide.Lucide.SlidersHorizontal,
+              size: 20,
+              padding: const EdgeInsets.all(8),
+              tooltip: l10n.translationLanguageManagerTitle,
+              enabled: !_loading,
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const TranslationLanguagesPage(),
+                ),
+              ),
+            ),
+          ),
+          // Paste
+          Tooltip(
+            message: l10n.translatePagePasteButton,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: IosIconButton(
+                icon: lucide.Lucide.Clipboard,
+                size: 20,
+                padding: const EdgeInsets.all(8),
+                onTap: _pasteFromClipboard,
+              ),
+            ),
+          ),
+          // Copy result
+          Tooltip(
+            message: l10n.translatePageCopyResult,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: IosIconButton(
+                icon: lucide.Lucide.Copy,
+                size: 20,
+                padding: const EdgeInsets.all(8),
+                onTap: _copyResult,
+              ),
+            ),
+          ),
+          // Clear all
+          Tooltip(
+            message: l10n.translatePageClearAll,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: IosIconButton(
+                icon: lucide.Lucide.Eraser,
+                size: 20,
+                padding: const EdgeInsets.all(8),
+                onTap: _clearAll,
+              ),
+            ),
+          ),
+          // Model brand icon
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: IosIconButton(
+              padding: const EdgeInsets.all(8),
+              builder: (color) => _providerKey == null || _modelId == null
+                  ? Icon(lucide.Lucide.Bot, size: 22, color: color)
+                  : CurrentModelIcon(
+                      providerKey: _providerKey,
+                      modelId: _modelId,
+                      size: 22,
+                      iconScale: 1,
+                      withBackground: false,
+                    ),
+              onTap: _pickModel,
+            ),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Input
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+              child: SizedBox(
+                height: 200,
+                child: _Card(
+                  child: TextField(
+                    controller: _src,
+                    keyboardType: TextInputType.multiline,
+                    expands: true,
+                    maxLines: null,
+                    minLines: null,
+                    decoration: InputDecoration(
+                      hintText: l10n.translatePageInputHint,
+                      border: InputBorder.none,
+                      contentPadding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                    ),
+                    contextMenuBuilder: (context, editableTextState) =>
+                        const SizedBox.shrink(),
+                    style: TextStyle(fontSize: 15, height: 1.4),
+                  ),
+                ),
+              ),
+            ),
+            // Output
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+                child: _Card(
+                  child: TranslationOutput(
+                    text: _dst,
+                    streaming: _loading,
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                    style: const TextStyle(fontSize: 15, height: 1.4),
+                  ),
+                ),
+              ),
+            ),
+            // Bottom: language card + translate button
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: IosCardPress(
+                      borderRadius: BorderRadius.circular(12),
+                      baseColor: Theme.of(context).cardColor,
+                      onTap: _pickLanguage,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        children: [
+                          Text(
+                            target.flag,
+                            style: const TextStyle(fontSize: 18),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              languageDisplayName(l10n, target.code),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 14.5,
+                                fontWeight: AppFontWeights.semibold,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Icon(
+                            lucide.Lucide.ChevronDown,
+                            size: 18,
+                            color: cs.onSurface.withValues(alpha: 0.7),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  IosCardPress(
+                    borderRadius: BorderRadius.circular(12),
+                    baseColor: cs.primary,
+                    pressedBlendStrength: isDark ? 0.08 : 0.06,
+                    onTap: _loading ? _stop : () => _translate(target),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 200),
+                      transitionBuilder: (child, anim) => ScaleTransition(
+                        scale: anim,
+                        child: FadeTransition(opacity: anim, child: child),
+                      ),
+                      child: _loading
+                          ? Row(
+                              key: const ValueKey('stop'),
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SvgPicture.asset(
+                                  'assets/icons/stop.svg',
+                                  width: 18,
+                                  height: 18,
+                                  colorFilter: ColorFilter.mode(
+                                    cs.onPrimary,
+                                    BlendMode.srcIn,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  l10n.chatMessageWidgetStopTooltip,
+                                  style: TextStyle(
+                                    color: cs.onPrimary,
+                                    fontWeight: AppFontWeights.emphasis,
+                                  ),
+                                ),
+                              ],
+                            )
+                          : Row(
+                              key: const ValueKey('go'),
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  lucide.Lucide.Languages,
+                                  size: 18,
+                                  color: cs.onPrimary,
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  l10n.chatMessageWidgetTranslateTooltip,
+                                  style: TextStyle(
+                                    color: cs.onPrimary,
+                                    fontWeight: AppFontWeights.emphasis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Card extends StatelessWidget {
+  const _Card({required this.child});
+  final Widget child;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: Theme.of(
+            context,
+          ).colorScheme.outlineVariant.withValues(alpha: 0.25),
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: child,
+    );
+  }
+}
+
+// Copy of the tactile back icon used on settings-like pages
+class _TactileIconButton extends StatefulWidget {
+  const _TactileIconButton({
+    required this.icon,
+    required this.color,
+    required this.onTap,
+    this.size = 22,
+  });
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+  final double size;
+  @override
+  State<_TactileIconButton> createState() => _TactileIconButtonState();
+}
+
+class _TactileIconButtonState extends State<_TactileIconButton> {
+  bool _pressed = false;
+  @override
+  Widget build(BuildContext context) {
+    final base = widget.color;
+    final pressColor = base.withValues(alpha: 0.7);
+    final icon = Icon(
+      widget.icon,
+      size: widget.size,
+      color: _pressed ? pressColor : base,
+    );
+    return Semantics(
+      button: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        onTap: () {
+          Haptics.light();
+          widget.onTap();
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+          child: icon,
+        ),
+      ),
+    );
+  }
+}

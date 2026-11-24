@@ -1,0 +1,1248 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
+import 'package:drift/drift.dart' show driftRuntimeOptions;
+import 'package:flutter_test/flutter_test.dart';
+// ignore: depend_on_referenced_packages
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:Kelivo/core/database/app_database.dart';
+import 'package:Kelivo/core/database/business_repository.dart';
+import 'package:Kelivo/core/database/business_restore_service.dart';
+import 'package:Kelivo/core/database/chat_database_repository.dart';
+import 'package:Kelivo/core/models/backup.dart';
+import 'package:Kelivo/core/models/chat_message.dart';
+import 'package:Kelivo/core/models/message_part.dart';
+import 'package:Kelivo/core/models/conversation.dart';
+import 'package:Kelivo/core/services/backup/chatbox_importer.dart';
+import 'package:Kelivo/core/services/chat/chat_service.dart';
+import 'package:Kelivo/utils/sandbox_path_resolver.dart';
+
+class _FakePathProvider extends PathProviderPlatform {
+  _FakePathProvider(this.root);
+
+  final String root;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => root;
+
+  @override
+  Future<String?> getApplicationSupportPath() async => root;
+
+  @override
+  Future<String?> getApplicationCachePath() async => '$root/cache';
+
+  @override
+  Future<String?> getTemporaryPath() async => '$root/tmp';
+}
+
+Map<String, dynamic> _chatboxFixture() => {
+  '__exported_at': '2026-07-18T00:00:00.000Z',
+  'settings': {
+    'providers': {
+      'openai': {
+        'apiKey': 'chatbox-secret',
+        'apiHost': 'https://api.example.test',
+        'apiPath': '/v1/chat/completions',
+        'models': [
+          {'modelId': 'gpt-test'},
+        ],
+      },
+    },
+  },
+  'chat-sessions-list': [
+    {'id': 'assistant-1', 'name': 'Chatbox assistant', 'starred': true},
+  ],
+  'session:assistant-1': {
+    'settings': {
+      'provider': 'openai',
+      'modelId': 'gpt-test',
+      'temperature': 0.5,
+    },
+    'messages': [
+      {'id': 'system-1', 'role': 'system', 'content': 'Imported system prompt'},
+      {
+        'id': 'message-1',
+        'role': 'user',
+        'content': 'Hello',
+        'timestamp': 1784332800000,
+        'contentParts': [
+          {'type': 'text', 'text': 'Hello'},
+          {'type': 'image', 'url': 'https://example.com/pic.png'},
+        ],
+        'files': [
+          {
+            'url': 'https://example.com/notes.pdf',
+            'name': 'notes.pdf',
+            'fileType': 'application/pdf',
+          },
+        ],
+      },
+    ],
+    'threads': <dynamic>[],
+  },
+};
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
+
+  group('ChatboxImporter SQLite business patch', () {
+    late Directory root;
+    late AppDatabase database;
+    late BusinessRepository businessRepository;
+    late ChatService chatService;
+    late File backup;
+
+    setUp(() async {
+      root = await Directory.systemTemp.createTemp('kelivo_chatbox_db_');
+      PathProviderPlatform.instance = _FakePathProvider(root.path);
+      SharedPreferences.setMockInitialValues({});
+      final databaseFile = File('${root.path}/kelivo.db');
+      database = AppDatabase.open(file: databaseFile);
+      businessRepository = BusinessRepository(database);
+      chatService = ChatService(
+        existingRepository: ChatDatabaseRepository(
+          database,
+          databaseFile: databaseFile,
+        ),
+      );
+      backup = await File(
+        '${root.path}/chatbox.json',
+      ).writeAsString(jsonEncode(_chatboxFixture()), flush: true);
+    });
+
+    tearDown(() async {
+      await chatService.close();
+      await database.close();
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+
+    for (final mode in RestoreMode.values) {
+      test(
+        'provider-only $mode import keeps chats, assistants and files',
+        () async {
+          await BusinessRestoreService(businessRepository).overwrite({
+            'assistants_v1': jsonEncode([
+              {'id': 'local', 'name': 'Local'},
+            ]),
+          });
+          await chatService.restoreConversation(
+            Conversation(id: 'local-chat', title: 'Keep'),
+            [],
+          );
+          final sentinel = await File(
+            '${root.path}/upload/keep.txt',
+          ).create(recursive: true);
+          await sentinel.writeAsString('keep');
+          // A settings-only Chatbox export is sufficient when chats are disabled.
+          await backup.writeAsString(
+            jsonEncode({'settings': _chatboxFixture()['settings']}),
+          );
+          final result = await ChatboxImporter.importFromChatbox(
+            file: backup,
+            mode: mode,
+            businessRepository: businessRepository,
+            chatService: chatService,
+            scope: BackupScope(
+              excluded: BackupCategory.values
+                  .where((c) => c != BackupCategory.providers)
+                  .toSet(),
+            ),
+          );
+          expect(result.providers, 1);
+          expect(result.assistants, 0);
+          expect(result.conversations, 0);
+          expect(chatService.getAllConversations().map((c) => c.id), [
+            'local-chat',
+          ]);
+          expect(await sentinel.readAsString(), 'keep');
+          final settings = await BusinessRestoreService(
+            businessRepository,
+          ).exportSettings();
+          expect(
+            jsonDecode(settings['assistants_v1'] as String).single['id'],
+            'local',
+          );
+          expect(settings['provider_configs_v1'], contains('chatbox-secret'));
+        },
+      );
+    }
+
+    for (final filesOnly in [false, true]) {
+      test(
+        filesOnly
+            ? 'file-only ZIP import preserves chats and settings'
+            : 'chat-only ZIP overwrite keeps local files and skips imported resources',
+        () async {
+          await chatService.restoreConversation(
+            Conversation(id: 'local-chat', title: 'Keep'),
+            [],
+          );
+          final sentinel = await File(
+            '${root.path}/upload/keep.txt',
+          ).create(recursive: true);
+          await sentinel.writeAsString('keep');
+          final zip = await File('${root.path}/selective.zip').writeAsBytes(
+            _encodeChatboxZipV2(
+              settings: _chatboxZipSettings(),
+              session: _chatboxZipSession(
+                id: 'assistant-1',
+                messageId: 'message-1',
+                imageStorageKey: 'picture:one',
+              ),
+              resources: [
+                _ChatboxZipResource(
+                  id: 'resource-000001',
+                  storageKey: 'picture:one',
+                  sessionId: 'assistant-1',
+                  path: 'sessions/assistant-1/resources/resource-000001.png',
+                  mimeType: 'image/png',
+                  kind: 'image',
+                  bytes: _chatboxPngBytes(),
+                ),
+              ],
+            ),
+          );
+          final before = await BusinessRestoreService(
+            businessRepository,
+          ).exportSettings();
+          final selected = filesOnly
+              ? BackupCategory.files
+              : BackupCategory.chats;
+          final result = await ChatboxImporter.importFromChatbox(
+            file: zip,
+            mode: RestoreMode.overwrite,
+            businessRepository: businessRepository,
+            chatService: chatService,
+            scope: BackupScope(
+              excluded: BackupCategory.values
+                  .where((c) => c != selected)
+                  .toSet(),
+            ),
+          );
+          expect(result.providers, 0);
+          expect(result.assistants, 0);
+          expect(await sentinel.readAsString(), 'keep');
+          expect(
+            await BusinessRestoreService(businessRepository).exportSettings(),
+            before,
+          );
+          final files = await Directory(
+            '${root.path}/upload',
+          ).list(recursive: true).where((f) => f is File).toList();
+          if (filesOnly) {
+            expect(result.conversations, 0);
+            expect(chatService.getAllConversations().map((c) => c.id), [
+              'local-chat',
+            ]);
+            expect(files, hasLength(2));
+          } else {
+            expect(result.conversations, 1);
+            expect(files, hasLength(1));
+            final conversation = chatService.getAllConversations().single;
+            final message = (await chatService.loadMessages(
+              conversation.id,
+            )).single;
+            expect(
+              message.parts.whereType<ImagePart>().single.unavailable,
+              isTrue,
+            );
+          }
+        },
+      );
+    }
+
+    test(
+      'writes providers, assistants, tags, and relationships to SQLite',
+      () async {
+        final replacedUpload = await File(
+          '${root.path}/upload/replace.txt',
+        ).create(recursive: true);
+        final result = await ChatboxImporter.importFromChatbox(
+          file: backup,
+          mode: RestoreMode.overwrite,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        );
+
+        expect(result.providers, 1);
+        expect(result.assistants, 1);
+        expect(result.conversations, 1);
+        expect(result.messages, 1);
+        final exported = await BusinessRestoreService(
+          businessRepository,
+        ).exportSettings();
+        final providers =
+            jsonDecode(exported['provider_configs_v1'] as String) as Map;
+        expect((providers['openai'] as Map)['apiKey'], 'chatbox-secret');
+        expect(exported['providers_order_v1'], ['openai']);
+        expect(exported['assistants_v1'], contains('assistant-1'));
+        expect(exported['assistant_tags_v1'], contains('Chatbox'));
+        expect(exported['assistant_tag_map_v1'], contains('assistant-1'));
+        expect(chatService.getAllConversations(), hasLength(1));
+        expect(await replacedUpload.exists(), isFalse);
+
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString('provider_configs_v1'), isNull);
+        expect(prefs.getString('assistants_v1'), isNull);
+        expect(prefs.getString('assistant_tags_v1'), isNull);
+      },
+    );
+
+    test(
+      'rolls back all business rows when a later table write fails',
+      () async {
+        final retainedUpload = await File(
+          '${root.path}/upload/keep.txt',
+        ).create(recursive: true);
+        await retainedUpload.writeAsString('keep');
+        await chatService.restoreConversation(
+          Conversation(id: 'local-chat', title: 'Keep chat'),
+          [
+            ChatMessage(
+              id: 'local-message',
+              role: 'user',
+              content: 'Keep message',
+              conversationId: 'local-chat',
+            ),
+          ],
+        );
+        await BusinessRestoreService(businessRepository).overwrite({
+          'provider_configs_v1': jsonEncode({
+            'local': {'id': 'local', 'apiKey': 'keep-me'},
+          }),
+          'providers_order_v1': ['local'],
+          'assistants_v1': jsonEncode([
+            {'id': 'local-assistant', 'name': 'Keep me'},
+          ]),
+        });
+        final before = await BusinessRestoreService(
+          businessRepository,
+        ).exportSettings();
+        await database.customStatement(
+          'CREATE TRIGGER fail_chatbox_assistant_insert '
+          'BEFORE INSERT ON assistant_rows BEGIN '
+          "SELECT RAISE(ABORT, 'injected failure'); END;",
+        );
+
+        await expectLater(
+          ChatboxImporter.importFromChatbox(
+            file: backup,
+            mode: RestoreMode.overwrite,
+            businessRepository: businessRepository,
+            chatService: chatService,
+          ),
+          throwsA(anything),
+        );
+
+        expect(
+          await BusinessRestoreService(businessRepository).exportSettings(),
+          before,
+        );
+        expect(chatService.getConversation('local-chat'), isNotNull);
+        expect(
+          await chatService.loadMessages('local-chat'),
+          contains(
+            isA<ChatMessage>()
+                .having((message) => message.id, 'id', 'local-message')
+                .having(
+                  (message) => message.content,
+                  'content',
+                  'Keep message',
+                ),
+          ),
+        );
+        expect(await retainedUpload.exists(), isTrue);
+
+        final reloaded = ChatService(
+          existingRepository: ChatDatabaseRepository(
+            database,
+            databaseFile: File('${root.path}/kelivo.db'),
+          ),
+        );
+        await reloaded.init();
+        try {
+          expect(reloaded.getConversation('local-chat'), isNotNull);
+          expect(
+            await reloaded.loadMessages('local-chat'),
+            contains(
+              isA<ChatMessage>().having(
+                (message) => message.id,
+                'id',
+                'local-message',
+              ),
+            ),
+          );
+        } finally {
+          await reloaded.close();
+        }
+      },
+    );
+
+    test('merge parses every session before writing any chat rows', () async {
+      final businessBefore = await BusinessRestoreService(
+        businessRepository,
+      ).exportSettings();
+      final malformed = _chatboxFixture();
+      (malformed['chat-sessions-list'] as List).add({
+        'id': 'broken-assistant',
+        'name': 'Broken',
+        'starred': 'not-a-bool',
+      });
+      malformed['session:broken-assistant'] = {
+        'messages': <dynamic>[],
+        'threads': <dynamic>[],
+      };
+      await backup.writeAsString(jsonEncode(malformed), flush: true);
+
+      await expectLater(
+        ChatboxImporter.importFromChatbox(
+          file: backup,
+          mode: RestoreMode.merge,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        ),
+        throwsA(anything),
+      );
+
+      expect(
+        chatService.getConversation('chatbox_default_assistant-1'),
+        isNull,
+      );
+      expect(
+        await BusinessRestoreService(businessRepository).exportSettings(),
+        businessBefore,
+      );
+    });
+
+    test('merge skips conversations and messages that already exist', () async {
+      await chatService.restoreConversation(
+        Conversation(id: 'chatbox_default_assistant-1', title: 'Existing'),
+        <ChatMessage>[
+          ChatMessage(
+            id: 'message-1',
+            role: 'user',
+            content: 'Hello',
+            conversationId: 'chatbox_default_assistant-1',
+          ),
+        ],
+      );
+
+      // Merge dedup now reads ids only; existing rows must still be skipped.
+      final result = await ChatboxImporter.importFromChatbox(
+        file: backup,
+        mode: RestoreMode.merge,
+        businessRepository: businessRepository,
+        chatService: chatService,
+      );
+
+      expect(result.conversations, 0);
+      expect(result.messages, 0);
+      expect(
+        (await chatService.loadMessages(
+          'chatbox_default_assistant-1',
+        )).map((message) => message.id),
+        ['message-1'],
+      );
+    });
+
+    test('fails closed when chat and business repositories differ', () async {
+      await chatService.restoreConversation(
+        Conversation(id: 'local-chat', title: 'Keep chat'),
+        const <ChatMessage>[],
+      );
+      final otherFile = File('${root.path}/other.db');
+      final otherDatabase = AppDatabase.open(file: otherFile);
+      final otherBusinessRepository = BusinessRepository(otherDatabase);
+      try {
+        final businessBefore = await BusinessRestoreService(
+          otherBusinessRepository,
+        ).exportSettings();
+        await expectLater(
+          ChatboxImporter.importFromChatbox(
+            file: backup,
+            mode: RestoreMode.overwrite,
+            businessRepository: otherBusinessRepository,
+            chatService: chatService,
+          ),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'message',
+              'chat_business_database_mismatch',
+            ),
+          ),
+        );
+
+        expect(chatService.getConversation('local-chat'), isNotNull);
+        expect(
+          chatService.getConversation('chatbox_default_assistant-1'),
+          isNull,
+        );
+        expect(
+          await BusinessRestoreService(
+            otherBusinessRepository,
+          ).exportSettings(),
+          businessBefore,
+        );
+      } finally {
+        await otherDatabase.close();
+      }
+    });
+
+    test('Chatbox reasoning survives as reasoningText', () async {
+      final reasoningBackup = await File('${root.path}/chatbox_reasoning.json')
+          .writeAsString(
+            jsonEncode({
+              '__exported_at': '2026-07-18T00:00:00.000Z',
+              'settings': {
+                'providers': {
+                  'openai': {
+                    'apiKey': 'chatbox-secret',
+                    'apiHost': 'https://api.example.test',
+                    'apiPath': '/v1/chat/completions',
+                    'models': [
+                      {'modelId': 'gpt-test'},
+                    ],
+                  },
+                },
+              },
+              'chat-sessions-list': [
+                {'id': 'assistant-r', 'name': 'Reasoning', 'starred': false},
+              ],
+              'session:assistant-r': {
+                'settings': {'provider': 'openai', 'modelId': 'gpt-test'},
+                'messages': [
+                  {
+                    'id': 'user-r',
+                    'role': 'user',
+                    'content': 'Why?',
+                    'timestamp': 1784332800000,
+                    'contentParts': [
+                      {'type': 'text', 'text': 'Why?'},
+                    ],
+                  },
+                  {
+                    'id': 'assistant-r-msg',
+                    'role': 'assistant',
+                    'content': 'Because.',
+                    'timestamp': 1784332801000,
+                    'contentParts': [
+                      {'type': 'reasoning', 'text': 'first thought'},
+                      {'type': 'reasoning', 'text': 'second thought'},
+                      {'type': 'text', 'text': 'Because.'},
+                    ],
+                  },
+                ],
+                'threads': <dynamic>[],
+              },
+            }),
+            flush: true,
+          );
+
+      await ChatboxImporter.importFromChatbox(
+        file: reasoningBackup,
+        mode: RestoreMode.overwrite,
+        businessRepository: businessRepository,
+        chatService: chatService,
+      );
+
+      final messages = await chatService.loadMessages(
+        'chatbox_default_assistant-r',
+      );
+      final assistant = messages.singleWhere((m) => m.id == 'assistant-r-msg');
+      expect(assistant.reasoningText, 'first thought\nsecond thought');
+      expect(assistant.content, 'Because.');
+      expect(
+        assistant.parts.whereType<ReasoningPart>().map((part) => part.text),
+        ['first thought', 'second thought'],
+      );
+      expect(
+        renderAssistantFromParts(
+          parts: assistant.parts,
+          hasContentSplits: false,
+        ),
+        isTrue,
+      );
+      expect(assistant.parts.map((part) => part.kind).toList(), [
+        'reasoning',
+        'reasoning',
+        'text',
+      ]);
+    });
+
+    test('preserves newline across attachment boundary', () async {
+      final splitBackup = await File('${root.path}/chatbox_split.json')
+          .writeAsString(
+            jsonEncode({
+              ..._chatboxFixture(),
+              'session:assistant-1': {
+                'settings': {'provider': 'openai', 'modelId': 'gpt-test'},
+                'messages': [
+                  {
+                    'id': 'message-split',
+                    'role': 'user',
+                    'content': 'beforeafter',
+                    'timestamp': 1784332800000,
+                    'contentParts': [
+                      {'type': 'text', 'text': 'before'},
+                      {'type': 'image', 'url': 'https://example.com/mid.png'},
+                      {'type': 'text', 'text': 'after'},
+                    ],
+                  },
+                ],
+                'threads': <dynamic>[],
+              },
+            }),
+            flush: true,
+          );
+
+      await ChatboxImporter.importFromChatbox(
+        file: splitBackup,
+        mode: RestoreMode.overwrite,
+        businessRepository: businessRepository,
+        chatService: chatService,
+      );
+
+      final messages = await chatService.loadMessages(
+        'chatbox_default_assistant-1',
+      );
+      final user = messages.singleWhere((m) => m.id == 'message-split');
+      expect(
+        user.parts.whereType<ImagePart>().single.uri,
+        'https://example.com/mid.png',
+      );
+      expect(
+        user.parts.whereType<TextPart>().map((part) => part.text).join(),
+        'before\nafter',
+      );
+      expect(user.content, 'before\nafter');
+    });
+
+    test(
+      'imports image/file attachments as structured parts without markers',
+      () async {
+        final result = await ChatboxImporter.importFromChatbox(
+          file: backup,
+          mode: RestoreMode.overwrite,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        );
+        expect(result.messages, 1);
+        final messages = await chatService.loadMessages(
+          'chatbox_default_assistant-1',
+        );
+        final user = messages.singleWhere((m) => m.id == 'message-1');
+        expect(user.content, 'Hello');
+        expect(user.content.contains('[image:'), isFalse);
+        expect(user.content.contains('[file:'), isFalse);
+        expect(user.parts.whereType<TextPart>().single.text, 'Hello');
+        final image = user.parts.whereType<ImagePart>().single;
+        expect(image.uri, 'https://example.com/pic.png');
+        final file = user.parts.whereType<FilePart>().single;
+        expect(file.uri, 'https://example.com/notes.pdf');
+        expect(file.name, 'notes.pdf');
+        expect(file.mime, 'application/pdf');
+        for (final part in user.parts) {
+          expect(part.encodePayload().contains('[image:'), isFalse);
+          expect(part.encodePayload().contains('[file:'), isFalse);
+        }
+      },
+    );
+
+    test('tool-role import keeps ImagePart attachments', () async {
+      final toolBackup = await File('${root.path}/chatbox_tool_image.json')
+          .writeAsString(
+            jsonEncode({
+              ..._chatboxFixture(),
+              'session:assistant-1': {
+                'settings': {'provider': 'openai', 'modelId': 'gpt-test'},
+                'messages': [
+                  {
+                    'id': 'tool-with-image',
+                    'role': 'tool',
+                    'name': 'screenshot',
+                    'content': 'tool result',
+                    'timestamp': 1784332800000,
+                    'contentParts': [
+                      {
+                        'type': 'tool-call',
+                        'state': 'result',
+                        'toolName': 'screenshot',
+                        'args': {'x': 1},
+                        'result': 'captured',
+                      },
+                      {'type': 'image', 'url': 'https://example.com/tool.png'},
+                    ],
+                  },
+                ],
+                'threads': <dynamic>[],
+              },
+            }),
+            flush: true,
+          );
+
+      await ChatboxImporter.importFromChatbox(
+        file: toolBackup,
+        mode: RestoreMode.overwrite,
+        businessRepository: businessRepository,
+        chatService: chatService,
+      );
+
+      final messages = await chatService.loadMessages(
+        'chatbox_default_assistant-1',
+      );
+      final tool = messages.singleWhere((m) => m.id == 'tool-with-image');
+      expect(tool.role, 'tool');
+      final image = tool.parts.whereType<ImagePart>().single;
+      expect(image.uri, 'https://example.com/tool.png');
+      final payload = jsonDecode(tool.content) as Map<String, dynamic>;
+      expect(payload['tool'], 'screenshot');
+      expect(payload['result'], 'captured');
+    });
+
+    test('preserves newline across reasoning boundary', () async {
+      final reasoningSplit =
+          await File('${root.path}/chatbox_reasoning_split.json').writeAsString(
+            jsonEncode({
+              ..._chatboxFixture(),
+              'session:assistant-1': {
+                'settings': {'provider': 'openai', 'modelId': 'gpt-test'},
+                'messages': [
+                  {
+                    'id': 'assistant-reasoning-split',
+                    'role': 'assistant',
+                    'content': 'beforeafter',
+                    'timestamp': 1784332800000,
+                    'contentParts': [
+                      {'type': 'text', 'text': 'before'},
+                      {'type': 'reasoning', 'text': 'think'},
+                      {'type': 'text', 'text': 'after'},
+                    ],
+                  },
+                ],
+                'threads': <dynamic>[],
+              },
+            }),
+            flush: true,
+          );
+
+      await ChatboxImporter.importFromChatbox(
+        file: reasoningSplit,
+        mode: RestoreMode.overwrite,
+        businessRepository: businessRepository,
+        chatService: chatService,
+      );
+
+      final messages = await chatService.loadMessages(
+        'chatbox_default_assistant-1',
+      );
+      final assistant = messages.singleWhere(
+        (m) => m.id == 'assistant-reasoning-split',
+      );
+      expect(assistant.reasoningText, 'think');
+      expect(
+        assistant.parts.whereType<TextPart>().map((part) => part.text).join(),
+        'before\nafter',
+      );
+      expect(assistant.content, 'before\nafter');
+      expect(
+        renderAssistantFromParts(
+          parts: assistant.parts,
+          hasContentSplits: false,
+        ),
+        isTrue,
+      );
+      expect(assistant.parts.map((part) => part.kind).toList(), [
+        'text',
+        'reasoning',
+        'text',
+      ]);
+    });
+
+    test(
+      'imports formatVersion=2 ZIP providers, conversation, and image file',
+      () async {
+        final png = _chatboxPngBytes();
+        final zip = await File('${root.path}/chatbox-backup-2026-7-18.zip')
+            .writeAsBytes(
+              _encodeChatboxZipV2(
+                settings: _chatboxZipSettings(),
+                session: _chatboxZipSession(imageStorageKey: 'picture:test'),
+                resources: [
+                  _ChatboxZipResource(
+                    id: 'resource-000001',
+                    storageKey: 'picture:test',
+                    sessionId: 'assistant-1',
+                    path: 'sessions/assistant-1/resources/resource-000001.png',
+                    mimeType: 'image/png',
+                    kind: 'image',
+                    bytes: png,
+                  ),
+                ],
+              ),
+              flush: true,
+            );
+
+        final result = await ChatboxImporter.importFromChatbox(
+          file: zip,
+          mode: RestoreMode.overwrite,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        );
+
+        expect(result.providers, 1);
+        expect(result.assistants, 1);
+        expect(result.conversations, 1);
+        expect(result.messages, 1);
+        final exported = await BusinessRestoreService(
+          businessRepository,
+        ).exportSettings();
+        final providers =
+            jsonDecode(exported['provider_configs_v1'] as String) as Map;
+        expect((providers['openai'] as Map)['apiKey'], 'chatbox-secret');
+
+        final messages = await chatService.loadMessages(
+          'chatbox_default_assistant-1',
+        );
+        final user = messages.singleWhere((m) => m.id == 'message-1');
+        expect(user.content, 'Hello');
+        final image = user.parts.whereType<ImagePart>().single;
+        expect(image.unavailable, isFalse);
+        final path = SandboxPathResolver.fix(image.uri);
+        expect(File(path).existsSync(), isTrue);
+        expect(await File(path).readAsBytes(), png);
+      },
+    );
+
+    test('rejects a settings-only ZIP in overwrite mode', () async {
+      final zip = await File('${root.path}/chatbox-settings-only.zip')
+          .writeAsBytes(
+            _encodeChatboxZipV2(settings: _chatboxZipSettings()),
+            flush: true,
+          );
+
+      await expectLater(
+        ChatboxImporter.importFromChatbox(
+          file: zip,
+          mode: RestoreMode.overwrite,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        ),
+        throwsA(
+          isA<ChatboxImportException>().having(
+            (e) => e.message,
+            'message',
+            contains('Chat History'),
+          ),
+        ),
+      );
+    });
+
+    test('rejects a non-Chatbox ZIP', () async {
+      final archive = Archive()
+        ..add(ArchiveFile.string('hello.txt', 'not chatbox'));
+      final zip = await File(
+        '${root.path}/random.zip',
+      ).writeAsBytes(ZipEncoder().encodeBytes(archive), flush: true);
+
+      await expectLater(
+        ChatboxImporter.importFromChatbox(
+          file: zip,
+          mode: RestoreMode.merge,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        ),
+        throwsA(isA<ChatboxImportException>()),
+      );
+    });
+
+    test(
+      'merge of two ZIP backups does not overwrite the first image',
+      () async {
+        final pngA = _chatboxPngBytes();
+        final pngB = Uint8List.fromList([...pngA, 7, 8, 9]);
+        final zipA = await File('${root.path}/chatbox-a.zip').writeAsBytes(
+          _encodeChatboxZipV2(
+            settings: _chatboxZipSettings(),
+            session: _chatboxZipSession(
+              id: 'assistant-a',
+              messageId: 'message-a',
+              imageStorageKey: 'picture:a',
+            ),
+            resources: [
+              _ChatboxZipResource(
+                id: 'resource-000001',
+                storageKey: 'picture:a',
+                sessionId: 'assistant-a',
+                path: 'sessions/assistant-a/resources/resource-000001.png',
+                mimeType: 'image/png',
+                kind: 'image',
+                bytes: pngA,
+              ),
+            ],
+          ),
+          flush: true,
+        );
+        final zipB = await File('${root.path}/chatbox-b.zip').writeAsBytes(
+          _encodeChatboxZipV2(
+            settings: _chatboxZipSettings(),
+            session: _chatboxZipSession(
+              id: 'assistant-b',
+              messageId: 'message-b',
+              imageStorageKey: 'picture:b',
+            ),
+            resources: [
+              _ChatboxZipResource(
+                id: 'resource-000001',
+                storageKey: 'picture:b',
+                sessionId: 'assistant-b',
+                path: 'sessions/assistant-b/resources/resource-000001.png',
+                mimeType: 'image/png',
+                kind: 'image',
+                bytes: pngB,
+              ),
+            ],
+          ),
+          flush: true,
+        );
+
+        await ChatboxImporter.importFromChatbox(
+          file: zipA,
+          mode: RestoreMode.merge,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        );
+        final first = (await chatService.loadMessages(
+          'chatbox_default_assistant-a',
+        )).singleWhere((m) => m.id == 'message-a');
+        final pathA = SandboxPathResolver.fix(
+          first.parts.whereType<ImagePart>().single.uri,
+        );
+
+        await ChatboxImporter.importFromChatbox(
+          file: zipB,
+          mode: RestoreMode.merge,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        );
+        final second = (await chatService.loadMessages(
+          'chatbox_default_assistant-b',
+        )).singleWhere((m) => m.id == 'message-b');
+        final pathB = SandboxPathResolver.fix(
+          second.parts.whereType<ImagePart>().single.uri,
+        );
+
+        expect(pathA, isNot(pathB));
+        expect(await File(pathA).readAsBytes(), pngA);
+        expect(await File(pathB).readAsBytes(), pngB);
+      },
+    );
+
+    test('failed ZIP import does not publish resources', () async {
+      final png = _chatboxPngBytes();
+      final destDir = Directory('${root.path}/upload/chatbox');
+      await destDir.create(recursive: true);
+      final sentinel = File('${destDir.path}/resource-000001.png');
+      await sentinel.writeAsBytes(const [9, 9, 9], flush: true);
+
+      final zip = await File('${root.path}/chatbox-fail.zip').writeAsBytes(
+        _encodeChatboxZipV2(
+          settings: _chatboxZipSettings(),
+          session: _chatboxZipSession(imageStorageKey: 'picture:test'),
+          resources: [
+            _ChatboxZipResource(
+              id: 'resource-000001',
+              storageKey: 'picture:test',
+              sessionId: 'assistant-1',
+              path: 'sessions/assistant-1/resources/resource-000001.png',
+              mimeType: 'image/png',
+              kind: 'image',
+              bytes: png,
+            ),
+          ],
+        ),
+        flush: true,
+      );
+
+      final otherFile = File('${root.path}/other-fail.db');
+      final otherDatabase = AppDatabase.open(file: otherFile);
+      final otherBusinessRepository = BusinessRepository(otherDatabase);
+      try {
+        await expectLater(
+          ChatboxImporter.importFromChatbox(
+            file: zip,
+            mode: RestoreMode.merge,
+            businessRepository: otherBusinessRepository,
+            chatService: chatService,
+          ),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'message',
+              'chat_business_database_mismatch',
+            ),
+          ),
+        );
+      } finally {
+        await otherDatabase.close();
+      }
+
+      expect(await sentinel.readAsBytes(), const [9, 9, 9]);
+      expect(destDir.listSync().whereType<File>(), hasLength(1));
+    });
+
+    test(
+      'imports ZIP tool-result text into the tool message payload',
+      () async {
+        const resultText = 'stored chatbox tool output';
+        final zip = await File('${root.path}/chatbox-tool.zip').writeAsBytes(
+          _encodeChatboxZipV2(
+            settings: _chatboxZipSettings(),
+            session: {
+              'id': 'assistant-1',
+              'name': 'Chatbox assistant',
+              'starred': true,
+              'settings': {'provider': 'openai', 'modelId': 'gpt-test'},
+              'messages': [
+                {
+                  'id': 'system-1',
+                  'role': 'system',
+                  'content': 'Imported system prompt',
+                },
+                {
+                  'id': 'tool-1',
+                  'role': 'tool',
+                  'name': 'search',
+                  'timestamp': 1784332800000,
+                  'contentParts': [
+                    {
+                      'type': 'tool-call',
+                      'state': 'result',
+                      'toolName': 'search',
+                      'args': {'q': 'kelivo'},
+                      'resultStorageKey': 'tool-result:1',
+                    },
+                  ],
+                },
+              ],
+              'threads': <dynamic>[],
+            },
+            resources: [
+              _ChatboxZipResource(
+                id: 'resource-000002',
+                storageKey: 'tool-result:1',
+                sessionId: 'assistant-1',
+                path: 'sessions/assistant-1/resources/resource-000002.txt',
+                mimeType: 'text/plain',
+                kind: 'tool-result',
+                encoding: 'utf8',
+                bytes: utf8.encode(resultText),
+              ),
+            ],
+          ),
+          flush: true,
+        );
+
+        await ChatboxImporter.importFromChatbox(
+          file: zip,
+          mode: RestoreMode.overwrite,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        );
+
+        final messages = await chatService.loadMessages(
+          'chatbox_default_assistant-1',
+        );
+        final tool = messages.singleWhere((m) => m.id == 'tool-1');
+        expect(tool.role, 'tool');
+        final payload = jsonDecode(tool.content) as Map<String, dynamic>;
+        expect(payload['tool'], 'search');
+        expect(payload['result'], resultText);
+      },
+    );
+
+    test('rejects an unknown Chatbox formatVersion', () async {
+      final zip = await File('${root.path}/chatbox-v99.zip').writeAsBytes(
+        _encodeChatboxZipV2(settings: _chatboxZipSettings(), formatVersion: 99),
+        flush: true,
+      );
+
+      await expectLater(
+        ChatboxImporter.importFromChatbox(
+          file: zip,
+          mode: RestoreMode.merge,
+          businessRepository: businessRepository,
+          chatService: chatService,
+        ),
+        throwsA(
+          isA<ChatboxUnsupportedBackupVersionException>().having(
+            (e) => e.version,
+            'version',
+            99,
+          ),
+        ),
+      );
+    });
+  });
+}
+
+Uint8List _chatboxPngBytes() => Uint8List.fromList(
+  base64.decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=',
+  ),
+);
+
+Map<String, dynamic> _chatboxZipSettings() => {
+  'providers': {
+    'openai': {
+      'apiKey': 'chatbox-secret',
+      'apiHost': 'https://api.example.test',
+      'apiPath': '/v1/chat/completions',
+      'models': [
+        {'modelId': 'gpt-test'},
+      ],
+    },
+  },
+};
+
+Map<String, dynamic> _chatboxZipSession({
+  String id = 'assistant-1',
+  String messageId = 'message-1',
+  required String imageStorageKey,
+}) => {
+  'id': id,
+  'name': 'Chatbox assistant',
+  'starred': true,
+  'settings': {'provider': 'openai', 'modelId': 'gpt-test', 'temperature': 0.5},
+  'messages': [
+    {'id': 'system-1', 'role': 'system', 'content': 'Imported system prompt'},
+    {
+      'id': messageId,
+      'role': 'user',
+      'content': 'Hello',
+      'timestamp': 1784332800000,
+      'contentParts': [
+        {'type': 'text', 'text': 'Hello'},
+        {'type': 'image', 'storageKey': imageStorageKey},
+      ],
+    },
+  ],
+  'threads': <dynamic>[],
+};
+
+class _ChatboxZipResource {
+  const _ChatboxZipResource({
+    required this.id,
+    required this.storageKey,
+    required this.sessionId,
+    required this.path,
+    required this.mimeType,
+    required this.kind,
+    required this.bytes,
+    this.encoding = 'data-url-base64',
+  });
+
+  final String id;
+  final String storageKey;
+  final String sessionId;
+  final String path;
+  final String mimeType;
+  final String kind;
+  final String encoding;
+  final List<int> bytes;
+}
+
+Uint8List _encodeChatboxZipV2({
+  Map<String, dynamic>? settings,
+  Map<String, dynamic>? session,
+  List<_ChatboxZipResource> resources = const [],
+  int formatVersion = 2,
+}) {
+  final files = <String, List<int>>{};
+  Map<String, dynamic>? settingsDesc;
+  if (settings != null) {
+    final bytes = utf8.encode(jsonEncode(settings));
+    files['settings.json'] = bytes;
+    settingsDesc = _zipJsonDescriptor('settings.json', bytes);
+  }
+
+  final sessionEntries = <Map<String, dynamic>>[];
+  if (session != null) {
+    final bytes = utf8.encode(jsonEncode(session));
+    final path = 'sessions/${session['id']}/session.json';
+    files[path] = bytes;
+    sessionEntries.add({
+      ..._zipJsonDescriptor(path, bytes),
+      'id': session['id'],
+      'meta': {
+        'id': session['id'],
+        'name': session['name'],
+        'starred': session['starred'] ?? false,
+        'sortOrder': 1,
+        'createdAt': 1,
+      },
+      'resourceIds': [for (final resource in resources) resource.id],
+    });
+  }
+
+  final resourceEntries = <Map<String, dynamic>>[];
+  for (final resource in resources) {
+    files[resource.path] = resource.bytes;
+    resourceEntries.add({
+      ..._zipJsonDescriptor(resource.path, resource.bytes),
+      'id': resource.id,
+      'originalStorageKeys': [resource.storageKey],
+      'sessionIds': [resource.sessionId],
+      'scope': 'session',
+      'encoding': resource.encoding,
+      'mimeType': resource.mimeType,
+      'kind': resource.kind,
+      'filename': 'pic.png',
+    });
+  }
+
+  final manifest = <String, dynamic>{
+    'format': 'chatbox-backup',
+    'formatVersion': formatVersion,
+    'exportedAt': '2026-07-18T00:00:00.000Z',
+    'application': {'name': 'Chatbox', 'version': '1.22.0', 'platform': 'test'},
+    'exportItems': [
+      if (settings != null) 'setting',
+      if (session != null) 'conversations',
+    ],
+    'data': {if (settingsDesc != null) 'settings': settingsDesc},
+    'sessions': sessionEntries,
+    'resources': resourceEntries,
+    'warnings': <dynamic>[],
+    'stats': {
+      'sessionCount': sessionEntries.length,
+      'resourceCount': resourceEntries.length,
+      'deduplicatedResourceCount': 0,
+      'warningCount': 0,
+    },
+  };
+  files['manifest.json'] = utf8.encode(jsonEncode(manifest));
+
+  final archive = Archive();
+  for (final entry in files.entries) {
+    archive.add(ArchiveFile.bytes(entry.key, entry.value));
+  }
+  return ZipEncoder().encodeBytes(archive);
+}
+
+Map<String, dynamic> _zipJsonDescriptor(String path, List<int> bytes) {
+  return {
+    'path': path,
+    'size': bytes.length,
+    'checksum': {
+      'algorithm': 'sha256',
+      'value': sha256.convert(bytes).toString(),
+    },
+  };
+}

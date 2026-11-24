@@ -1,0 +1,12 @@
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{ "text": "Think in one short sentence, then generate a 16x16 solid red PNG square. No scene, no text, no extra objects." }]
+    }
+  ],
+  "generationConfig": {
+    "responseModalities": ["TEXT", "IMAGE"],
+    "thinkingConfig": { "includeThoughts": true }
+  }
+}

@@ -1,0 +1,342 @@
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:Kelivo/core/database/business_settings_router.dart';
+import 'package:Kelivo/core/providers/settings_provider.dart';
+import 'package:Kelivo/theme/chat_bubble_style.dart';
+
+import 'support/business_test_harness.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('bubble style overrides default to empty', () async {
+    final harness = await createBusinessTestHarness(initial: {});
+    final settings = SettingsProvider(harness.preferences);
+    await settings.loaded;
+
+    expect(settings.chatBubbleStyleOverrides, const ChatBubbleStyleOverrides());
+    expect(settings.chatBubbleStyleOverrides.isDefault, isTrue);
+    expect(
+      settings.userChatBubbleStyleOverrides,
+      settings.assistantChatBubbleStyleOverrides,
+    );
+    expect(
+      settings.chatBubbleStyleOverridesFor(ChatBubbleStyleTarget.user),
+      settings.chatBubbleStyleOverridesFor(ChatBubbleStyleTarget.assistant),
+    );
+  });
+
+  test(
+    'hiding custom reply bubbles preserves the saved layout options',
+    () async {
+      final harness = await createBusinessTestHarness();
+      final settings = SettingsProvider(harness.preferences);
+      await settings.loaded;
+      await settings.setChatMessageBackgroundStyle(
+        ChatMessageBackgroundStyle.frosted,
+      );
+      expect(settings.assistantBodyBubbleVisible, isTrue);
+      await settings.setAssistantBubbleFitContent(true);
+      await settings.setAssistantBubbleSplitParagraphs(true);
+      await settings.setShowAssistantBodyBubble(false);
+
+      final reloaded = SettingsProvider(harness.preferences);
+      await reloaded.loaded;
+      await reloaded.setChatMessageBackgroundStyle(
+        ChatMessageBackgroundStyle.solid,
+      );
+      expect(reloaded.assistantBodyBubbleVisible, isFalse);
+      expect(reloaded.assistantBubbleFitContent, isFalse);
+      expect(reloaded.assistantBubbleSplitParagraphs, isFalse);
+
+      await reloaded.setChatMessageBackgroundStyle(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      expect(reloaded.assistantBodyBubbleVisible, isFalse);
+      expect(reloaded.assistantBubbleFitContent, isTrue);
+      expect(reloaded.assistantBubbleSplitParagraphs, isTrue);
+
+      await reloaded.setChatMessageBackgroundStyle(
+        ChatMessageBackgroundStyle.frosted,
+      );
+      expect(reloaded.assistantBodyBubbleVisible, isFalse);
+      await reloaded.setShowAssistantBodyBubble(true);
+      expect(reloaded.assistantBodyBubbleVisible, isTrue);
+      expect(reloaded.assistantBubbleFitContent, isTrue);
+      expect(reloaded.assistantBubbleSplitParagraphs, isTrue);
+    },
+  );
+
+  test(
+    'user-only overrides leave assistant unchanged and survive reload',
+    () async {
+      final harness = await createBusinessTestHarness(initial: {});
+      final settings = SettingsProvider(harness.preferences);
+      await settings.loaded;
+
+      const user = ChatBubbleStyleOverrides(
+        textArgbLight: 0xFFAA2200,
+        cornerRadius: 20,
+      );
+      await settings.setChatBubbleStyleOverridesFor(
+        ChatBubbleStyleTarget.user,
+        user,
+      );
+
+      expect(
+        settings.assistantChatBubbleStyleOverrides,
+        const ChatBubbleStyleOverrides(),
+      );
+      expect(settings.userChatBubbleStyleOverrides, user);
+      expect(
+        settings.chatBubbleStyleOverridesFor(ChatBubbleStyleTarget.user),
+        user,
+      );
+      expect(
+        settings.chatBubbleStyleOverridesFor(ChatBubbleStyleTarget.assistant),
+        const ChatBubbleStyleOverrides(),
+      );
+      expect(
+        harness.preferences.getString('chat_bubble_style_overrides_user_v1'),
+        jsonEncode(user.toJson()),
+      );
+
+      final reloaded = SettingsProvider(harness.preferences);
+      await reloaded.loaded;
+      expect(
+        reloaded.assistantChatBubbleStyleOverrides,
+        const ChatBubbleStyleOverrides(),
+      );
+      expect(reloaded.userChatBubbleStyleOverrides, user);
+    },
+  );
+
+  test(
+    'first assistant role write snapshots the previous assistant value onto user',
+    () async {
+      final harness = await createBusinessTestHarness(initial: {});
+      final settings = SettingsProvider(harness.preferences);
+      await settings.loaded;
+
+      const shared = ChatBubbleStyleOverrides(
+        backgroundArgbLight: 0xFF112233,
+        cornerRadius: 8,
+      );
+      await settings.setChatBubbleStyleOverrides(shared);
+      expect(settings.userChatBubbleStyleOverrides, shared);
+      expect(
+        harness.preferences.getString('chat_bubble_style_overrides_user_v1'),
+        isNull,
+      );
+
+      const assistantNext = ChatBubbleStyleOverrides(cornerRadius: 2);
+      await settings.setChatBubbleStyleOverridesFor(
+        ChatBubbleStyleTarget.assistant,
+        assistantNext,
+      );
+
+      expect(settings.assistantChatBubbleStyleOverrides, assistantNext);
+      expect(settings.userChatBubbleStyleOverrides, shared);
+      expect(
+        harness.preferences.getString('chat_bubble_style_overrides_user_v1'),
+        jsonEncode(shared.toJson()),
+      );
+
+      final reloaded = SettingsProvider(harness.preferences);
+      await reloaded.loaded;
+      expect(reloaded.assistantChatBubbleStyleOverrides, assistantNext);
+      expect(reloaded.userChatBubbleStyleOverrides, shared);
+    },
+  );
+
+  test(
+    'overlapping first assistant role writes persist the latest value',
+    () async {
+      final harness = await createBusinessTestHarness(initial: {});
+      final settings = SettingsProvider(harness.preferences);
+      await settings.loaded;
+
+      const shared = ChatBubbleStyleOverrides(
+        backgroundArgbLight: 0xFF112233,
+        cornerRadius: 8,
+      );
+      await settings.setChatBubbleStyleOverrides(shared);
+      expect(
+        harness.preferences.getString('chat_bubble_style_overrides_user_v1'),
+        isNull,
+      );
+
+      const assistantA = ChatBubbleStyleOverrides(cornerRadius: 2);
+      const assistantB = ChatBubbleStyleOverrides(cornerRadius: 4);
+      final first = settings.setChatBubbleStyleOverridesFor(
+        ChatBubbleStyleTarget.assistant,
+        assistantA,
+      );
+      final second = settings.setChatBubbleStyleOverridesFor(
+        ChatBubbleStyleTarget.assistant,
+        assistantB,
+      );
+      await first;
+      await second;
+
+      expect(settings.assistantChatBubbleStyleOverrides, assistantB);
+      expect(settings.userChatBubbleStyleOverrides, shared);
+      expect(
+        harness.preferences.getString('chat_bubble_style_overrides_v1'),
+        jsonEncode(assistantB.toJson()),
+      );
+      expect(
+        harness.preferences.getString('chat_bubble_style_overrides_user_v1'),
+        jsonEncode(shared.toJson()),
+      );
+
+      final reloaded = SettingsProvider(harness.preferences);
+      await reloaded.loaded;
+      expect(reloaded.assistantChatBubbleStyleOverrides, assistantB);
+      expect(reloaded.userChatBubbleStyleOverrides, shared);
+    },
+  );
+
+  test(
+    'reset clears a user-only split even when assistant is already default',
+    () async {
+      final harness = await createBusinessTestHarness(initial: {});
+      final settings = SettingsProvider(harness.preferences);
+      await settings.loaded;
+      await settings.setChatBubbleStyleOverridesFor(
+        ChatBubbleStyleTarget.user,
+        const ChatBubbleStyleOverrides(cornerRadius: 20),
+      );
+
+      await settings.setChatBubbleStyleOverrides(
+        const ChatBubbleStyleOverrides(),
+      );
+
+      expect(settings.assistantChatBubbleStyleOverrides.isDefault, isTrue);
+      expect(settings.userChatBubbleStyleOverrides.isDefault, isTrue);
+      expect(
+        harness.preferences.getString('chat_bubble_style_overrides_user_v1'),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'thinking and tool card style persists through mode changes and reset',
+    () async {
+      final harness = await createBusinessTestHarness();
+      final settings = SettingsProvider(harness.preferences);
+      await settings.loaded;
+      const target = ChatBubbleStyleTarget.thinkingToolCard;
+      const assistant = ChatBubbleStyleOverrides(cornerRadius: 4);
+      const cards = ChatBubbleStyleOverrides(cornerRadius: 24);
+      await settings.setChatBubbleStyleOverrides(assistant);
+      await settings.setChatMessageBackgroundStyle(
+        ChatMessageBackgroundStyle.solid,
+      );
+      expect(settings.assistantBubbleSplitParagraphs, isFalse);
+      expect(settings.customizeThinkingToolCards, isFalse);
+      expect(settings.chatBubbleStyleOverridesFor(target), assistant);
+      await settings.setCustomizeThinkingToolCards(true);
+      expect(settings.chatBubbleStyleOverridesFor(target), assistant);
+      await settings.setChatBubbleStyleOverridesFor(target, cards);
+      expect(settings.assistantChatBubbleStyleOverrides, assistant);
+      expect(settings.chatBubbleStyleOverridesFor(target), cards);
+
+      await settings.setAssistantBubbleSplitParagraphs(true);
+      expect(settings.chatBubbleStyleOverridesFor(target), cards);
+      await settings.setAssistantBubbleSplitParagraphs(false);
+      expect(settings.chatBubbleStyleOverridesFor(target), cards);
+      await settings.setShowAssistantBodyBubble(false);
+      expect(settings.chatBubbleStyleOverridesFor(target), cards);
+
+      await settings.setChatMessageBackgroundStyle(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      expect(settings.chatBubbleStyleOverridesFor(target), assistant);
+      await settings.setChatMessageBackgroundStyle(
+        ChatMessageBackgroundStyle.frosted,
+      );
+      expect(settings.chatBubbleStyleOverridesFor(target), cards);
+
+      await settings.setCustomizeThinkingToolCards(false);
+      final reloaded = SettingsProvider(harness.preferences);
+      await reloaded.loaded;
+      expect(reloaded.customizeThinkingToolCards, isFalse);
+      expect(reloaded.chatBubbleStyleOverridesFor(target), assistant);
+      await reloaded.setCustomizeThinkingToolCards(true);
+      expect(reloaded.chatBubbleStyleOverridesFor(target), cards);
+      expect(reloaded.copyWith().chatBubbleStyleOverridesFor(target), cards);
+
+      await reloaded.resetThinkingToolCardStyle();
+      final afterReset = SettingsProvider(harness.preferences);
+      await afterReset.loaded;
+      expect(afterReset.customizeThinkingToolCards, isFalse);
+      await afterReset.setCustomizeThinkingToolCards(true);
+      expect(afterReset.chatBubbleStyleOverridesFor(target), assistant);
+    },
+  );
+
+  test('persists and reloads bubble style overrides', () async {
+    final harness = await createBusinessTestHarness(initial: {});
+    final settings = SettingsProvider(harness.preferences);
+    await settings.loaded;
+
+    const next = ChatBubbleStyleOverrides(
+      backgroundArgbLight: 0xFF112233,
+      frostedOpacity: 0.4,
+      blurSigma: 22,
+      cornerRadius: 8,
+    );
+    await settings.setChatBubbleStyleOverrides(next);
+
+    expect(settings.chatBubbleStyleOverrides, next);
+    expect(
+      harness.preferences.getString('chat_bubble_style_overrides_v1'),
+      jsonEncode(next.toJson()),
+    );
+
+    final reloaded = SettingsProvider(harness.preferences);
+    await reloaded.loaded;
+    expect(reloaded.chatBubbleStyleOverrides, next);
+  });
+
+  test('reset persists an empty override object', () async {
+    final harness = await createBusinessTestHarness(initial: {});
+    final settings = SettingsProvider(harness.preferences);
+    await settings.loaded;
+    await settings.setChatBubbleStyleOverrides(
+      const ChatBubbleStyleOverrides(blurSigma: 9),
+    );
+    await settings.setChatBubbleStyleOverrides(
+      const ChatBubbleStyleOverrides(),
+    );
+
+    expect(settings.chatBubbleStyleOverrides.isDefault, isTrue);
+    expect(
+      harness.preferences.getString('chat_bubble_style_overrides_v1'),
+      '{}',
+    );
+  });
+
+  test('backup registry classifies the overrides key as a preference', () {
+    expect(
+      BusinessKeyRegistry.classify('chat_bubble_style_overrides_v1'),
+      BusinessKeyDisposition.preference,
+    );
+    expect(
+      BusinessKeyRegistry.preferenceKeys,
+      contains('chat_bubble_style_overrides_v1'),
+    );
+    expect(
+      BusinessKeyRegistry.classify('chat_bubble_style_overrides_user_v1'),
+      BusinessKeyDisposition.preference,
+    );
+    expect(
+      BusinessKeyRegistry.preferenceKeys,
+      contains('chat_bubble_style_overrides_user_v1'),
+    );
+  });
+}

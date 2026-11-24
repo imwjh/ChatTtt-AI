@@ -1,0 +1,574 @@
+import 'dart:developer' as developer;
+import 'dart:io';
+
+import 'package:path/path.dart' as p;
+import 'package:sqlite3/sqlite3.dart' as sqlite;
+
+import '../../database/app_database.dart';
+import '../../database/database_installation_gate.dart';
+import 'backup_task_progress.dart';
+import 'restore_bundle_mover.dart';
+import 'restore_bundle_staging.dart';
+import 'restore_durability.dart';
+import 'restore_live_database.dart';
+import 'restore_previous_builder.dart';
+import 'restore_previous_store.dart';
+import 'restore_receipt.dart';
+import 'restore_startup_gate.dart';
+import 'restore_workspace_lock.dart';
+
+typedef _PreviousState = ({
+  PersistedRestorePrevious previous,
+  ValidatedRestoreCandidate candidate,
+});
+
+/// Reports that cutover failed and its compensating rollback also failed.
+///
+/// The original objects and stack traces remain available for diagnostics,
+/// while [toString] exposes only error types so propagating this exception
+/// cannot accidentally include paths or persisted values.
+final class RestoreCutoverRollbackException extends StateError {
+  RestoreCutoverRollbackException({
+    required this.cutoverError,
+    required this.cutoverStackTrace,
+    required this.rollbackError,
+    required this.rollbackStackTrace,
+  }) : super('restore_cutover_rollback');
+
+  final Object cutoverError;
+  final StackTrace cutoverStackTrace;
+  final Object rollbackError;
+  final StackTrace rollbackStackTrace;
+
+  @override
+  String toString() =>
+      'RestoreCutoverRollbackException('
+      'cutoverError: ${cutoverError.runtimeType}, '
+      'rollbackError: ${rollbackError.runtimeType})';
+}
+
+/// Converges one published restore run while the startup workspace lock is
+/// held and no business persistence has been opened.
+final class RestoreCutoverExecutor {
+  factory RestoreCutoverExecutor({
+    required Directory appDataDirectory,
+    required String runId,
+    required RestoreWorkspaceLock workspaceLock,
+    RestoreDurability? durability,
+    bool archived = false,
+    ValidatedRestoreCandidate? validatedCandidate,
+    RestoreStartupStageSink? onStage,
+    BackupProgressSink? onProgress,
+    RestoreStartupDiagnostics? diagnostics,
+  }) {
+    final resolvedDurability = durability ?? RestorePlatformDurability();
+    return RestoreCutoverExecutor._(
+      appDataDirectory: appDataDirectory,
+      runId: runId,
+      workspaceLock: workspaceLock,
+      durability: resolvedDurability,
+      archived: archived,
+      validatedCandidate: validatedCandidate,
+      onStage: onStage,
+      onProgress: onProgress,
+      diagnostics: diagnostics,
+    );
+  }
+
+  RestoreCutoverExecutor._({
+    required this.appDataDirectory,
+    required this.runId,
+    required this.workspaceLock,
+    required this.durability,
+    required bool archived,
+    required ValidatedRestoreCandidate? validatedCandidate,
+    required this.onStage,
+    required this.onProgress,
+    required this.diagnostics,
+  }) : _provenCandidate = validatedCandidate,
+       _proofHold = validatedCandidate == null
+           ? null
+           : workspaceLock.currentHold,
+       receiptStore = RestoreReceiptStore(
+         appDataDirectory: appDataDirectory,
+         runId: runId,
+         durability: durability,
+         archived: archived,
+       ) {
+    previousStore = RestorePreviousStore(
+      runDirectory: receiptStore.runDirectory,
+      durability: durability,
+      onProgress: onProgress,
+    );
+    mover = RestoreBundleMover(
+      appDataDirectory: appDataDirectory,
+      candidateDirectory: candidateDirectory,
+      previousStore: previousStore,
+      durability: durability,
+      onProgress: onProgress,
+    );
+  }
+
+  final Directory appDataDirectory;
+  final String runId;
+  final RestoreWorkspaceLock workspaceLock;
+  final RestoreDurability durability;
+  final RestoreStartupStageSink? onStage;
+  final BackupProgressSink? onProgress;
+  final RestoreStartupDiagnostics? diagnostics;
+  final RestoreReceiptStore receiptStore;
+  late final RestorePreviousStore previousStore;
+  late final RestoreBundleMover mover;
+
+  // What this executor has already proven, and the workspace hold it proved
+  // them under. Within one hold, business persistence is closed and the lock
+  // keeps every other process out, so the only thing that can invalidate a
+  // proof is a move this executor itself performs -- rollback, which clears all
+  // three. The moment the hold changes or ends, every proof is dropped: a new
+  // process, or the same one after releasing the lock, re-derives the whole
+  // bundle from disk.
+  Object? _proofHold;
+  ValidatedRestoreCandidate? _provenCandidate;
+  PersistedRestorePrevious? _provenPrevious;
+  RestoreReceipt? _provenInstall;
+
+  Directory get candidateDirectory =>
+      Directory(p.join(receiptStore.runDirectory.path, 'candidate'));
+
+  Future<RestoreReceipt> executeWhileWorkspaceLocked({
+    required String observedMarkerFileName,
+  }) async {
+    var history = await receiptStore.readHistoryWhileWorkspaceLocked();
+    if (history.isEmpty ||
+        history.first.state != RestoreReceiptState.prepared) {
+      throw StateError('restore_cutover_receipt_history');
+    }
+    final preparedReceipt = history.first;
+    diagnostics?.recordReceipt(history.last);
+    _dropProofsFromEarlierHolds();
+    await workspaceLock.claimCutoverRunWhileWorkspaceLocked(
+      runId: runId,
+      observedMarkerFileName: observedMarkerFileName,
+    );
+
+    while (true) {
+      history = await receiptStore.readHistoryWhileWorkspaceLocked();
+      if (history.isEmpty ||
+          history.first.checksum != preparedReceipt.checksum) {
+        throw StateError('restore_cutover_receipt_history');
+      }
+      final latest = history.last;
+      diagnostics?.recordReceipt(latest);
+      switch (latest.state) {
+        case RestoreReceiptState.prepared:
+          var candidate = _memoizedCandidate(preparedReceipt);
+          if (candidate == null) {
+            onStage?.call(RestoreStartupStage.checkingBackup);
+            candidate = await RestoreBundleStaging.validateExistingCandidate(
+              candidateDirectory: candidateDirectory,
+              expectedManifestSha256: preparedReceipt.candidateManifestSha256,
+              onProgress: onProgress,
+            );
+            _provenCandidate = candidate;
+          }
+          onStage?.call(RestoreStartupStage.preservingCurrentData);
+          final previous = await _completePrevious(
+            preparedReceipt: preparedReceipt,
+            candidate: candidate,
+          );
+          await receiptStore.publishWhileWorkspaceLocked(
+            latest.advance(
+              RestoreReceiptState.oldRenamed,
+              previousManifestSha256: previous.previous.manifestSha256,
+            ),
+          );
+          continue;
+        case RestoreReceiptState.oldRenamed:
+          onStage?.call(RestoreStartupStage.installingBackup);
+          try {
+            final state = await _loadPreviousState(preparedReceipt);
+            await mover.installCandidate(
+              receipt: latest,
+              candidate: state.candidate,
+            );
+          } catch (error, stackTrace) {
+            return _rollbackAfterCutoverFailure(
+              latest: latest,
+              preparedReceipt: preparedReceipt,
+              cutoverError: error,
+              cutoverStackTrace: stackTrace,
+            );
+          }
+          await receiptStore.publishWhileWorkspaceLocked(
+            latest.advance(RestoreReceiptState.newInstalled),
+          );
+          continue;
+        case RestoreReceiptState.newInstalled:
+          try {
+            await _requireInstalled(
+              latest: latest,
+              preparedReceipt: preparedReceipt,
+            );
+          } catch (error, stackTrace) {
+            return _rollbackAfterCutoverFailure(
+              latest: latest,
+              preparedReceipt: preparedReceipt,
+              cutoverError: error,
+              cutoverStackTrace: stackTrace,
+            );
+          }
+          await receiptStore.publishWhileWorkspaceLocked(
+            latest.advance(RestoreReceiptState.verified),
+          );
+          continue;
+        case RestoreReceiptState.verified:
+          try {
+            await _requireInstalled(
+              latest: latest,
+              preparedReceipt: preparedReceipt,
+            );
+          } catch (error, stackTrace) {
+            return _rollbackAfterCutoverFailure(
+              latest: latest,
+              preparedReceipt: preparedReceipt,
+              cutoverError: error,
+              cutoverStackTrace: stackTrace,
+            );
+          }
+          final committed = latest.advance(RestoreReceiptState.committed);
+          await receiptStore.publishWhileWorkspaceLocked(committed);
+          diagnostics?.recordReceipt(committed);
+          return committed;
+        case RestoreReceiptState.committed:
+          return revalidateTerminalWhileWorkspaceLocked(latest);
+        case RestoreReceiptState.rollingBack:
+          _discardProofs();
+          onStage?.call(RestoreStartupStage.rollingBack);
+          return _completeRollback(
+            rollingBack: latest,
+            preparedReceipt: preparedReceipt,
+          );
+        case RestoreReceiptState.rolledBack:
+          return revalidateTerminalWhileWorkspaceLocked(latest);
+      }
+    }
+  }
+
+  /// Re-converges a terminal run before its evidence leaves active admission.
+  /// A committed run is never rolled back here: any unexplained divergence
+  /// remains fail-closed. A rolled-back run may repeat its idempotent reverse
+  /// moves so an interrupted terminal barrier cannot expose mixed state.
+  Future<RestoreReceipt> revalidateTerminalWhileWorkspaceLocked(
+    RestoreReceipt terminalReceipt,
+  ) async {
+    _dropProofsFromEarlierHolds();
+    final history = await receiptStore.readHistoryWhileWorkspaceLocked();
+    if (history.isEmpty ||
+        history.first.state != RestoreReceiptState.prepared ||
+        history.last.checksum != terminalReceipt.checksum) {
+      throw StateError('restore_cutover_terminal_history');
+    }
+    final preparedReceipt = history.first;
+    diagnostics?.recordReceipt(history.last);
+    switch (terminalReceipt.state) {
+      case RestoreReceiptState.committed:
+        await _requireInstalled(
+          latest: terminalReceipt,
+          preparedReceipt: preparedReceipt,
+        );
+        return terminalReceipt;
+      case RestoreReceiptState.rolledBack:
+        onStage?.call(RestoreStartupStage.rollingBack);
+        final state = await _loadRollbackState(preparedReceipt);
+        await mover.rollbackToPrevious(
+          receipt: terminalReceipt,
+          candidate: state.candidate,
+          previous: state.previous,
+        );
+        await mover.validateRolledBack(
+          receipt: terminalReceipt,
+          candidate: state.candidate,
+          previous: state.previous,
+        );
+        return terminalReceipt;
+      case RestoreReceiptState.prepared:
+      case RestoreReceiptState.oldRenamed:
+      case RestoreReceiptState.newInstalled:
+      case RestoreReceiptState.verified:
+      case RestoreReceiptState.rollingBack:
+        throw StateError('restore_cutover_terminal_state');
+    }
+  }
+
+  Future<RestoreReceipt> _beginRollback({
+    required RestoreReceipt latest,
+    required RestoreReceipt preparedReceipt,
+  }) async {
+    final state = await _loadPreviousState(preparedReceipt);
+    await mover.validateRollbackStart(
+      receipt: latest,
+      candidate: state.candidate,
+      previous: state.previous,
+    );
+    final rollingBack = latest.advance(RestoreReceiptState.rollingBack);
+    await receiptStore.publishWhileWorkspaceLocked(rollingBack);
+    diagnostics?.recordReceipt(rollingBack);
+    return _completeRollback(
+      rollingBack: rollingBack,
+      preparedReceipt: preparedReceipt,
+      state: state,
+    );
+  }
+
+  Future<RestoreReceipt> _rollbackAfterCutoverFailure({
+    required RestoreReceipt latest,
+    required RestoreReceipt preparedReceipt,
+    required Object cutoverError,
+    required StackTrace cutoverStackTrace,
+  }) async {
+    developer.log(
+      'Restore cutover failed; starting rollback.',
+      name: 'Kelivo.restore.cutover',
+      error: cutoverError,
+      stackTrace: cutoverStackTrace,
+    );
+    _discardProofs();
+    onStage?.call(RestoreStartupStage.rollingBack);
+    try {
+      return await _beginRollback(
+        latest: latest,
+        preparedReceipt: preparedReceipt,
+      );
+    } catch (rollbackError, rollbackStackTrace) {
+      developer.log(
+        'Restore rollback failed after cutover failure.',
+        name: 'Kelivo.restore.cutover',
+        error: rollbackError,
+        stackTrace: rollbackStackTrace,
+      );
+      Error.throwWithStackTrace(
+        RestoreCutoverRollbackException(
+          cutoverError: cutoverError,
+          cutoverStackTrace: cutoverStackTrace,
+          rollbackError: rollbackError,
+          rollbackStackTrace: rollbackStackTrace,
+        ),
+        rollbackStackTrace,
+      );
+    }
+  }
+
+  Future<RestoreReceipt> _completeRollback({
+    required RestoreReceipt rollingBack,
+    required RestoreReceipt preparedReceipt,
+    _PreviousState? state,
+  }) async {
+    final rollbackState = state ?? await _loadRollbackState(preparedReceipt);
+    await mover.rollbackToPrevious(
+      receipt: rollingBack,
+      candidate: rollbackState.candidate,
+      previous: rollbackState.previous,
+    );
+    await mover.validateRolledBack(
+      receipt: rollingBack,
+      candidate: rollbackState.candidate,
+      previous: rollbackState.previous,
+    );
+    final rolledBack = rollingBack.advance(RestoreReceiptState.rolledBack);
+    await receiptStore.publishWhileWorkspaceLocked(rolledBack);
+    diagnostics?.recordReceipt(rolledBack);
+    return rolledBack;
+  }
+
+  Future<_PreviousState> _completePrevious({
+    required RestoreReceipt preparedReceipt,
+    required ValidatedRestoreCandidate candidate,
+  }) async {
+    final pendingType = await FileSystemEntity.type(
+      previousStore.pendingDirectory.path,
+      followLinks: false,
+    );
+    final previousType = await FileSystemEntity.type(
+      previousStore.previousDirectory.path,
+      followLinks: false,
+    );
+    if (pendingType != FileSystemEntityType.notFound &&
+        pendingType != FileSystemEntityType.directory) {
+      throw StateError('restore_cutover_pending_type');
+    }
+    if (previousType != FileSystemEntityType.notFound &&
+        previousType != FileSystemEntityType.directory) {
+      throw StateError('restore_cutover_previous_type');
+    }
+    if (pendingType == FileSystemEntityType.directory &&
+        previousType == FileSystemEntityType.directory) {
+      throw StateError('restore_cutover_previous_collision');
+    }
+    if (previousType == FileSystemEntityType.directory) {
+      final previous = await _readAndProvePrevious(preparedReceipt);
+      return (previous: previous, candidate: candidate);
+    }
+
+    PersistedRestorePrevious pending;
+    final manifestType = await FileSystemEntity.type(
+      p.join(previousStore.pendingDirectory.path, 'manifest.json'),
+      followLinks: false,
+    );
+    if (pendingType == FileSystemEntityType.directory &&
+        manifestType == FileSystemEntityType.file) {
+      pending = await previousStore.readPending(
+        preparedReceipt: preparedReceipt,
+      );
+    } else {
+      if (manifestType != FileSystemEntityType.notFound) {
+        throw StateError('restore_cutover_previous_manifest_type');
+      }
+      try {
+        await RestoreLiveDatabase.normalize(
+          databaseFile: File(
+            p.join(appDataDirectory.path, AppDatabase.databaseFileName),
+          ),
+          durability: durability,
+        );
+      } catch (error) {
+        // A validated, durable candidate is already held under both leases.
+        // Missing/corrupt live data must not prevent restoring that candidate.
+        // Keep the raw family as evidence; lock, I/O and topology errors still
+        // fail closed because they do not establish database damage.
+        final orphanSidecar =
+            error is StateError &&
+            error.message == 'restore_live_database_orphan_sidecar';
+        final corruptDatabase =
+            error is sqlite.SqliteException &&
+            (error.resultCode == sqlite.SqlError.SQLITE_CORRUPT ||
+                error.resultCode == sqlite.SqlError.SQLITE_NOTADB);
+        if (!orphanSidecar && !corruptDatabase) rethrow;
+        await DatabaseInstallationGate.preserveFailedDatabaseForRestore(
+          appDataDirectory: appDataDirectory,
+          durability: durability,
+        );
+      }
+      final bundle = await RestorePreviousBuilder.build(
+        appDataDirectory: appDataDirectory,
+        preparedReceipt: preparedReceipt,
+        assetRoots: candidate.assetRoots,
+        onProgress: onProgress,
+      );
+      pending = await previousStore.persistPending(
+        bundle: bundle,
+        preparedReceipt: preparedReceipt,
+      );
+    }
+    // No separate whole-tree re-scan before the move: every object the mover
+    // touches is matched against its planned descriptor as it moves, so live
+    // drift since the plan was built still fails closed.
+    await mover.moveLiveToPending(pending);
+    final previous = await previousStore.promotePending(
+      preparedReceipt: preparedReceipt,
+    );
+    _provenPrevious = previous;
+    return (previous: previous, candidate: candidate);
+  }
+
+  Future<_PreviousState> _loadPreviousState(
+    RestoreReceipt preparedReceipt,
+  ) async {
+    if (await FileSystemEntity.type(
+          previousStore.pendingDirectory.path,
+          followLinks: false,
+        ) !=
+        FileSystemEntityType.notFound) {
+      throw StateError('restore_cutover_pending_after_old_renamed');
+    }
+    final previous =
+        _provenPrevious ?? await _readAndProvePrevious(preparedReceipt);
+    final candidate =
+        _memoizedCandidate(preparedReceipt) ??
+        await _readCandidateManifest(preparedReceipt);
+    _provenCandidate = candidate;
+    return (previous: previous, candidate: candidate);
+  }
+
+  /// Proves the installed bundle once per uninterrupted execution.
+  ///
+  /// `newInstalled`, `verified` and the terminal barrier all assert the same
+  /// filesystem state, and only receipt files are written between them, so the
+  /// first proof stands for all three. A later process re-proves from disk.
+  Future<void> _requireInstalled({
+    required RestoreReceipt latest,
+    required RestoreReceipt preparedReceipt,
+  }) async {
+    if (_provenInstall != null) return;
+    onStage?.call(RestoreStartupStage.verifying);
+    final state = await _loadPreviousState(preparedReceipt);
+    await mover.validateInstalled(
+      receipt: latest,
+      candidate: state.candidate,
+      previous: state.previous,
+    );
+    _provenInstall = latest;
+  }
+
+  Future<PersistedRestorePrevious> _readAndProvePrevious(
+    RestoreReceipt preparedReceipt,
+  ) async {
+    final previous = await previousStore.readPrevious(
+      preparedReceipt: preparedReceipt,
+    );
+    await previousStore.validateComplete(previous);
+    _provenPrevious = previous;
+    return previous;
+  }
+
+  ValidatedRestoreCandidate? _memoizedCandidate(
+    RestoreReceipt preparedReceipt,
+  ) {
+    final candidate = _provenCandidate;
+    return candidate != null &&
+            candidate.manifestSha256 == preparedReceipt.candidateManifestSha256
+        ? candidate
+        : null;
+  }
+
+  /// Drops every proof not made under the hold this call runs in.
+  ///
+  /// The lock having been released in between is enough to invalidate them,
+  /// whether or not anything actually changed.
+  void _dropProofsFromEarlierHolds() {
+    final hold = workspaceLock.currentHold;
+    if (hold == null || !identical(hold, _proofHold)) _discardProofs();
+    _proofHold = hold;
+  }
+
+  void _discardProofs() {
+    _provenCandidate = null;
+    _provenPrevious = null;
+    _provenInstall = null;
+  }
+
+  Future<_PreviousState> _loadRollbackState(
+    RestoreReceipt preparedReceipt,
+  ) async {
+    if (await FileSystemEntity.type(
+          previousStore.pendingDirectory.path,
+          followLinks: false,
+        ) !=
+        FileSystemEntityType.notFound) {
+      throw StateError('restore_cutover_pending_during_rollback');
+    }
+    final previous = await previousStore.readPrevious(
+      preparedReceipt: preparedReceipt,
+    );
+    final candidate = await _readCandidateManifest(preparedReceipt);
+    return (previous: previous, candidate: candidate);
+  }
+
+  Future<ValidatedRestoreCandidate> _readCandidateManifest(
+    RestoreReceipt preparedReceipt,
+  ) {
+    return RestoreBundleStaging.readCandidateManifest(
+      candidateDirectory: candidateDirectory,
+      expectedManifestSha256: preparedReceipt.candidateManifestSha256,
+    );
+  }
+}

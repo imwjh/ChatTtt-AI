@@ -1,0 +1,1518 @@
+import 'package:Kelivo/features/world_book/widgets/world_book_entry_widgets.dart';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+import 'package:uuid/uuid.dart';
+
+import '../../core/models/world_book.dart';
+import '../../core/providers/world_book_provider.dart';
+import '../../features/world_book/utils/world_book_import.dart';
+import '../../features/world_book/widgets/world_book_entry_actions.dart';
+import '../../features/world_book/widgets/world_book_library.dart';
+import '../../features/world_book/widgets/world_book_editor.dart';
+import '../../features/world_book/widgets/world_book_card_header.dart';
+import '../../shared/widgets/section_card.dart';
+import '../../icons/lucide_adapter.dart' as lucide;
+import '../../l10n/app_localizations.dart';
+import '../../shared/widgets/ios_switch.dart';
+import '../../shared/widgets/ios_checkbox.dart';
+import '../../shared/widgets/snackbar.dart';
+import '../widgets/desktop_select_dropdown.dart';
+import '../../theme/app_font_weights.dart';
+import 'package:Kelivo/theme/app_semantic_colors.dart';
+
+class DesktopWorldBookPane extends StatefulWidget {
+  const DesktopWorldBookPane({super.key});
+
+  @override
+  State<DesktopWorldBookPane> createState() => _DesktopWorldBookPaneState();
+}
+
+class _DesktopWorldBookPaneState extends State<DesktopWorldBookPane> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      context.read<WorldBookProvider>().initialize();
+    });
+  }
+
+  String _safeFileName(String name) {
+    final cleaned = name
+        .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (cleaned.isEmpty) return 'lorebook';
+    return cleaned.length > 80 ? cleaned.substring(0, 80) : cleaned;
+  }
+
+  String _baseName(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final parts = normalized.split('/');
+    if (parts.isEmpty) return path;
+    return parts.last.isEmpty ? path : parts.last;
+  }
+
+  Future<String?> _readPickedFileAsString(PlatformFile file) async {
+    try {
+      if (file.bytes != null && file.bytes!.isNotEmpty) {
+        return utf8.decode(file.bytes!, allowMalformed: true);
+      }
+    } catch (_) {}
+    final path = file.path;
+    if (path == null || path.isEmpty) return null;
+    try {
+      return await File(path).readAsString();
+    } catch (_) {
+      try {
+        final bytes = await File(path).readAsBytes();
+        return utf8.decode(bytes, allowMalformed: true);
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+
+  Map<String, dynamic> _toRikkaHubExportJson(WorldBook book) {
+    final data = book.toJson();
+    return <String, dynamic>{'version': 1, 'type': 'lorebook', 'data': data};
+  }
+
+  Future<void> _importFromFile({String? groupId}) async {
+    final l10n = AppLocalizations.of(context)!;
+    final provider = context.read<WorldBookProvider>();
+    await provider.initialize();
+    if (!mounted) return;
+
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+        allowMultiple: false,
+        type: FileType.custom,
+        allowedExtensions: const ['json'],
+        withData: true,
+      );
+    } catch (_) {
+      return;
+    }
+
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    final content = await _readPickedFileAsString(file);
+    if (!mounted) return;
+    if (content == null || content.trim().isEmpty) {
+      showAppSnackBar(
+        context,
+        message: l10n.assistantEditSystemPromptImportEmpty,
+        type: NotificationType.warning,
+      );
+      return;
+    }
+
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(content);
+    } catch (_) {
+      showAppSnackBar(
+        context,
+        message: l10n.mcpJsonEditParseFailed,
+        type: NotificationType.error,
+      );
+      return;
+    }
+
+    final imported = parseWorldBookImport(decoded, fileName: file.name);
+    if (imported == null) {
+      showAppSnackBar(
+        context,
+        message: l10n.assistantEditSystemPromptImportFailed,
+        type: NotificationType.error,
+      );
+      return;
+    }
+
+    final normalized = normalizeImportedWorldBook(
+      imported.book,
+      existingBookIds: provider.books.map((e) => e.id).toSet(),
+    );
+    await provider.addBook(normalized, groupId: groupId);
+    if (!mounted) return;
+    if (imported.unsupportedEntryCount > 0) {
+      showAppSnackBar(
+        context,
+        message: l10n.worldBookImportUnsupportedEntries(
+          imported.unsupportedEntryCount,
+        ),
+        type: NotificationType.warning,
+        duration: const Duration(seconds: 10),
+      );
+    }
+  }
+
+  Future<void> _exportBook(WorldBook book) async {
+    final l10n = AppLocalizations.of(context)!;
+    try {
+      final fileName = _safeFileName(
+        book.name.trim().isEmpty ? 'lorebook' : book.name.trim(),
+      );
+      final exportName = '$fileName.json';
+      final json = jsonEncode(_toRikkaHubExportJson(book));
+
+      final String? savePath = await FilePicker.platform.saveFile(
+        dialogTitle: l10n.backupPageExportToFile,
+        fileName: exportName,
+        type: FileType.custom,
+        allowedExtensions: const ['json'],
+      );
+      if (savePath == null) return;
+
+      await File(savePath).parent.create(recursive: true);
+      await File(savePath).writeAsString(json);
+      if (!mounted) return;
+      showAppSnackBar(
+        context,
+        message: l10n.messageExportSheetExportedAs(_baseName(savePath)),
+        type: NotificationType.success,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      showAppSnackBar(
+        context,
+        message: l10n.worldBookExportFailed(e.toString()),
+        type: NotificationType.error,
+      );
+    }
+  }
+
+  Future<bool> _confirmDeleteBook(WorldBook book) async {
+    final l10n = AppLocalizations.of(context)!;
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: Text(l10n.worldBookDeleteTitle),
+          content: Text(
+            l10n.worldBookDeleteMessage(
+              book.name.trim().isEmpty
+                  ? l10n.worldBookUnnamed
+                  : book.name.trim(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text(l10n.worldBookCancel),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text(
+                l10n.worldBookDelete,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    return result == true;
+  }
+
+  Future<WorldBookEntry?> _showEntryEditDialog({WorldBookEntry? entry}) async {
+    return showDialog<WorldBookEntry>(
+      context: context,
+      builder: (ctx) => _WorldBookEntryEditDialog(entry: entry),
+    );
+  }
+
+  Future<void> _addBook({String? groupId}) =>
+      editWorldBook(context, desktop: true, groupId: groupId);
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.read<WorldBookProvider>();
+    return WorldBookLibrary(
+      desktop: true,
+      onAddBook: _addBook,
+      onImport: _importFromFile,
+      buildBook: (book, index, canReorder, selection) {
+        final card = _WorldBookCard(
+          book: book,
+          collapsed: provider.isBookCollapsed(book.id),
+          selection: selection,
+          onToggleCollapsed: () => provider.toggleBookCollapsed(book.id),
+          onAddEntry: () async {
+            final entry = await _showEntryEditDialog();
+            if (!mounted || entry == null) return;
+            await provider.updateBook(
+              book.id,
+              (current) =>
+                  current.copyWith(entries: [...current.entries, entry]),
+            );
+          },
+          onExport: () => _exportBook(book),
+          onConfig: () => editWorldBook(context, desktop: true, book: book),
+          onDelete: () async {
+            final confirm = await _confirmDeleteBook(book);
+            if (!mounted || !confirm) return;
+            await provider.deleteBook(book.id);
+          },
+          onEditEntry: (entry) async {
+            final edited = await _showEntryEditDialog(entry: entry);
+            if (!mounted || edited == null) return;
+            await provider.updateBook(
+              book.id,
+              (current) => current.copyWith(
+                entries: current.entries
+                    .map((e) => e.id == entry.id ? edited : e)
+                    .toList(growable: false),
+              ),
+            );
+          },
+          onDeleteEntry: (entry) async {
+            await provider.updateBook(
+              book.id,
+              (current) => current.copyWith(
+                entries: current.entries
+                    .where((e) => e.id != entry.id)
+                    .toList(growable: false),
+              ),
+            );
+          },
+        );
+        return Padding(
+          key: ValueKey('desktop-world-book-${book.id}'),
+          padding: const EdgeInsets.only(bottom: 10),
+          child: canReorder
+              ? MouseRegion(
+                  cursor: SystemMouseCursors.grab,
+                  child: ReorderableDragStartListener(
+                    key: ValueKey('desktop-world-book-drag-${book.id}'),
+                    index: index,
+                    child: card,
+                  ),
+                )
+              : card,
+        );
+      },
+    );
+  }
+}
+
+class _WorldBookCard extends StatefulWidget {
+  const _WorldBookCard({
+    required this.book,
+    required this.collapsed,
+    required this.onToggleCollapsed,
+    required this.onAddEntry,
+    required this.onExport,
+    required this.onConfig,
+    required this.onDelete,
+    required this.onEditEntry,
+    required this.onDeleteEntry,
+    this.selection,
+  });
+
+  final WorldBook book;
+  final WorldBookSelection? selection;
+  final bool collapsed;
+  final VoidCallback onToggleCollapsed;
+  final VoidCallback onAddEntry;
+  final VoidCallback onExport;
+  final VoidCallback onConfig;
+  final VoidCallback onDelete;
+  final ValueChanged<WorldBookEntry> onEditEntry;
+  final ValueChanged<WorldBookEntry> onDeleteEntry;
+
+  @override
+  State<_WorldBookCard> createState() => _WorldBookCardState();
+}
+
+class _WorldBookCardState extends State<_WorldBookCard> {
+  bool _selecting = false;
+  bool _busy = false;
+  final _selectedIds = <String>{};
+
+  void _toggleEntry(String id) => setState(() {
+    if (!_selectedIds.add(id)) _selectedIds.remove(id);
+  });
+
+  Future<void> _transfer({required bool copy, required Set<String> ids}) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final success = await showWorldBookEntryTransfer(
+      context,
+      sourceBookId: widget.book.id,
+      entryIds: ids,
+      copy: copy,
+    );
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      if (success) {
+        _selecting = false;
+        _selectedIds.clear();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedIds = widget.book.entries
+        .where((entry) => _selectedIds.contains(entry.id))
+        .map((entry) => entry.id)
+        .toSet();
+
+    final selection = widget.selection;
+    return SectionCard(
+      radius: 14,
+      padding: const EdgeInsets.all(12),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        WorldBookCardHeader(
+          book: widget.book,
+          collapsed: widget.collapsed,
+          selection: selection,
+          onToggle: widget.onToggleCollapsed,
+          onAddEntry: widget.onAddEntry,
+          onExport: widget.onExport,
+          onEdit: widget.onConfig,
+          onDelete: widget.onDelete,
+          onSelectEntries: widget.book.entries.isEmpty || _selecting
+              ? null
+              : () {
+                  if (_busy) return;
+                  setState(() => _selecting = true);
+                  if (widget.collapsed) widget.onToggleCollapsed();
+                },
+        ),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeInOutCubic,
+          alignment: Alignment.topCenter,
+          child: widget.collapsed || selection != null
+              ? const SizedBox(width: double.infinity, height: 0)
+              : SizedBox(
+                  width: double.infinity,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Column(
+                      children: [
+                        if (_selecting)
+                          WorldBookEntrySelectionBar(
+                            busy: _busy,
+                            selectedCount: selectedIds.length,
+                            totalCount: widget.book.entries.length,
+                            onCancel: () => setState(() {
+                              _selecting = false;
+                              _selectedIds.clear();
+                            }),
+                            onSelectAll: () => setState(() {
+                              _selectedIds.clear();
+                              if (selectedIds.length !=
+                                  widget.book.entries.length) {
+                                _selectedIds.addAll(
+                                  widget.book.entries.map((entry) => entry.id),
+                                );
+                              }
+                            }),
+                            onCopy: () =>
+                                _transfer(copy: true, ids: selectedIds),
+                            onMove: () =>
+                                _transfer(copy: false, ids: selectedIds),
+                          ),
+                        _EntriesPanel(
+                          bookId: widget.book.id,
+                          entries: widget.book.entries,
+                          onEdit: widget.onEditEntry,
+                          onDelete: widget.onDeleteEntry,
+                          selecting: _selecting,
+                          selectedIds: selectedIds,
+                          busy: _busy,
+                          onToggle: _toggleEntry,
+                          onTransfer: (entry, copy) =>
+                              _transfer(copy: copy, ids: {entry.id}),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _EntriesPanel extends StatelessWidget {
+  const _EntriesPanel({
+    required this.bookId,
+    required this.entries,
+    required this.onEdit,
+    required this.onDelete,
+    required this.selecting,
+    required this.selectedIds,
+    required this.busy,
+    required this.onToggle,
+    required this.onTransfer,
+  });
+
+  final String bookId;
+  final List<WorldBookEntry> entries;
+  final ValueChanged<WorldBookEntry> onEdit;
+  final ValueChanged<WorldBookEntry> onDelete;
+  final bool selecting;
+  final Set<String> selectedIds;
+  final bool busy;
+  final ValueChanged<String> onToggle;
+  final void Function(WorldBookEntry entry, bool copy) onTransfer;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final borderColor = cs.outlineVariant.withValues(
+      alpha: isDark ? 0.16 : 0.12,
+    );
+    final bg = context.appColors.surfaceFill;
+
+    if (entries.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: borderColor, width: 0.8),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              lucide.Lucide.ListTree,
+              size: 18,
+              color: cs.onSurface.withValues(alpha: 0.55),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              l10n.worldBookNoEntriesHint,
+              style: TextStyle(color: cs.onSurface.withValues(alpha: 0.65)),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: borderColor, width: 0.8),
+      ),
+      // Rows only hold hover/tooltip state. Build that state afresh in the
+      // drag overlay instead of reparenting a Material row with a GlobalKey.
+      child: ReorderableList(
+        shrinkWrap: true,
+        primary: false,
+        physics: const NeverScrollableScrollPhysics(),
+        padding: EdgeInsets.zero,
+        onReorderStart: (_) => Tooltip.dismissAllToolTips(),
+        proxyDecorator: (child, index, animation) => ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: ColoredBox(
+            color: bg,
+            child: TooltipVisibility(visible: false, child: child),
+          ),
+        ),
+        itemCount: entries.length,
+        onReorderItem: (oldIndex, newIndex) =>
+            context.read<WorldBookProvider>().reorderEntries(
+              bookId: bookId,
+              oldIndex: oldIndex,
+              newIndex: newIndex,
+            ),
+        itemBuilder: (context, index) => _EntryRow(
+          key: ValueKey(
+            'desktop-world-book-entry-$bookId-${entries[index].id}',
+          ),
+          bookId: bookId,
+          index: index,
+          entry: entries[index],
+          onEdit: onEdit,
+          onDelete: onDelete,
+          selecting: selecting,
+          selected: selectedIds.contains(entries[index].id),
+          busy: busy,
+          onToggle: () => onToggle(entries[index].id),
+          onCopy: () => onTransfer(entries[index], true),
+          onMove: () => onTransfer(entries[index], false),
+        ),
+      ),
+    );
+  }
+}
+
+class _EntryRow extends StatefulWidget {
+  const _EntryRow({
+    super.key,
+    required this.bookId,
+    required this.index,
+    required this.entry,
+    required this.onEdit,
+    required this.onDelete,
+    required this.selecting,
+    required this.selected,
+    required this.busy,
+    required this.onToggle,
+    required this.onCopy,
+    required this.onMove,
+  });
+
+  final String bookId;
+  final int index;
+  final WorldBookEntry entry;
+  final ValueChanged<WorldBookEntry> onEdit;
+  final ValueChanged<WorldBookEntry> onDelete;
+  final bool selecting;
+  final bool selected;
+  final bool busy;
+  final VoidCallback onToggle;
+  final VoidCallback onCopy;
+  final VoidCallback onMove;
+
+  @override
+  State<_EntryRow> createState() => _EntryRowState();
+}
+
+class _EntryRowState extends State<_EntryRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final hoverBg = cs.onSurface.withValues(alpha: isDark ? 0.08 : 0.04);
+
+    final detail = !widget.entry.enabled
+        ? l10n.worldBookDisabledTag
+        : (widget.entry.constantActive ? l10n.worldBookAlwaysOnTag : null);
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.busy
+            ? null
+            : widget.selecting
+            ? widget.onToggle
+            : () => widget.onEdit(widget.entry),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOutCubic,
+          color: _hover ? hoverBg : Colors.transparent,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Row(
+              children: [
+                if (widget.selecting)
+                  IosCheckbox(
+                    value: widget.selected,
+                    semanticLabel: widget.entry.name.trim().isEmpty
+                        ? l10n.worldBookUnnamedEntry
+                        : widget.entry.name,
+                    hitTestSize: 44,
+                    onChanged: widget.busy ? null : (_) => widget.onToggle(),
+                  )
+                else
+                  ReorderableDragStartListener(
+                    index: widget.index,
+                    enabled: !widget.busy,
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.grab,
+                      child: Tooltip(
+                        message: l10n.worldBookDragToReorder,
+                        child: SizedBox(
+                          width: 28,
+                          height: 44,
+                          child: Icon(
+                            lucide.Lucide.GripVertical,
+                            size: 18,
+                            color: worldBookPositionColor(
+                              context,
+                              widget.entry.position,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: WorldBookEntryTitle(
+                          entry: widget.entry,
+                          fontSize: 14,
+                        ),
+                      ),
+                      if (detail != null && detail.isNotEmpty) ...[
+                        const SizedBox(width: 8),
+                        _TagPill(
+                          text: detail,
+                          color: widget.entry.enabled ? cs.primary : cs.error,
+                          subtle: true,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (!widget.selecting && !widget.busy) ...[
+                  const SizedBox(width: 8),
+                  IosSwitch(
+                    value: widget.entry.enabled,
+                    onChanged: (enabled) {
+                      final provider = context.read<WorldBookProvider>();
+                      provider.setEntryEnabled(
+                        widget.bookId,
+                        widget.entry.id,
+                        enabled,
+                      );
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                  _SmallIconBtn(
+                    icon: lucide.Lucide.Copy,
+                    onTap: widget.onCopy,
+                    tooltip: l10n.worldBookCopyEntries,
+                  ),
+                  const SizedBox(width: 6),
+                  _SmallIconBtn(
+                    icon: lucide.Lucide.FolderInput,
+                    onTap: widget.onMove,
+                    tooltip: l10n.worldBookMoveEntries,
+                  ),
+                  const SizedBox(width: 6),
+                  _SmallIconBtn(
+                    icon: lucide.Lucide.Settings2,
+                    onTap: () => widget.onEdit(widget.entry),
+                    tooltip: l10n.worldBookEditEntry,
+                  ),
+                  const SizedBox(width: 6),
+                  _SmallIconBtn(
+                    icon: lucide.Lucide.Trash2,
+                    onTap: () => widget.onDelete(widget.entry),
+                    tooltip: l10n.worldBookDeleteEntry,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TagPill extends StatelessWidget {
+  const _TagPill({
+    required this.text,
+    required this.color,
+    this.subtle = false,
+  });
+
+  final String text;
+  final Color color;
+  final bool subtle;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = subtle
+        ? color.withValues(alpha: isDark ? 0.18 : 0.12)
+        : color.withValues(alpha: isDark ? 0.20 : 0.14);
+    final fg = subtle ? color : color;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 11.5,
+          fontWeight: AppFontWeights.semibold,
+          color: fg,
+          height: 1.0,
+        ),
+      ),
+    );
+  }
+}
+
+class _WorldBookEntryEditDialog extends StatefulWidget {
+  const _WorldBookEntryEditDialog({required this.entry});
+  final WorldBookEntry? entry;
+
+  @override
+  State<_WorldBookEntryEditDialog> createState() =>
+      _WorldBookEntryEditDialogState();
+}
+
+class _WorldBookEntryEditDialogState extends State<_WorldBookEntryEditDialog> {
+  late final TextEditingController _nameController;
+  late final TextEditingController _contentController;
+  late final TextEditingController _priorityController;
+  late final TextEditingController _scanDepthController;
+  late final TextEditingController _injectDepthController;
+  int _sticky = 0;
+  int _cooldown = 0;
+  int _delay = 0;
+  late final TextEditingController _keywordInputController;
+
+  late bool _enabled;
+  late bool _useRegex;
+  late bool _caseSensitive;
+  late bool _constantActive;
+  late WorldBookInjectionPosition _position;
+  late WorldBookInjectionRole _role;
+  late List<String> _keywords;
+
+  @override
+  void initState() {
+    super.initState();
+    final base = widget.entry;
+    _nameController = TextEditingController(text: base?.name ?? '');
+    _contentController = TextEditingController(text: base?.content ?? '');
+    _priorityController = TextEditingController(
+      text: (base?.priority ?? 0).toString(),
+    );
+    _scanDepthController = TextEditingController(
+      text: (base?.scanDepth ?? 4).toString(),
+    );
+    _injectDepthController = TextEditingController(
+      text: (base?.injectDepth ?? 4).toString(),
+    );
+    _keywordInputController = TextEditingController();
+
+    _enabled = base?.enabled ?? true;
+    _useRegex = base?.useRegex ?? false;
+    _caseSensitive = base?.caseSensitive ?? false;
+    _constantActive = base?.constantActive ?? false;
+    _sticky = base?.sticky ?? 0;
+    _cooldown = base?.cooldown ?? 0;
+    _delay = base?.delay ?? 0;
+    _position = base?.position ?? WorldBookInjectionPosition.afterSystemPrompt;
+    _role = base?.role ?? WorldBookInjectionRole.user;
+    _keywords = List<String>.from(base?.keywords ?? const <String>[]);
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _contentController.dispose();
+    _priorityController.dispose();
+    _scanDepthController.dispose();
+    _injectDepthController.dispose();
+    _keywordInputController.dispose();
+    super.dispose();
+  }
+
+  void _addKeywordsFromInput() {
+    final text = _keywordInputController.text.trim();
+    if (text.isEmpty) return;
+    final set = _keywords.toSet();
+    set.add(text);
+    setState(() {
+      _keywords = set.toList(growable: false);
+      _keywordInputController.clear();
+    });
+  }
+
+  List<DesktopSelectOption<WorldBookInjectionPosition>> _positionOptions(
+    AppLocalizations l10n,
+  ) {
+    return <DesktopSelectOption<WorldBookInjectionPosition>>[
+      DesktopSelectOption(
+        value: WorldBookInjectionPosition.beforeSystemPrompt,
+        label: l10n.worldBookInjectionPositionBeforeSystemPrompt,
+      ),
+      DesktopSelectOption(
+        value: WorldBookInjectionPosition.afterSystemPrompt,
+        label: l10n.worldBookInjectionPositionAfterSystemPrompt,
+      ),
+      DesktopSelectOption(
+        value: WorldBookInjectionPosition.topOfChat,
+        label: l10n.worldBookInjectionPositionTopOfChat,
+      ),
+      DesktopSelectOption(
+        value: WorldBookInjectionPosition.bottomOfChat,
+        label: l10n.worldBookInjectionPositionBottomOfChat,
+      ),
+      DesktopSelectOption(
+        value: WorldBookInjectionPosition.atDepth,
+        label: l10n.worldBookInjectionPositionAtDepth,
+      ),
+    ];
+  }
+
+  List<DesktopSelectOption<WorldBookInjectionRole>> _roleOptions(
+    AppLocalizations l10n,
+  ) {
+    return <DesktopSelectOption<WorldBookInjectionRole>>[
+      DesktopSelectOption(
+        value: WorldBookInjectionRole.user,
+        label: l10n.worldBookInjectionRoleUser,
+      ),
+      DesktopSelectOption(
+        value: WorldBookInjectionRole.assistant,
+        label: l10n.worldBookInjectionRoleAssistant,
+      ),
+    ];
+  }
+
+  TextStyle _labelStyle(ColorScheme cs) {
+    return TextStyle(
+      fontSize: 13,
+      fontWeight: AppFontWeights.semibold,
+      color: cs.onSurface.withValues(alpha: 0.82),
+    );
+  }
+
+  TextStyle _hintStyle(ColorScheme cs) {
+    return TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.6));
+  }
+
+  Widget _section({
+    required ColorScheme cs,
+    required bool isDark,
+    required Widget child,
+  }) {
+    final bg = cs.onSurface.withValues(alpha: isDark ? 0.05 : 0.03);
+    final border = cs.outlineVariant.withValues(alpha: 0.12);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: border, width: 0.6),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _labeledField({
+    required ColorScheme cs,
+    required String label,
+    required Widget child,
+    String? hint,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(label, style: _labelStyle(cs)),
+        const SizedBox(height: 6),
+        child,
+        if ((hint ?? '').trim().isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(hint!, style: _hintStyle(cs)),
+        ],
+      ],
+    );
+  }
+
+  Widget _switchRow({
+    required ColorScheme cs,
+    required String label,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+    String? hint,
+  }) {
+    final hasHint = (hint ?? '').trim().isNotEmpty;
+    return Row(
+      crossAxisAlignment: hasHint
+          ? CrossAxisAlignment.start
+          : CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: _labelStyle(cs)),
+              if (hasHint) ...[
+                const SizedBox(height: 4),
+                Text(hint!, style: _hintStyle(cs)),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(width: 12),
+        IosSwitch(value: value, onChanged: onChanged),
+      ],
+    );
+  }
+
+  Widget _smallNumberField({
+    required ColorScheme cs,
+    required String label,
+    required TextEditingController controller,
+    double width = 104,
+    bool signed = false,
+  }) {
+    return _labeledField(
+      cs: cs,
+      label: label,
+      child: SizedBox(
+        width: width,
+        child: TextField(
+          controller: controller,
+          keyboardType: TextInputType.numberWithOptions(signed: signed),
+          inputFormatters: [
+            if (signed)
+              TextInputFormatter.withFunction(
+                (oldValue, newValue) =>
+                    RegExp(r'^-?\d*$').hasMatch(newValue.text)
+                    ? newValue
+                    : oldValue,
+              )
+            else
+              FilteringTextInputFormatter.digitsOnly,
+          ],
+          textAlign: TextAlign.center,
+          decoration: _deskInputDecoration(context),
+        ),
+      ),
+    );
+  }
+
+  DesktopSelectDropdown<T> _formDropdown<T>({
+    required bool isDark,
+    required T value,
+    required List<DesktopSelectOption<T>> options,
+    required ValueChanged<T> onSelected,
+  }) {
+    final fillColor = context.appColors.surfaceFill;
+    return DesktopSelectDropdown<T>(
+      value: value,
+      options: options,
+      onSelected: (v) => onSelected(v),
+      minHeight: 44,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      borderRadius: 12,
+      triggerFillColor: fillColor,
+      maxLabelWidth: 380,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final l10n = AppLocalizations.of(context)!;
+    final size = MediaQuery.sizeOf(context);
+    final maxHeight = size.height * 0.9;
+    final positionOptions = _positionOptions(l10n);
+    final roleOptions = _roleOptions(l10n);
+
+    return Dialog(
+      backgroundColor: context.overlaySurface,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: 760, maxHeight: maxHeight),
+        child: Stack(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 58),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          widget.entry == null
+                              ? l10n.worldBookAddEntry
+                              : l10n.worldBookEditEntry,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: AppFontWeights.emphasis,
+                          ),
+                        ),
+                      ),
+                      _SmallIconBtn(
+                        icon: lucide.Lucide.X,
+                        onTap: () => Navigator.of(context).maybePop(),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      physics: const BouncingScrollPhysics(),
+                      child: LayoutBuilder(
+                        builder: (ctx, constraints) {
+                          final wide = constraints.maxWidth >= 720;
+                          const gap = 14.0;
+
+                          final matchSection = _section(
+                            cs: cs,
+                            isDark: isDark,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _labeledField(
+                                  cs: cs,
+                                  label: l10n.worldBookEntryNameLabel,
+                                  child: TextField(
+                                    controller: _nameController,
+                                    decoration: _deskInputDecoration(context)
+                                        .copyWith(
+                                          hintText:
+                                              l10n.worldBookEntryNameLabel,
+                                        ),
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                _labeledField(
+                                  cs: cs,
+                                  label: l10n.worldBookEntryKeywordsLabel,
+                                  hint: l10n.worldBookEntryKeywordsHint,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      if (_keywords.isNotEmpty)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            bottom: 10,
+                                          ),
+                                          child: Wrap(
+                                            spacing: 8,
+                                            runSpacing: 8,
+                                            children: [
+                                              for (final k in _keywords)
+                                                InputChip(
+                                                  label: Text(k),
+                                                  onDeleted: () => setState(
+                                                    () => _keywords = _keywords
+                                                        .where((e) => e != k)
+                                                        .toList(
+                                                          growable: false,
+                                                        ),
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: TextField(
+                                              controller:
+                                                  _keywordInputController,
+                                              decoration:
+                                                  _deskInputDecoration(
+                                                    context,
+                                                  ).copyWith(
+                                                    hintText: l10n
+                                                        .worldBookEntryKeywordInputHint,
+                                                  ),
+                                              onSubmitted: (_) =>
+                                                  _addKeywordsFromInput(),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          _SmallIconBtn(
+                                            icon: lucide.Lucide.Plus,
+                                            onTap: _addKeywordsFromInput,
+                                            tooltip: l10n
+                                                .worldBookEntryKeywordAddTooltip,
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                _switchRow(
+                                  cs: cs,
+                                  label: l10n.worldBookEntryUseRegexLabel,
+                                  value: _useRegex,
+                                  onChanged: (v) =>
+                                      setState(() => _useRegex = v),
+                                ),
+                                const SizedBox(height: 10),
+                                _switchRow(
+                                  cs: cs,
+                                  label: l10n.worldBookEntryCaseSensitiveLabel,
+                                  value: _caseSensitive,
+                                  onChanged: (v) =>
+                                      setState(() => _caseSensitive = v),
+                                ),
+                                const SizedBox(height: 12),
+                                Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: _smallNumberField(
+                                    cs: cs,
+                                    label: l10n.worldBookEntryScanDepthLabel,
+                                    controller: _scanDepthController,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+
+                          final contentSection = _section(
+                            cs: cs,
+                            isDark: isDark,
+                            child: _labeledField(
+                              cs: cs,
+                              label: l10n.worldBookEntryContentLabel,
+                              child: TextField(
+                                controller: _contentController,
+                                minLines: 12,
+                                maxLines: 18,
+                                keyboardType: TextInputType.multiline,
+                                decoration: _deskInputDecoration(context)
+                                    .copyWith(
+                                      hintText: l10n.worldBookEntryContentLabel,
+                                    ),
+                              ),
+                            ),
+                          );
+
+                          final injectionSection = _section(
+                            cs: cs,
+                            isDark: isDark,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _switchRow(
+                                  cs: cs,
+                                  label: l10n.worldBookEntryEnabledLabel,
+                                  value: _enabled,
+                                  onChanged: (v) =>
+                                      setState(() => _enabled = v),
+                                ),
+                                const SizedBox(height: 10),
+                                _switchRow(
+                                  cs: cs,
+                                  label: l10n.worldBookEntryAlwaysOnLabel,
+                                  hint: l10n.worldBookEntryAlwaysOnHint,
+                                  value: _constantActive,
+                                  onChanged: (v) =>
+                                      setState(() => _constantActive = v),
+                                ),
+                                const SizedBox(height: 12),
+                                WorldBookTimedEffectsFields(
+                                  entry:
+                                      widget.entry ??
+                                      const WorldBookEntry(id: ''),
+                                  onChanged: (sticky, cooldown, delay) {
+                                    _sticky = sticky;
+                                    _cooldown = cooldown;
+                                    _delay = delay;
+                                  },
+                                ),
+                                const SizedBox(height: 12),
+                                _labeledField(
+                                  cs: cs,
+                                  label:
+                                      l10n.worldBookEntryInjectionPositionLabel,
+                                  child: _formDropdown(
+                                    isDark: isDark,
+                                    value: _position,
+                                    options: positionOptions,
+                                    onSelected: (v) =>
+                                        setState(() => _position = v),
+                                  ),
+                                ),
+                                if (_position ==
+                                    WorldBookInjectionPosition.atDepth) ...[
+                                  const SizedBox(height: 12),
+                                  Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: _smallNumberField(
+                                      cs: cs,
+                                      label:
+                                          l10n.worldBookEntryInjectDepthLabel,
+                                      controller: _injectDepthController,
+                                    ),
+                                  ),
+                                ],
+                                const SizedBox(height: 12),
+                                _labeledField(
+                                  cs: cs,
+                                  label: l10n.worldBookEntryInjectionRoleLabel,
+                                  child: _formDropdown(
+                                    isDark: isDark,
+                                    value: _role,
+                                    options: roleOptions,
+                                    onSelected: (v) =>
+                                        setState(() => _role = v),
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: _smallNumberField(
+                                    cs: cs,
+                                    label: l10n.worldBookEntryPriorityLabel,
+                                    controller: _priorityController,
+                                    signed: true,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+
+                          Widget top;
+                          if (wide) {
+                            top = Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      matchSection,
+                                      const SizedBox(height: gap),
+                                      contentSection,
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: gap),
+                                Expanded(child: injectionSection),
+                              ],
+                            );
+                          } else {
+                            top = Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                matchSection,
+                                const SizedBox(height: gap),
+                                contentSection,
+                                const SizedBox(height: gap),
+                                injectionSection,
+                              ],
+                            );
+                          }
+
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [top],
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Positioned(
+              right: 12,
+              bottom: 12,
+              child: _DeskIosButton(
+                label: l10n.worldBookSave,
+                filled: true,
+                dense: true,
+                onTap: () {
+                  final base = widget.entry;
+                  final id = base?.id ?? const Uuid().v4();
+                  final priority =
+                      int.tryParse(_priorityController.text.trim()) ??
+                      (base?.priority ?? 0);
+                  final scanDepth =
+                      int.tryParse(_scanDepthController.text.trim()) ??
+                      (base?.scanDepth ?? 4);
+                  final injectDepth =
+                      int.tryParse(_injectDepthController.text.trim()) ??
+                      (base?.injectDepth ?? 4);
+                  Navigator.of(context).pop(
+                    WorldBookEntry(
+                      id: id,
+                      name: _nameController.text.trim(),
+                      enabled: _enabled,
+                      priority: priority,
+                      position: _position,
+                      content: _contentController.text,
+                      injectDepth: injectDepth.clamp(0, 200).toInt(),
+                      role: _role,
+                      keywords: List<String>.from(_keywords),
+                      useRegex: _useRegex,
+                      caseSensitive: _caseSensitive,
+                      scanDepth: scanDepth.clamp(1, 200).toInt(),
+                      constantActive: _constantActive,
+                      sticky: _sticky,
+                      cooldown: _cooldown,
+                      delay: _delay,
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SmallIconBtn extends StatefulWidget {
+  const _SmallIconBtn({required this.icon, required this.onTap, this.tooltip});
+  final IconData icon;
+  final VoidCallback onTap;
+  final String? tooltip;
+
+  @override
+  State<_SmallIconBtn> createState() => _SmallIconBtnState();
+}
+
+class _SmallIconBtnState extends State<_SmallIconBtn> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = _hover
+        ? (cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.05))
+        : Colors.transparent;
+    final btn = MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          width: 28,
+          height: 28,
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          alignment: Alignment.center,
+          child: Icon(widget.icon, size: 18, color: cs.onSurface),
+        ),
+      ),
+    );
+    if ((widget.tooltip ?? '').isEmpty) return btn;
+    return Tooltip(message: widget.tooltip!, child: btn);
+  }
+}
+
+class _DeskIosButton extends StatefulWidget {
+  const _DeskIosButton({
+    required this.label,
+    required this.filled,
+    required this.dense,
+    required this.onTap,
+  });
+  final String label;
+  final bool filled;
+  final bool dense;
+  final VoidCallback onTap;
+
+  @override
+  State<_DeskIosButton> createState() => _DeskIosButtonState();
+}
+
+class _DeskIosButtonState extends State<_DeskIosButton> {
+  bool _hover = false;
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = widget.filled
+        ? cs.onPrimary
+        : cs.onSurface.withValues(alpha: 0.9);
+    final bg = widget.filled
+        ? (_hover ? cs.primary.withValues(alpha: 0.92) : cs.primary)
+        : (_hover
+              ? (cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.05))
+              : Colors.transparent);
+    final borderColor = widget.filled
+        ? Colors.transparent
+        : cs.outlineVariant.withValues(alpha: isDark ? 0.22 : 0.18);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: _pressed ? 0.98 : 1.0,
+          duration: const Duration(milliseconds: 110),
+          curve: Curves.easeOutCubic,
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              vertical: widget.dense ? 8 : 12,
+              horizontal: 12,
+            ),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: borderColor),
+            ),
+            child: Text(
+              widget.label,
+              style: TextStyle(
+                color: textColor,
+                fontWeight: AppFontWeights.semibold,
+                fontSize: widget.dense ? 13 : 14,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+InputDecoration _deskInputDecoration(BuildContext context) {
+  final cs = Theme.of(context).colorScheme;
+  return InputDecoration(
+    isDense: false,
+    filled: true,
+    fillColor: context.appColors.surfaceFill,
+    border: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: BorderSide(
+        color: cs.outlineVariant.withValues(alpha: 0.2),
+        width: 0.8,
+      ),
+    ),
+    enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: BorderSide(
+        color: cs.outlineVariant.withValues(alpha: 0.2),
+        width: 0.8,
+      ),
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: BorderSide(
+        color: cs.primary.withValues(alpha: 0.45),
+        width: 1.0,
+      ),
+    ),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+  );
+}

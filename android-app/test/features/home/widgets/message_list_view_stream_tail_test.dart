@@ -1,0 +1,531 @@
+import 'dart:convert';
+
+import "../../../support/business_test_harness.dart";
+
+import 'package:Kelivo/core/models/chat_message.dart';
+import 'package:Kelivo/core/models/message_part.dart';
+import 'package:Kelivo/core/models/message_part_snapshot.dart';
+import 'package:Kelivo/core/providers/assistant_provider.dart';
+import 'package:Kelivo/core/providers/settings_provider.dart';
+import 'package:Kelivo/core/providers/tts_provider.dart';
+import 'package:Kelivo/core/providers/user_provider.dart';
+import 'package:Kelivo/features/browser/widgets/browser_page_card.dart';
+import 'package:Kelivo/features/home/controllers/scroll_controller.dart'
+    as scroll_ctrl;
+import 'package:Kelivo/features/home/controllers/streaming_content_notifier.dart';
+import 'package:Kelivo/features/home/services/ask_user_interaction_service.dart';
+import 'package:Kelivo/features/home/services/local_tools_service.dart';
+import 'package:Kelivo/features/home/services/tool_approval_service.dart';
+import 'package:Kelivo/features/home/widgets/message_list_view.dart';
+import 'package:Kelivo/l10n/app_localizations.dart';
+import 'package:markstream/markstream.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+const _streamingId = 'probe-streaming';
+const _browserCalls = 35;
+
+void main() {
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
+
+  for (final (platform, size, fontScale) in [
+    (TargetPlatform.iOS, const Size(390, 700), 1.0),
+    (TargetPlatform.macOS, const Size(1100, 760), 1.8),
+  ]) {
+    testWidgets(
+      'opening browser history stays at the bottom on ${platform.name}',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        tester.view.physicalSize = size;
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final key = GlobalKey<_ProbeHarnessState>();
+          await tester.pumpWidget(
+            _ProbeHarness(
+              key: key,
+              historyTail: _browserHistoryTail(),
+              chatFontScale: fontScale,
+            ),
+          );
+          final state = key.currentState!;
+          final reveal = platform == TargetPlatform.iOS
+              ? state.scrollCtrl.settleAtBottomBeforeReveal()
+              : Future<void>.value();
+          if (platform == TargetPlatform.iOS) {
+            expect(
+              state.scrollCtrl.pinBottomDuringViewportResizeIfNeeded(),
+              isTrue,
+            );
+            tester.view.physicalSize = const Size(390, 620);
+          }
+          final position = state.scrollController.position;
+          for (var frame = 0; frame < 30; frame++) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(position.pixels, closeTo(position.maxScrollExtent, .5));
+            expect(
+              find.byType(BrowserPageCard).evaluate().length,
+              lessThan(_browserCalls),
+            );
+          }
+          await reveal;
+          expect(find.byType(BrowserPageCard), findsWidgets);
+          expect(
+            state.scrollController.hasActiveLayoutPositioningRequest,
+            isFalse,
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
+  }
+
+  testWidgets('wheel input takes over during opening layout', (tester) async {
+    final key = GlobalKey<_ProbeHarnessState>();
+    await tester.pumpWidget(
+      _ProbeHarness(key: key, historyTail: _browserHistoryTail()),
+    );
+    final state = key.currentState!;
+    expect(state.scrollController.hasActiveLayoutPositioningRequest, isTrue);
+    await tester.sendEventToBinding(
+      PointerScrollEvent(
+        position: tester.getCenter(find.byType(MessageListView)),
+        scrollDelta: const Offset(0, -120),
+      ),
+    );
+    expect(state.scrollController.hasActiveLayoutPositioningRequest, isFalse);
+    await tester.pumpAndSettle(const Duration(milliseconds: 16));
+    expect(state.scrollController.position.extentAfter, greaterThan(1));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'long tool reply stays lazy inside the production message viewport',
+    (tester) async {
+      final key = GlobalKey<_ProbeHarnessState>();
+      await tester.pumpWidget(_ProbeHarness(key: key));
+      final state = key.currentState!;
+      final builder = MessagePartSnapshotBuilder(arrivalOrdered: true);
+      final parts = <MessagePart>[
+        for (var i = 0; i < 1000; i++)
+          ToolCallPart(
+            '{"id":"long-$i","name":"mcp_read_file","content":"done"}',
+          ),
+        const TextPart('tail'),
+      ];
+      Future<void> frames() async {
+        for (var i = 0; i < 30; i++) {
+          await tester.pump(const Duration(milliseconds: 30));
+        }
+      }
+
+      state.pushParts(builder.update(parts));
+      await frames();
+      state.scrollController.jumpTo(
+        state.scrollController.position.maxScrollExtent,
+      );
+      await frames();
+      expect(find.byKey(const ValueKey('tool-id:long-999')), findsOneWidget);
+      final mounted = find
+          .byWidgetPredicate(
+            (widget) =>
+                widget.key is ValueKey<String> &&
+                (widget.key as ValueKey<String>).value.startsWith(
+                  'tool-id:long-',
+                ),
+          )
+          .evaluate()
+          .length;
+      expect(mounted, lessThan(150));
+      state.scrollController.jumpTo(
+        state.scrollController.position.maxScrollExtent / 2,
+      );
+      state.scrollCtrl.handleUserScrollIntent();
+      await frames();
+      final before = state.scrollController.offset;
+      parts[1000] = const TextPart('tail with more text');
+      state.pushParts(builder.update(parts, changed: {1000}));
+      await frames();
+      expect(
+        state.scrollController.offset,
+        moreOrLessEquals(before, epsilon: 1),
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  for (final input in ['touch', 'wheel', 'keyboard']) {
+    testWidgets(
+      '$input scroll up stays put through idle and more stream output',
+      (tester) async {
+        tester.view.physicalSize = const Size(1170, 2100);
+        tester.view.devicePixelRatio = 3;
+        addTearDown(tester.view.reset);
+        Future<void> pumpFrames() async {
+          for (var frame = 0; frame < 20; frame++) {
+            await tester.pump(const Duration(milliseconds: 20));
+          }
+        }
+
+        final key = GlobalKey<_ProbeHarnessState>();
+        await tester.pumpWidget(_ProbeHarness(key: key));
+        await pumpFrames();
+        final state = key.currentState!;
+        final content = List.filled(
+          40,
+          'Streaming content for scroll testing.',
+        ).join('\n\n');
+        state.pushStreamTick(visibleContent: content, targetContent: content);
+        await pumpFrames();
+        final position = state.scrollController.position;
+        expect(position.extentAfter, lessThan(1));
+
+        final timeline = find.byType(MessageListView);
+        switch (input) {
+          case 'touch':
+            await tester.drag(timeline, const Offset(0, 30));
+          case 'wheel':
+            await tester.sendEventToBinding(
+              PointerScrollEvent(
+                position: tester.getCenter(timeline),
+                scrollDelta: const Offset(0, -12),
+              ),
+            );
+          case 'keyboard':
+            tester
+                .widget<Focus>(
+                  find.byKey(const ValueKey('timeline-keyboard-scroll-region')),
+                )
+                .focusNode!
+                .requestFocus();
+            await tester.pump();
+            await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+        }
+        await pumpFrames();
+        expect(position.extentAfter, greaterThan(1));
+        if (input != 'keyboard') {
+          expect(position.extentAfter, lessThanOrEqualTo(56));
+        }
+        final readingOffset = position.pixels;
+        await tester.pump(const Duration(minutes: 2));
+        expect(state.scrollCtrl.autoStickToBottom, isFalse);
+
+        final updated = '$content\n\nMore streaming content.';
+        state.pushStreamTick(visibleContent: updated, targetContent: updated);
+        await pumpFrames();
+        expect(position.pixels, moreOrLessEquals(readingOffset, epsilon: 1));
+
+        state.finishStreaming(updated);
+        state.scrollCtrl.stickToBottomAfterGeneration();
+        await pumpFrames();
+        expect(position.pixels, moreOrLessEquals(readingOffset, epsilon: 1));
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  testWidgets('wheel scroll cancels the generation-finish pin before layout', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1170, 2100);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    final key = GlobalKey<_ProbeHarnessState>();
+    await tester.pumpWidget(_ProbeHarness(key: key));
+    await tester.pump(const Duration(milliseconds: 100));
+    final state = key.currentState!;
+    final content = List.filled(
+      40,
+      'Content before generation ends.',
+    ).join('\n\n');
+    state.pushStreamTick(visibleContent: content, targetContent: content);
+    for (var frame = 0; frame < 20; frame++) {
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+    final position = state.scrollController.position;
+    expect(position.extentAfter, lessThan(1));
+
+    state.finishStreaming(content);
+    state.scrollCtrl.stickToBottomAfterGeneration();
+    await tester.sendEventToBinding(
+      PointerScrollEvent(
+        position: tester.getCenter(find.byType(MessageListView)),
+        scrollDelta: const Offset(0, -12),
+      ),
+    );
+    final readingOffset = position.pixels;
+    expect(position.extentAfter, greaterThan(1));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(position.pixels, moreOrLessEquals(readingOffset, epsilon: 1));
+    expect(state.scrollCtrl.autoStickToBottom, isFalse);
+    await tester.pump(const Duration(seconds: 1));
+    expect(position.pixels, moreOrLessEquals(readingOffset, epsilon: 1));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('生成结束时尾部高度变化被布局阶段吸收，不再跳一下再滑回底部', (tester) async {
+    tester.view.physicalSize = const Size(1170, 2100);
+    tester.view.devicePixelRatio = 3.0;
+    addTearDown(tester.view.reset);
+
+    final key = GlobalKey<_ProbeHarnessState>();
+    await tester.pumpWidget(_ProbeHarness(key: key));
+    await tester.pump(const Duration(milliseconds: 100));
+    final state = key.currentState!;
+
+    final full = List<String>.filled(
+      60,
+      '这是一段用于撑高消息气泡的长文本，重复出现以便观察滚动跟随行为。',
+    ).join('\n');
+    var visible = 0;
+    while (visible < full.length) {
+      visible = (visible + 40).clamp(0, full.length);
+      state.pushStreamTick(
+        visibleContent: full.substring(0, visible),
+        targetContent: full.substring(0, visible),
+      );
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    final position = state.scrollController.position;
+    expect(position.maxScrollExtent - position.pixels, lessThan(1));
+    final markdown = find.descendant(
+      of: find.byKey(const ValueKey<String>('timeline-slot:$_streamingId')),
+      matching: find.byType(MarkstreamView),
+    );
+    expect(markdown, findsOneWidget);
+    final renderer = tester.state(markdown);
+
+    // The terminal widget is taller than the streaming one (action bar, token
+    // stats), and it arrives after isGenerating已经变成 false.
+    state.finishStreaming(full);
+    state.scrollCtrl.stickToBottomAfterGeneration();
+
+    final anchor = find.byKey(
+      const ValueKey<String>('timeline-slot:$_streamingId'),
+    );
+    final trace = <double>[];
+    for (var i = 0; i < 30; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(tester.state(markdown), same(renderer));
+      trace.add(tester.getTopLeft(anchor).dy);
+    }
+
+    // Held layout pin: the tail stays at the bottom the whole time, so the
+    // timeline never has to catch up afterwards.
+    expect(
+      state.scrollController.position.maxScrollExtent -
+          state.scrollController.position.pixels,
+      lessThan(1),
+    );
+    for (var i = 1; i < trace.length; i++) {
+      expect(
+        trace[i],
+        moreOrLessEquals(trace[i - 1], epsilon: 1),
+        reason: 'frame $i moved by ${trace[i] - trace[i - 1]}',
+      );
+    }
+  });
+}
+
+ChatMessage _browserHistoryTail() => ChatMessage(
+  id: 'browser-history-reply',
+  conversationId: 'conversation-1',
+  role: 'assistant',
+  parts: [
+    for (var i = 0; i < _browserCalls; i++) ...[
+      ToolCallPart(
+        jsonEncode({
+          'id': 'browser-$i',
+          'name': LocalToolNames.browser,
+          'arguments': {'action': 'open'},
+          'content': jsonEncode({
+            'ok': true,
+            'page': {
+              'tab_id': 'tab-$i',
+              'url': 'about:blank',
+              'title': 'Page $i',
+            },
+          }),
+        }),
+      ),
+      ReasoningPart('Review page $i and check the next page for more context.'),
+    ],
+    const TextPart('This is the final reply.'),
+  ],
+);
+
+class _ProbeHarness extends StatefulWidget {
+  const _ProbeHarness({super.key, this.historyTail, this.chatFontScale = 1});
+
+  final ChatMessage? historyTail;
+  final double chatFontScale;
+
+  @override
+  State<_ProbeHarness> createState() => _ProbeHarnessState();
+}
+
+class _ProbeHarnessState extends State<_ProbeHarness> {
+  final scrollController = scroll_ctrl.ChatAutoFollowScrollController();
+  final streamingNotifier = StreamingContentNotifier();
+  late final scroll_ctrl.ChatScrollController scrollCtrl;
+  final processingFilesMessageId = ValueNotifier<String?>(null);
+  bool generating = true;
+
+  late List<ChatMessage> messages = <ChatMessage>[
+    for (var index = 0; index < 6; index++)
+      ChatMessage(
+        id: 'history-$index',
+        role: index.isEven ? 'user' : 'assistant',
+        content: List<String>.filled(3, '历史消息内容 $index').join('\n'),
+        conversationId: 'conversation-1',
+      ),
+    ChatMessage(
+      id: _streamingId,
+      role: 'assistant',
+      content: '',
+      conversationId: 'conversation-1',
+      isStreaming: true,
+    ),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    scrollCtrl = scroll_ctrl.ChatScrollController(
+      scrollController: scrollController,
+      onStateChanged: () {},
+      getAutoScrollEnabled: () => true,
+      isGenerating: () => generating,
+    );
+    final historyTail = widget.historyTail;
+    if (historyTail == null) {
+      streamingNotifier.getNotifier(_streamingId);
+    } else {
+      generating = false;
+      messages[messages.length - 1] = historyTail;
+      scrollCtrl.positionAtBottomOnOpen();
+    }
+  }
+
+  void pushStreamTick({
+    required String visibleContent,
+    required String targetContent,
+  }) {
+    streamingNotifier.updateContent(_streamingId, visibleContent, 10);
+    setState(() {
+      messages = [
+        for (final message in messages)
+          if (message.id == _streamingId)
+            message.copyWith(content: targetContent)
+          else
+            message,
+      ];
+    });
+    scrollCtrl.autoScrollToBottomIfNeeded();
+  }
+
+  void pushParts(List<MessagePart> parts) {
+    final text = parts.whereType<TextPart>().map((part) => part.text).join();
+    streamingNotifier.updateContent(_streamingId, text, 10, parts: parts);
+    setState(() {
+      messages = [
+        for (final message in messages)
+          if (message.id == _streamingId)
+            message.copyWith(parts: parts)
+          else
+            message,
+      ];
+    });
+    scrollCtrl.autoScrollToBottomIfNeeded();
+  }
+
+  void finishStreaming(String content) {
+    streamingNotifier.removeNotifier(_streamingId);
+    setState(() {
+      generating = false;
+      messages = [
+        for (final message in messages)
+          if (message.id == _streamingId)
+            message.copyWith(
+              content: content,
+              isStreaming: false,
+              totalTokens: 1200,
+              durationMs: 4200,
+            )
+          else
+            message,
+      ];
+    });
+  }
+
+  @override
+  void dispose() {
+    scrollCtrl.dispose();
+    scrollController.dispose();
+    streamingNotifier.dispose();
+    processingFilesMessageId.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(
+          create: (_) => SettingsProvider(createBusinessTestPreferences()),
+        ),
+        ChangeNotifierProvider(
+          create: (_) =>
+              AssistantProvider(preferences: createBusinessTestPreferences()),
+        ),
+        ChangeNotifierProvider(
+          create: (_) =>
+              TtsProvider(preferences: createBusinessTestPreferences()),
+        ),
+        ChangeNotifierProvider(
+          create: (_) =>
+              UserProvider(preferences: createBusinessTestPreferences()),
+        ),
+        ChangeNotifierProvider(create: (_) => AskUserInteractionService()),
+        ChangeNotifierProvider(create: (_) => ToolApprovalService()),
+      ],
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: MessageListView(
+            scrollController: scrollController,
+            listController: scrollCtrl.messageListController,
+            messages: messages,
+            byGroup: const {},
+            versionSelections: const {},
+            reasoning: const {},
+            reasoningSegments: const {},
+            contentSplits: const {},
+            toolParts: const {},
+            translations: const {},
+            selecting: false,
+            selectedItems: const {},
+            dividerPadding: EdgeInsets.zero,
+            chatFontScale: widget.chatFontScale,
+            bottomContentPadding: widget.historyTail == null ? 16 : 130,
+            processingFilesMessageId: processingFilesMessageId,
+            streamingContentNotifier: streamingNotifier,
+            onUserScrollIntent: scrollCtrl.handleUserScrollIntent,
+          ),
+        ),
+      ),
+    );
+  }
+}

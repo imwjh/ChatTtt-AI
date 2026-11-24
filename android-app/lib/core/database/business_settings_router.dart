@@ -1,0 +1,1462 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+
+import '../models/assistant.dart';
+import '../models/provider_balance_refresh_interval.dart';
+import '../models/world_book_grouping.dart';
+import 'business_data.dart';
+
+enum BusinessKeyDisposition {
+  entity,
+  providerOrder,
+  preference,
+  localOnly,
+  discarded,
+  unknownPreference,
+}
+
+final class BusinessKeyRegistry {
+  BusinessKeyRegistry._();
+
+  static const balanceRefreshIntervalKey = 'balance_refresh_interval_v1';
+  static const balanceRefreshOnReplyKey = 'balance_refresh_on_reply_v1';
+  static const codexClientVersionCacheKey = 'codex_client_version_v1';
+  static const modelListMetadataCacheKey = 'model_list_metadata_v1';
+
+  static const localOnlyKeys = <String>{
+    'window_width_v1',
+    'window_height_v1',
+    'window_pos_x_v1',
+    'window_pos_y_v1',
+    'window_physical_pos_x_v1',
+    'window_physical_pos_y_v1',
+    'window_maximized_v1',
+    'linux_hide_title_bar_v1',
+    'desktop_autostart_hidden_v1',
+    'desktop_hotkeys_commands_v1',
+    'desktop_hotkeys_enabled_v1',
+    'display_chat_font_scale_v1',
+    'ios_native_selection_menu_enabled_v1',
+    'flutter_log_enabled_v1',
+    'model_catalog_auto_update_v1',
+    'ollama_model_metadata_v1',
+    codexClientVersionCacheKey,
+    modelListMetadataCacheKey,
+  };
+
+  static const discardedKeys = <String>{
+    'memory_full_injection_types_v1',
+    'pinned_chat_ids',
+    'chat_titles_map',
+    'instruction_injections_active_id_v1',
+    'instruction_injections_active_ids_v1',
+    'migrations_version_v1',
+    'provider_configs_backup_v1',
+  };
+
+  static const preferenceKeys = <String>{
+    'desktop_scheduled_tasks_v1',
+    'scheduled_task_results_v1',
+    'current_assistant_id_v1',
+    'orphaned_conversations_assistant_id_v1',
+    'selected_model_v1',
+    'per_chat_model_enabled_v1',
+    'pinned_models_v1',
+    'provider_group_map_v1',
+    'provider_group_collapsed_v1',
+    'provider_ungrouped_position_v1',
+    balanceRefreshIntervalKey,
+    balanceRefreshOnReplyKey,
+    'assistant_tag_map_v1',
+    'assistant_tag_collapsed_v1',
+    'instruction_injections_active_ids_by_assistant_v1',
+    'instruction_injection_group_collapsed_v1',
+    'world_books_active_ids_by_assistant_v1',
+    'world_books_collapsed_v1',
+    WorldBookGrouping.preferenceKey,
+    'search_common_v1',
+    'search_selected_v1',
+    'search_enabled_v1',
+    'search_auto_test_on_launch_v1',
+    'search_web_fetch_v1',
+    'tts_selected_v1',
+    'tts_selected_service_id_v1',
+    'tts_auto_play_assistant_replies_v1',
+    'tts_text_selection_mode_v1',
+    'tts_speech_rate_v1',
+    'tts_playback_speed_v1',
+    'tts_pitch_v1',
+    'tts_engine_v1',
+    'tts_language_v1',
+    'tts_cache_network_audio_for_replay_v1',
+    'asr_services_v1',
+    'asr_selected_service_id_v1',
+    'webdav_config_v1',
+    's3_config_v1',
+    'backup_encryption_enabled_v1',
+    'backup_auto_enabled_v1',
+    'backup_auto_destination_v1',
+    'backup_auto_last_destination_v1',
+    'backup_auto_local_dir_v1',
+    'backup_auto_local_bookmark_v1',
+    'backup_auto_local_retention_v1',
+    'backup_password_forget_pending_v1',
+    'backup_password_remember_manual_v1',
+    'backup_password_verifier_v1',
+    'backup_install_id_v1',
+    'backup_outstanding_partial_v1',
+    'backup_reminder_enabled_v1',
+    'backup_reminder_interval_days_v1',
+    'backup_reminder_minutes_of_day_v1',
+    'backup_reminder_enabled_at_v1',
+    'backup_reminder_last_backup_at_v1',
+    'user_name',
+    'avatar_type',
+    'avatar_value',
+    'theme_mode_v1',
+    'theme_palette_v1',
+    'use_dynamic_color_v1',
+    'app_locale_v1',
+    'title_model_v1',
+    'title_generation_enabled_v1',
+    'title_prompt_v1',
+    'title_generation_thinking_enabled_v1',
+    'summary_generation_thinking_enabled_v1',
+    'suggestion_generation_thinking_enabled_v1',
+    'compress_generation_thinking_enabled_v1',
+    'translate_generation_thinking_enabled_v1',
+    'ocr_generation_thinking_enabled_v1',
+    'translate_model_v1',
+    'translate_prompt_v1',
+    'translate_target_lang_v1',
+    'translate_visible_language_codes_v1',
+    'ocr_model_v1',
+    'ocr_prompt_v1',
+    'ocr_enabled_v1',
+    'summary_model_v1',
+    'summary_prompt_v1',
+    'suggestion_model_v1',
+    'suggestion_generation_enabled_v1',
+    'suggestion_prompt_v1',
+    'suggestion_insert_on_tap_only_v1',
+    'compress_model_v1',
+    'compress_prompt_v1',
+    'native_compression_v1',
+    'compression_defaults_v1',
+    'reasoning_choice_by_model_v1',
+    'image_cropper_enabled_v1',
+    'image_upload_quality_v1',
+    'image_compress_custom_quality_v1',
+    'image_compress_transparent_enabled_v1',
+    'desktop_topic_position_v1',
+    'desktop_right_sidebar_open_v1',
+    'desktop_sidebar_width_v1',
+    'desktop_sidebar_open_v1',
+    'desktop_right_sidebar_width_v1',
+    'desktop_side_panel_open_v1',
+    'desktop_side_panel_width_v1',
+    'desktop_side_panel_last_kind_v1',
+    'desktop_side_panel_tabs_v1',
+    'desktop_side_panel_migrated_v1',
+    'desktop_send_shortcut_v1',
+    'android_background_chat_mode_v1',
+    'ios_background_generation_enabled_v1',
+    'ios_background_task_refresh_enabled_v1',
+    'ios_live_activity_enabled_v1',
+    'ios_background_notifications_enabled_v1',
+    'display_app_font_family_v1',
+    'display_code_font_family_v1',
+    'display_app_font_is_google_v1',
+    'display_code_font_is_google_v1',
+    'display_app_font_local_path_v1',
+    'display_code_font_local_path_v1',
+    'display_app_font_local_alias_v1',
+    'display_code_font_local_alias_v1',
+    'global_proxy_enabled_v1',
+    'global_proxy_type_v1',
+    'global_proxy_host_v1',
+    'global_proxy_port_v1',
+    'global_proxy_username_v1',
+    'global_proxy_password_v1',
+    'global_proxy_bypass_v1',
+    'request_log_enabled_v1',
+    'log_save_output_v1',
+    'log_auto_delete_days_v1',
+    'log_max_size_mb_v1',
+    'app_launch_count_v1',
+    'mcp_request_timeout_ms_v1',
+    'mcp_presentation_v1',
+    'learning_mode_enabled_v1',
+    'learning_mode_prompt_v1',
+    'mobile_assistant_edit_tab_order_v1',
+    'mobile_assistant_edit_tab_hidden_v1',
+    'mobile_assistant_detail_outline_enabled_v1',
+    'memory_model_v1',
+    'memory_model_thinking_enabled_v1',
+    'memory_prompt_lang_v1',
+    'memory_trace_enabled_v1',
+    'memory_legacy_mode_v1',
+    'memory_legacy_prompt_zh_v1',
+    'memory_legacy_prompt_en_v1',
+    'memory_rules_prompt_zh_v1',
+    'memory_rules_prompt_en_v1',
+    'memory_gate_prompt_zh_v1',
+    'memory_gate_prompt_en_v1',
+    'memory_extract_prompt_zh_v1',
+    'memory_extract_prompt_en_v1',
+    'memory_smart_add_prompt_zh_v1',
+    'memory_smart_add_prompt_en_v1',
+    'memory_smart_add_batch_prompt_zh_v1',
+    'memory_smart_add_batch_prompt_en_v1',
+    'memory_profile_distill_prompt_zh_v1',
+    'memory_profile_distill_prompt_en_v1',
+    'memory_migrate_prompt_zh_v1',
+    'memory_migrate_prompt_en_v1',
+    'memory_migration_batch_size_v1',
+    'chat_bubble_style_overrides_v1',
+    'chat_bubble_style_overrides_user_v1',
+    'chat_bubble_style_thinking_tool_card_v1',
+    'tool_schema_overrides_v1',
+    'environment_state_v1',
+    'environment_mirrors_v1',
+    'environment_variables_v1',
+    'environment_privacy_mode_v1',
+  };
+
+  static BusinessKeyDisposition classify(String key) {
+    if (BusinessEntityKind.values.any((kind) => kind.sourceKey == key)) {
+      return BusinessKeyDisposition.entity;
+    }
+    if (key == 'providers_order_v1') {
+      return BusinessKeyDisposition.providerOrder;
+    }
+    if (localOnlyKeys.contains(key) || key.startsWith('restore_')) {
+      return BusinessKeyDisposition.localOnly;
+    }
+    if (discardedKeys.contains(key)) {
+      return BusinessKeyDisposition.discarded;
+    }
+    if (preferenceKeys.contains(key) || key.startsWith('display_')) {
+      return BusinessKeyDisposition.preference;
+    }
+    return BusinessKeyDisposition.unknownPreference;
+  }
+}
+
+final class BusinessSettingsRouter {
+  BusinessSettingsRouter._();
+
+  static const _providerOrderKey = 'providers_order_v1';
+  // Storage-only row for an ordered key that has no persisted config. The
+  // invalid `enabled` type prevents collision with a routed Provider payload.
+  static const _providerOrderOnlyPayload =
+      '{"enabled":"__kelivo_provider_order_only__"}';
+  static const _legacyPinnedModelsKey = 'pinned_models_v1';
+  static const _instructionInjectionsKey = 'instruction_injections_v1';
+  static const _legacyActiveIdKey = 'instruction_injections_active_id_v1';
+  static const _legacyActiveIdsKey = 'instruction_injections_active_ids_v1';
+  static const _activeIdsByAssistantKey =
+      'instruction_injections_active_ids_by_assistant_v1';
+  static const _searchEnabledKey = 'search_enabled_v1';
+  static const _globalAssistantKey = '__global__';
+  static const _embeddingTypes = <String>{'embedding', 'embeddings'};
+  static const _embeddingChatOnlyFields = <String>{
+    'abilities',
+    'output',
+    'builtInTools',
+    'built_in_tools',
+    'tools',
+  };
+
+  /// Preserve an empty instruction list only at legacy input boundaries.
+  /// Canonical SQLite exports always contain every entity key, so their `[]`
+  /// cannot by itself distinguish an uninitialized table from a user clear.
+  static BusinessSnapshot normalizeAndRoute(
+    Map<String, Object?> source, {
+    bool preserveExplicitEmptyInstructionList = false,
+    Map<String, Object?>? entityRowIds,
+    bool assumePreV3EmbeddingMigrationWhenVersionMissing = false,
+  }) {
+    final normalized = Map<String, Object?>.from(source);
+    final rowIdsByKind = _rowIdsByKind(entityRowIds, source);
+    final rawMigrationVersion = normalized['migrations_version_v1'];
+    final shouldNormalizeLegacyEmbeddingOverrides = rawMigrationVersion is int
+        ? rawMigrationVersion < 3
+        : rawMigrationVersion == null &&
+              assumePreV3EmbeddingMigrationWhenVersionMissing;
+    _normalizeStringList(normalized, _providerOrderKey);
+    _normalizeStringList(normalized, _legacyPinnedModelsKey);
+    _normalizeInstructionActivation(
+      normalized,
+      preserveExplicitEmptyList: preserveExplicitEmptyInstructionList,
+    );
+
+    final entities = <BusinessEntityKind, List<BusinessEntityValue>>{};
+    for (final kind in BusinessEntityKind.values) {
+      entities[kind] = kind == BusinessEntityKind.provider
+          ? _routeProviders(
+              normalized,
+              normalizeLegacyEmbeddingOverrides:
+                  shouldNormalizeLegacyEmbeddingOverrides,
+            )
+          : _routeList(kind, normalized, rowIdsByKind[kind]);
+    }
+
+    final preferences = <String, Object>{};
+    for (final entry in normalized.entries) {
+      final disposition = BusinessKeyRegistry.classify(entry.key);
+      if (disposition == BusinessKeyDisposition.entity ||
+          disposition == BusinessKeyDisposition.localOnly ||
+          disposition == BusinessKeyDisposition.discarded ||
+          entry.key == _providerOrderKey) {
+        continue;
+      }
+      final value = entry.value;
+      if (value == null) continue;
+      preferences[entry.key] = _validatePreferenceValue(entry.key, value);
+    }
+    return BusinessSnapshot(entities: entities, preferences: preferences);
+  }
+
+  static Map<String, Object> exportSnapshot(BusinessSnapshot snapshot) {
+    final result = <String, Object>{};
+    for (final kind in BusinessEntityKind.values) {
+      final rows = List<BusinessEntityValue>.of(snapshot.entities[kind]!)
+        ..sort(_compareRows);
+      if (kind == BusinessEntityKind.provider) {
+        final providers = <String, Object?>{};
+        for (final row in rows) {
+          if (!isProviderOrderOnlyRow(row)) {
+            providers[row.id] = _decodePayload(row.payload, kind.sourceKey);
+          }
+        }
+        result[kind.sourceKey] = jsonEncode(providers);
+        result[_providerOrderKey] = rows.map((row) => row.id).toList();
+      } else {
+        result[kind.sourceKey] = jsonEncode(
+          rows
+              .map((row) => _decodePayload(row.payload, kind.sourceKey))
+              .toList(growable: false),
+        );
+      }
+    }
+    result.addAll(snapshot.preferences);
+    return result;
+  }
+
+  static BusinessSettingsExport exportSnapshotWithRowIds(
+    BusinessSnapshot snapshot,
+  ) {
+    final entityRowIds = <String, List<String>>{};
+    for (final kind in BusinessEntityKind.values) {
+      if (kind == BusinessEntityKind.provider) continue;
+      final rows = List<BusinessEntityValue>.of(snapshot.entities[kind]!)
+        ..sort(_compareRows);
+      entityRowIds[kind.sourceKey] = rows.map((row) => row.id).toList();
+    }
+    return (settings: exportSnapshot(snapshot), entityRowIds: entityRowIds);
+  }
+
+  /// Builds the legacy key-value-compatible view consumed by runtime
+  /// providers. Stable row ids are projected into list payloads that came
+  /// from legacy data without an id; assistant memories use deterministic
+  /// negative ids so they stay outside the persisted positive-id space.
+  /// [exportSnapshot] deliberately preserves the published payload byte shape
+  /// used by backup validation.
+  static Map<String, Object> exportRuntimeSnapshot(BusinessSnapshot snapshot) {
+    final result = exportSnapshot(snapshot);
+    for (final kind in BusinessEntityKind.values) {
+      if (kind == BusinessEntityKind.provider) continue;
+      final rows = List<BusinessEntityValue>.of(snapshot.entities[kind]!)
+        ..sort(_compareRows);
+      final projectedMemoryIds = kind == BusinessEntityKind.assistantMemory
+          ? _projectMemoryIds(rows)
+          : const <String, int>{};
+      result[kind.sourceKey] = jsonEncode([
+        for (final row in rows)
+          () {
+            final payload = Map<String, Object?>.from(
+              (_decodePayload(row.payload, kind.sourceKey) as Map).map(
+                (key, value) => MapEntry(key.toString(), value),
+              ),
+            );
+            final rawId = payload['id'];
+            if (rawId == null || rawId.toString().trim().isEmpty) {
+              payload['id'] = kind == BusinessEntityKind.assistantMemory
+                  ? projectedMemoryIds[row.id]!
+                  : row.id;
+            }
+            if (kind == BusinessEntityKind.assistant) {
+              _validateRuntimeAssistant(payload);
+            }
+            return payload;
+          }(),
+      ]);
+    }
+    return result;
+  }
+
+  static List<BusinessEntityValue> _routeProviders(
+    Map<String, Object?> source, {
+    required bool normalizeLegacyEmbeddingOverrides,
+  }) {
+    final key = BusinessEntityKind.provider.sourceKey;
+    final rawOrder = source[_providerOrderKey];
+    final order = rawOrder == null
+        ? const <String>[]
+        : _stringList(rawOrder, _providerOrderKey);
+    final raw = source[key];
+    final providers = <String, Map<String, dynamic>>{};
+    if (raw != null) {
+      final decoded = _decodeJson(raw, key);
+      if (decoded is! Map) throw FormatException(key);
+      for (final entry in decoded.entries) {
+        if (entry.value is! Map) throw FormatException(key);
+        final payload = (entry.value as Map).map(
+          (field, value) => MapEntry(field.toString(), value),
+        );
+        if (normalizeLegacyEmbeddingOverrides) {
+          _normalizeLegacyEmbeddingOverrides(payload);
+        }
+        _validateEntityPayload(BusinessEntityKind.provider, payload);
+        providers[entry.key.toString()] = payload;
+      }
+    }
+    final orderedKeys = <String>[];
+    final seen = <String>{};
+    for (final providerKey in order) {
+      if (providerKey.isNotEmpty && seen.add(providerKey)) {
+        orderedKeys.add(providerKey);
+      }
+    }
+    for (final providerKey in providers.keys) {
+      if (seen.add(providerKey)) orderedKeys.add(providerKey);
+    }
+    return [
+      for (var index = 0; index < orderedKeys.length; index++)
+        BusinessEntityValue(
+          id: orderedKeys[index],
+          sortOrder: index,
+          payload: providers.containsKey(orderedKeys[index])
+              ? jsonEncode(providers[orderedKeys[index]])
+              : _providerOrderOnlyPayload,
+        ),
+    ];
+  }
+
+  static bool isProviderOrderOnlyRow(BusinessEntityValue row) =>
+      row.payload == _providerOrderOnlyPayload;
+
+  static List<BusinessEntityValue> _routeList(
+    BusinessEntityKind kind,
+    Map<String, Object?> source,
+    List<String>? entityRowIds,
+  ) {
+    final raw = source[kind.sourceKey];
+    if (raw == null) {
+      if (entityRowIds != null && entityRowIds.isNotEmpty) {
+        throw FormatException(kind.sourceKey);
+      }
+      return const <BusinessEntityValue>[];
+    }
+    final decoded = _decodeJson(raw, kind.sourceKey);
+    if (decoded is! List) throw FormatException(kind.sourceKey);
+    if (entityRowIds != null && entityRowIds.length != decoded.length) {
+      throw FormatException(kind.sourceKey);
+    }
+    final legacySearchEnabled = source[_searchEnabledKey];
+    if (legacySearchEnabled != null && legacySearchEnabled is! bool) {
+      throw const FormatException(_searchEnabledKey);
+    }
+    return [
+      for (var index = 0; index < decoded.length; index++)
+        _routeListItem(
+          kind,
+          decoded[index],
+          index,
+          legacySearchEnabled: legacySearchEnabled as bool?,
+          rowId: entityRowIds?[index],
+        ),
+    ];
+  }
+
+  static BusinessEntityValue _routeListItem(
+    BusinessEntityKind kind,
+    Object? raw,
+    int index, {
+    required bool? legacySearchEnabled,
+    String? rowId,
+  }) {
+    if (raw is! Map) throw FormatException(kind.sourceKey);
+    final payload = raw.map((key, value) => MapEntry(key.toString(), value));
+    if (kind == BusinessEntityKind.assistant &&
+        legacySearchEnabled != null &&
+        !payload.containsKey('searchEnabled')) {
+      payload['searchEnabled'] = legacySearchEnabled;
+    }
+    _validateEntityPayload(kind, payload);
+    final rawId = payload['id'];
+    final hasPayloadId = rawId != null && rawId.toString().trim().isNotEmpty;
+    if (hasPayloadId && rowId != null && rowId != rawId.toString()) {
+      throw FormatException(kind.sourceKey);
+    }
+    final id = hasPayloadId
+        ? rawId.toString()
+        : rowId ?? _stableGeneratedId(kind.sourceKey, index, payload);
+    if (kind == BusinessEntityKind.assistant) {
+      _validateRuntimeAssistant({...payload, 'id': id});
+    }
+    String? assistantId;
+    if (kind == BusinessEntityKind.assistantMemory) {
+      final rawAssistantId = payload['assistantId'];
+      if (rawAssistantId is! String || rawAssistantId.trim().isEmpty) {
+        throw FormatException(kind.sourceKey);
+      }
+      assistantId = rawAssistantId;
+    }
+    return BusinessEntityValue(
+      id: id,
+      sortOrder: index,
+      payload: jsonEncode(payload),
+      assistantId: assistantId,
+    );
+  }
+
+  // Validate with the same decoder used by AssistantProvider, before migration
+  // cleanup or exposing a startup snapshot. Keep the original payload intact,
+  // including unknown fields and IDs projected only for runtime use.
+  static void _validateRuntimeAssistant(Map<String, Object?> payload) {
+    try {
+      Assistant.fromJson(payload);
+    } catch (error) {
+      throw FormatException(
+        BusinessEntityKind.assistant.sourceKey,
+        'assistant=${payload['id']}; $error',
+      );
+    }
+  }
+
+  // Mirror runtime decoder cast boundaries without canonicalizing payloads.
+  // Fields whose published decoders intentionally coerce values stay lenient.
+  static void _validateEntityPayload(
+    BusinessEntityKind kind,
+    Map<String, Object?> payload,
+  ) {
+    switch (kind) {
+      case BusinessEntityKind.assistant:
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {
+            'id',
+            'name',
+            'avatar',
+            'chatModelProvider',
+            'chatModelId',
+            'systemPrompt',
+            'messageTemplate',
+            'background',
+            'memorySmartAddMode',
+            'memoryWriteScope',
+          },
+          booleans: const {
+            'useAssistantAvatar',
+            'useAssistantName',
+            'limitContextMessages',
+            'streamOutput',
+            'searchEnabled',
+            'enableMemory',
+            // Read as a fallback for allowPastConversationRecall in old backups.
+            'enableRecentChatsReference',
+            'autoOrganizeMemory',
+            'allowPastConversationRecall',
+            'generateConversationSummary',
+            'appendCurrentTimeToUserMessage',
+            'useIso8601TimeFormat',
+            'allowConversationSystemPrompt',
+            'allowConversationPromptInjection',
+            'allowConversationMcp',
+          },
+          numbers: const {
+            'temperature',
+            'topP',
+            'contextMessageSize',
+            'maxTokens',
+            'recentChatsSummaryMessageCount',
+            'memoryOrganizeEveryNTurns',
+          },
+          maps: const {'reasoning'},
+          lists: const {
+            'customHeaders',
+            'customBody',
+            'presetMessages',
+            'regexRules',
+          },
+          stringLists: const {
+            'mcpServerIds',
+            'localToolIds',
+            'healthDataTypeIds',
+          },
+        );
+        _validateAssistantChildren(kind, payload);
+        return;
+      case BusinessEntityKind.provider:
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {
+            'id',
+            'name',
+            'apiKey',
+            'oauthProvider',
+            'oauthModelsSyncedAt',
+            'oauthModelsClientVersion',
+            'baseUrl',
+            'chatPath',
+            'location',
+            'projectId',
+            'serviceAccountJson',
+            'proxyType',
+            'proxyHost',
+            'proxyPort',
+            'proxyUsername',
+            'proxyPassword',
+            'avatarType',
+            'avatarValue',
+            'balanceApiPath',
+            'balanceResultPath',
+            'balanceMethod',
+            'balanceBody',
+            'claudePromptCachingTtl',
+          },
+          booleans: const {
+            'enabled',
+            'useResponseApi',
+            'promptCacheKeyEnabled',
+            'vertexAI',
+            'proxyEnabled',
+            'multiKeyEnabled',
+            'aihubmixAppCodeEnabled',
+            'balanceEnabled',
+            'balanceRefreshOnReply',
+            'claudePromptCachingEnabled',
+          },
+          lists: const {'models', 'apiKeys', 'customHeaders', 'customBody'},
+          objectLists: const {'balanceHeaders'},
+          maps: const {
+            'modelOverrides',
+            'keyManagement',
+            'oauthCredentials',
+            'requestBudget',
+          },
+        );
+        final interval = payload['balanceRefreshInterval'];
+        if (interval != null && !isBalanceRefreshInterval(interval)) {
+          throw FormatException(kind.sourceKey);
+        }
+        _validateProviderChildren(kind, payload);
+        return;
+      case BusinessEntityKind.providerGroup:
+        return;
+      case BusinessEntityKind.mcpServer:
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {'id', 'name', 'transport'},
+          booleans: const {'enabled'},
+          maps: const {'oauth', 'oauthClient'},
+          objectLists: const {'tools'},
+        );
+        _validateMcpChildren(kind, payload);
+        final transport = payload['transport'];
+        if (transport == 'stdio') {
+          _validateKnownFields(
+            kind,
+            payload,
+            strings: const {'command', 'workingDirectory'},
+            lists: const {'args'},
+            maps: const {'env'},
+          );
+        } else if (transport != 'inmemory') {
+          _validateKnownFields(
+            kind,
+            payload,
+            strings: const {'url'},
+            maps: const {'headers'},
+          );
+        }
+        return;
+      case BusinessEntityKind.worldBook:
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {'id', 'name', 'description'},
+          booleans: const {'enabled'},
+          lists: const {'entries'},
+        );
+        _validateWorldBookChildren(kind, payload);
+        return;
+      case BusinessEntityKind.assistantMemory:
+        _validateKnownFields(kind, payload, numbers: const {'id'});
+        return;
+      case BusinessEntityKind.quickPhrase:
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {'id', 'title', 'content', 'assistantId'},
+          booleans: const {'isGlobal'},
+        );
+        return;
+      case BusinessEntityKind.searchService:
+        _validateSearchService(kind, payload);
+        return;
+      case BusinessEntityKind.ttsService:
+        return;
+      case BusinessEntityKind.instructionInjection:
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {'id', 'title', 'prompt', 'group'},
+        );
+        return;
+      case BusinessEntityKind.assistantTag:
+        return;
+      case BusinessEntityKind.memoryEntry:
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'id', 'scope', 'type', 'content'},
+          strings: const {'status', 'source', 'assistantId'},
+          numbers: const {'createdAt', 'updatedAt'},
+          stringLists: const {'relatedIds', 'migrationIds'},
+        );
+        final scope = payload['scope'] as String;
+        if (scope != 'global' && scope != 'assistant') {
+          throw FormatException(kind.sourceKey);
+        }
+        final type = payload['type'] as String;
+        if (type != 'identity' &&
+            type != 'workflow' &&
+            type != 'voice' &&
+            type != 'instruction') {
+          throw FormatException(kind.sourceKey);
+        }
+        final status = payload['status'];
+        if (status != null && status != 'active' && status != 'archived') {
+          throw FormatException(kind.sourceKey);
+        }
+        final source = payload['source'];
+        if (source != null &&
+            source != 'manual' &&
+            source != 'tool' &&
+            source != 'extracted' &&
+            source != 'distilled') {
+          throw FormatException(kind.sourceKey);
+        }
+        final assistantId = payload['assistantId'];
+        if (scope == 'global') {
+          if (assistantId != null) {
+            throw FormatException(kind.sourceKey);
+          }
+        } else if (assistantId is! String || assistantId.trim().isEmpty) {
+          throw FormatException(kind.sourceKey);
+        }
+        if (payload['createdAt'] is! num || payload['updatedAt'] is! num) {
+          throw FormatException(kind.sourceKey);
+        }
+        final content = payload['content'] as String;
+        if (content.trim().isEmpty) {
+          throw FormatException(kind.sourceKey);
+        }
+        return;
+      case BusinessEntityKind.workspace:
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'id', 'name'},
+        );
+        return;
+      case BusinessEntityKind.skill:
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'id', 'source', 'installedAt', 'updatedAt'},
+          booleans: const {'enabled'},
+          numbers: const {'useCount'},
+        );
+        return;
+      case BusinessEntityKind.userProfileField:
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'id', 'value'},
+          numbers: const {'updatedAt'},
+        );
+        final id = payload['id'] as String;
+        if (!_userProfileFieldIdPattern.hasMatch(id)) {
+          throw FormatException(kind.sourceKey);
+        }
+        final value = payload['value'] as String;
+        if (value.trim().isEmpty) {
+          throw FormatException(kind.sourceKey);
+        }
+        if (payload['updatedAt'] is! num) {
+          throw FormatException(kind.sourceKey);
+        }
+        return;
+    }
+  }
+
+  static final _userProfileFieldIdPattern = RegExp(
+    r'^(preferred_name|gender|pronouns|preferred_language|timezone|'
+    r'occupation|location|custom\.[A-Za-z0-9_\-]{1,32})$',
+  );
+
+  static void _validateKnownFields(
+    BusinessEntityKind kind,
+    Map<String, Object?> payload, {
+    Set<String> requiredStrings = const {},
+    Set<String> strings = const {},
+    Set<String> booleans = const {},
+    Set<String> numbers = const {},
+    Set<String> integers = const {},
+    Set<String> lists = const {},
+    Set<String> stringLists = const {},
+    Set<String> maps = const {},
+    Set<String> objectLists = const {},
+  }) {
+    for (final field in requiredStrings) {
+      if (payload[field] is! String) throw FormatException(kind.sourceKey);
+    }
+    _validateFields(kind, payload, strings, (value) => value is String);
+    _validateFields(kind, payload, booleans, (value) => value is bool);
+    _validateFields(kind, payload, numbers, (value) => value is num);
+    _validateFields(kind, payload, integers, (value) => value is int);
+    _validateFields(kind, payload, lists, (value) => value is List);
+    _validateFields(
+      kind,
+      payload,
+      stringLists,
+      (value) => value is List && value.every((item) => item is String),
+    );
+    _validateFields(kind, payload, maps, (value) => value is Map);
+    _validateFields(
+      kind,
+      payload,
+      objectLists,
+      (value) => value is List && value.every((item) => item is Map),
+    );
+  }
+
+  static void _validateFields(
+    BusinessEntityKind kind,
+    Map<String, Object?> payload,
+    Set<String> fields,
+    bool Function(Object value) accepts,
+  ) {
+    for (final field in fields) {
+      final value = payload[field];
+      if (value != null && !accepts(value)) {
+        throw FormatException(kind.sourceKey);
+      }
+    }
+  }
+
+  static void _validateAssistantChildren(
+    BusinessEntityKind kind,
+    Map<String, Object?> payload,
+  ) {
+    for (final child in _mappedObjects(payload['presetMessages'])) {
+      _validateKnownFields(
+        kind,
+        child,
+        strings: const {'id', 'role', 'content'},
+      );
+    }
+    for (final child in _mappedObjects(payload['regexRules'])) {
+      _validateKnownFields(
+        kind,
+        child,
+        strings: const {'id', 'name', 'pattern', 'replacement'},
+        booleans: const {'visualOnly', 'replaceOnly', 'enabled'},
+      );
+    }
+  }
+
+  static void _validateProviderChildren(
+    BusinessEntityKind kind,
+    Map<String, Object?> payload,
+  ) {
+    final balanceMethod = payload['balanceMethod'];
+    if (balanceMethod != null &&
+        balanceMethod != 'GET' &&
+        balanceMethod != 'POST') {
+      throw const FormatException('Invalid balance HTTP method');
+    }
+    for (final header in (payload['balanceHeaders'] as List?) ?? const []) {
+      final row = header as Map;
+      if (row.keys.any((key) => key is! String) ||
+          row.values.any((value) => value is! String)) {
+        throw const FormatException('Invalid balance request headers');
+      }
+    }
+    final oauthProvider = payload['oauthProvider'];
+    if (oauthProvider != null &&
+        !{'chatgpt', 'grok', 'kimi', 'claude'}.contains(oauthProvider)) {
+      throw const FormatException('Invalid OAuth provider');
+    }
+    final credentials = payload['oauthCredentials'];
+    if (credentials is Map) {
+      _validateKnownFields(
+        kind,
+        _stringKeyedMap(credentials),
+        requiredStrings: const {
+          'accessToken',
+          'refreshToken',
+          'expiresAt',
+          'sessionId',
+        },
+        strings: const {
+          'email',
+          'accountId',
+          'plan',
+          'deviceId',
+          'organizationId',
+          'organizationName',
+        },
+        booleans: const {'requiresLogin'},
+      );
+      if (oauthProvider == null ||
+          DateTime.tryParse(credentials['expiresAt'] as String) == null) {
+        throw const FormatException('Invalid OAuth credentials');
+      }
+    }
+    for (final child in _mappedObjects(payload['apiKeys'])) {
+      _validateKnownFields(
+        kind,
+        child,
+        strings: const {'id', 'key', 'name', 'status', 'lastError'},
+        booleans: const {'isEnabled'},
+        integers: const {
+          'priority',
+          'maxRequestsPerMinute',
+          'createdAt',
+          'updatedAt',
+        },
+        maps: const {'usage'},
+      );
+      final usage = child['usage'];
+      if (usage is Map) {
+        _validateKnownFields(
+          kind,
+          _stringKeyedMap(usage),
+          integers: const {
+            'totalRequests',
+            'successfulRequests',
+            'failedRequests',
+            'consecutiveFailures',
+            'lastUsed',
+          },
+        );
+      }
+    }
+    final keyManagement = payload['keyManagement'];
+    if (keyManagement is Map) {
+      _validateKnownFields(
+        kind,
+        _stringKeyedMap(keyManagement),
+        strings: const {'strategy'},
+        booleans: const {'enableAutoRecovery'},
+        integers: const {
+          'maxFailuresBeforeDisable',
+          'failureRecoveryTimeMinutes',
+          'roundRobinIndex',
+        },
+      );
+    }
+  }
+
+  static void _validateMcpChildren(
+    BusinessEntityKind kind,
+    Map<String, Object?> payload,
+  ) {
+    for (final tool in _objectList(payload['tools'])) {
+      _validateKnownFields(
+        kind,
+        tool,
+        strings: const {'name', 'description'},
+        booleans: const {'enabled', 'needsApproval'},
+        objectLists: const {'params'},
+      );
+      for (final parameter in _objectList(tool['params'])) {
+        _validateKnownFields(
+          kind,
+          parameter,
+          strings: const {'name', 'type'},
+          booleans: const {'required'},
+        );
+      }
+    }
+    final oauth = payload['oauth'];
+    if (oauth is Map) {
+      _validateKnownFields(
+        kind,
+        oauth.map((key, value) => MapEntry(key.toString(), value)),
+        strings: const {
+          'clientId',
+          'clientSecret',
+          'authorizationServer',
+          'authorizationEndpoint',
+          'tokenEndpoint',
+          'registrationEndpoint',
+          'serverUrl',
+          'resource',
+          'scope',
+          'tokenEndpointAuthMethod',
+          'registrationSource',
+          'accessToken',
+          'tokenType',
+          'refreshToken',
+        },
+        integers: const {'expiresAt'},
+      );
+    }
+    final oauthClient = payload['oauthClient'];
+    if (oauthClient is Map) {
+      _validateKnownFields(
+        kind,
+        oauthClient.map((key, value) => MapEntry(key.toString(), value)),
+        strings: const {
+          'clientId',
+          'clientSecret',
+          'tokenEndpointAuthMethod',
+          'authorizationServer',
+          'registrationSource',
+        },
+      );
+    }
+  }
+
+  static void _validateWorldBookChildren(
+    BusinessEntityKind kind,
+    Map<String, Object?> payload,
+  ) {
+    for (final entry in _mappedObjects(payload['entries'])) {
+      _validateKnownFields(
+        kind,
+        entry,
+        strings: const {'id', 'name', 'content'},
+        booleans: const {
+          'enabled',
+          'useRegex',
+          'caseSensitive',
+          'constantActive',
+        },
+        integers: const {
+          'priority',
+          'injectDepth',
+          'scanDepth',
+          'sticky',
+          'cooldown',
+          'delay',
+        },
+        lists: const {'keywords'},
+      );
+    }
+  }
+
+  static void _validateSearchService(
+    BusinessEntityKind kind,
+    Map<String, Object?> payload,
+  ) {
+    _validateKnownFields(
+      kind,
+      payload,
+      requiredStrings: const {'type'},
+      strings: const {'id'},
+    );
+    switch (payload['type']) {
+      case 'bing_local':
+      case 'kelivo':
+        break;
+      case 'tavily':
+      case 'exa':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'apiKey'},
+          strings: const {'url'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'exa_mcp':
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {'apiKey', 'url'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'keenable':
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {'apiKey'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'zhipu':
+      case 'linkup':
+      case 'metaso':
+      case 'ollama':
+      case 'deepseek':
+      case 'jina':
+      case 'doubao':
+      case 'kagi':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'apiKey'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'brave':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'apiKey'},
+          strings: const {'mode'},
+          integers: const {'maximumNumberOfTokens'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'searxng':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'url'},
+          strings: const {'engines', 'language', 'username', 'password'},
+        );
+      case '4get':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'url'},
+          strings: const {'scraper', 'passToken'},
+        );
+      case 'duckduckgo':
+        _validateKnownFields(kind, payload, strings: const {'region'});
+      case 'perplexity':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'apiKey'},
+          strings: const {'country'},
+          integers: const {'maxTokensPerPage'},
+          lists: const {'searchDomainFilter'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'bocha':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'apiKey'},
+          strings: const {'freshness', 'include', 'exclude'},
+          booleans: const {'summary'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'serper':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'apiKey'},
+          strings: const {'gl', 'hl', 'tbs'},
+          integers: const {'page'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'grok':
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {'apiKey', 'model', 'customUrl', 'systemPrompt'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'querit':
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {
+            'apiKey',
+            'sitesInclude',
+            'sitesExclude',
+            'timeRange',
+            'countries',
+            'languages',
+          },
+          stringLists: const {'apiKeys'},
+        );
+      case 'anysearch':
+        _validateKnownFields(
+          kind,
+          payload,
+          strings: const {'apiKey', 'url'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'parallel':
+      case 'kimi':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'apiKey'},
+          strings: const {'mode'},
+          stringLists: const {'apiKeys'},
+        );
+      case 'you':
+        _validateKnownFields(
+          kind,
+          payload,
+          requiredStrings: const {'apiKey'},
+          strings: const {'contentMode'},
+          stringLists: const {'apiKeys'},
+        );
+    }
+  }
+
+  static List<Map<String, Object?>> _objectList(Object? raw) {
+    if (raw is! List) return const [];
+    return [for (final value in raw) _stringKeyedMap(value as Map)];
+  }
+
+  static List<Map<String, Object?>> _mappedObjects(Object? raw) {
+    if (raw is! List) return const [];
+    return [
+      for (final value in raw)
+        if (value is Map) _stringKeyedMap(value),
+    ];
+  }
+
+  static Map<String, Object?> _stringKeyedMap(Map<dynamic, dynamic> raw) {
+    return raw.map((key, value) => MapEntry(key.toString(), value));
+  }
+
+  static void _normalizeStringList(Map<String, Object?> values, String key) {
+    final raw = values[key];
+    if (raw == null) return;
+    if (raw is String) {
+      values[key] = _stringList(_decodeJson(raw, key), key);
+      return;
+    }
+    values[key] = _stringList(raw, key);
+  }
+
+  static void _normalizeInstructionActivation(
+    Map<String, Object?> values, {
+    required bool preserveExplicitEmptyList,
+  }) {
+    final rawItems = preserveExplicitEmptyList
+        ? values[_instructionInjectionsKey]
+        : null;
+    var explicitlyEmptyItems = false;
+    if (rawItems != null) {
+      final decodedItems = _decodeJson(rawItems, _instructionInjectionsKey);
+      explicitlyEmptyItems = decodedItems is List && decodedItems.isEmpty;
+    }
+    final finalRaw = values[_activeIdsByAssistantKey];
+    Map<String, List<String>>? normalized;
+    if (finalRaw != null) {
+      final decoded = _decodeJson(finalRaw, _activeIdsByAssistantKey);
+      if (decoded is! Map) {
+        throw const FormatException(_activeIdsByAssistantKey);
+      }
+      normalized = <String, List<String>>{};
+      for (final entry in decoded.entries) {
+        normalized[entry.key.toString()] = _deduplicateStrings(
+          _stringList(entry.value, _activeIdsByAssistantKey),
+        );
+      }
+    } else {
+      List<String> legacy = const <String>[];
+      final legacyIdsRaw = values[_legacyActiveIdsKey];
+      if (legacyIdsRaw != null) {
+        legacy = _deduplicateStrings(
+          _stringList(
+            _decodeJson(legacyIdsRaw, _legacyActiveIdsKey),
+            _legacyActiveIdsKey,
+          ),
+        );
+      } else {
+        final legacyId = values[_legacyActiveIdKey];
+        if (legacyId != null) {
+          if (legacyId is! String) {
+            throw const FormatException(_legacyActiveIdKey);
+          }
+          if (legacyId.trim().isNotEmpty) legacy = <String>[legacyId.trim()];
+        }
+      }
+      if (legacy.isNotEmpty) {
+        normalized = <String, List<String>>{_globalAssistantKey: legacy};
+      }
+    }
+    if (explicitlyEmptyItems) {
+      (normalized ??= <String, List<String>>{})[_globalAssistantKey] =
+          const <String>[];
+    }
+    if (normalized != null) {
+      values[_activeIdsByAssistantKey] = jsonEncode(normalized);
+    }
+    values.remove(_legacyActiveIdKey);
+    values.remove(_legacyActiveIdsKey);
+  }
+
+  static Object _validatePreferenceValue(String key, Object value) {
+    if (key == BusinessKeyRegistry.balanceRefreshIntervalKey &&
+            !isBalanceRefreshInterval(value) ||
+        key == BusinessKeyRegistry.balanceRefreshOnReplyKey && value is! bool) {
+      throw FormatException(key);
+    }
+    if (value is bool || value is int || value is double || value is String) {
+      return value;
+    }
+    if (value is List && value.every((item) => item is String)) {
+      return List<String>.unmodifiable(value.cast<String>());
+    }
+    throw FormatException(key);
+  }
+
+  static Object? _decodePayload(String payload, String key) {
+    final decoded = _decodeJson(payload, key);
+    if (decoded is! Map) throw FormatException(key);
+    return decoded;
+  }
+
+  static Object? _decodeJson(Object raw, String key) {
+    if (raw is! String) throw FormatException(key);
+    try {
+      return jsonDecode(raw);
+    } on FormatException {
+      throw FormatException(key);
+    }
+  }
+
+  static List<String> _stringList(Object? raw, String key) {
+    if (raw is! List || raw.any((item) => item is! String)) {
+      throw FormatException(key);
+    }
+    return raw.cast<String>();
+  }
+
+  static List<String> _deduplicateStrings(List<String> values) {
+    final seen = <String>{};
+    return [
+      for (final value in values)
+        if (value.trim().isNotEmpty && seen.add(value.trim())) value.trim(),
+    ];
+  }
+
+  static Map<BusinessEntityKind, List<String>> _rowIdsByKind(
+    Map<String, Object?>? raw,
+    Map<String, Object?> source,
+  ) {
+    if (raw == null) return const {};
+    final kindByKey = <String, BusinessEntityKind>{
+      for (final kind in BusinessEntityKind.values)
+        if (kind != BusinessEntityKind.provider) kind.sourceKey: kind,
+    };
+    final result = <BusinessEntityKind, List<String>>{};
+    for (final entry in raw.entries) {
+      final kind = kindByKey[entry.key];
+      if (kind == null) throw FormatException(entry.key);
+      final value = entry.value;
+      if (value is! List || value.any((id) => id is! String)) {
+        throw FormatException(entry.key);
+      }
+      final ids = List<String>.unmodifiable(value.cast<String>());
+      if (ids.any((id) => id.trim().isEmpty)) {
+        throw FormatException(entry.key);
+      }
+      if (ids.toSet().length != ids.length) {
+        throw FormatException(entry.key);
+      }
+      result[kind] = ids;
+    }
+    for (final entry in kindByKey.entries) {
+      if (source.containsKey(entry.key) && !result.containsKey(entry.value)) {
+        throw const FormatException('businessEntityRowIds');
+      }
+    }
+    return result;
+  }
+
+  static String _stableGeneratedId(
+    String sourceKey,
+    int index,
+    Map<String, Object?> payload,
+  ) {
+    final digest = sha256.convert(
+      utf8.encode('$sourceKey\u0000$index\u0000${jsonEncode(payload)}'),
+    );
+    return 'generated_${digest.toString().substring(0, 32)}';
+  }
+
+  static void _normalizeLegacyEmbeddingOverrides(
+    Map<String, Object?> provider,
+  ) {
+    final rawOverrides = provider['modelOverrides'];
+    if (rawOverrides is! Map) return;
+    final normalized = <String, Object?>{};
+    for (final entry in rawOverrides.entries) {
+      final rawOverride = entry.value;
+      if (rawOverride is! Map) {
+        normalized[entry.key.toString()] = rawOverride;
+        continue;
+      }
+      final override = rawOverride.map(
+        (key, value) => MapEntry(key.toString(), value),
+      );
+      final type = (override['type'] ?? override['t'] ?? '')
+          .toString()
+          .trim()
+          .toLowerCase();
+      if (_embeddingTypes.contains(type)) {
+        for (final field in _embeddingChatOnlyFields) {
+          override.remove(field);
+        }
+      }
+      normalized[entry.key.toString()] = override;
+    }
+    provider['modelOverrides'] = normalized;
+  }
+
+  static Map<String, int> _projectMemoryIds(List<BusinessEntityValue> rows) {
+    final used = <int>{};
+    final missing = <BusinessEntityValue>[];
+    for (final row in rows) {
+      final payload =
+          _decodePayload(
+                row.payload,
+                BusinessEntityKind.assistantMemory.sourceKey,
+              )!
+              as Map;
+      final rawId = payload['id'];
+      if (rawId is num) {
+        used.add(rawId.toInt());
+      } else {
+        missing.add(row);
+      }
+    }
+    missing.sort((left, right) => left.id.compareTo(right.id));
+    final projected = <String, int>{};
+    for (final row in missing) {
+      final digest = sha256.convert(utf8.encode(row.id)).toString();
+      // Keep runtime-only identities outside MemoryStore's positive ID space.
+      var candidate =
+          -((int.parse(digest.substring(0, 8), radix: 16) & 0x3fffffff) + 1);
+      while (!used.add(candidate)) {
+        candidate = candidate == -0x40000000 ? -1 : candidate - 1;
+      }
+      projected[row.id] = candidate;
+    }
+    return projected;
+  }
+
+  static int _compareRows(BusinessEntityValue left, BusinessEntityValue right) {
+    final byOrder = left.sortOrder.compareTo(right.sortOrder);
+    return byOrder != 0 ? byOrder : left.id.compareTo(right.id);
+  }
+}

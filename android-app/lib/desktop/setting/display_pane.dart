@@ -1,0 +1,3966 @@
+part of '../desktop_settings_page.dart';
+
+// ===== Display Settings Body =====
+
+class _DisplaySettingsBody extends StatelessWidget {
+  const _DisplaySettingsBody();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return Container(
+      alignment: Alignment.topCenter,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 14, 20, 22),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 960),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _SettingsCard(
+                title: l10n.settingsPageDisplay,
+                children: [
+                  const _ColorModeRow(),
+                  const _RowDivider(),
+                  const _ThemeColorRow(),
+                  const _RowDivider(),
+                  const _ToggleRowPureBackground(),
+                  const _RowDivider(),
+                  const _ToggleRowLayeredSurfaces(),
+                  const _RowDivider(),
+                  const _ToggleRowLayeredSheetTiles(),
+                  const _RowDivider(),
+                  const _MessageStyleRow(),
+                  const _RowDivider(),
+                  const _FullWidthChatRow(),
+                  const _RowDivider(),
+                  const _AutoRetryRow(),
+                  const _RowDivider(),
+                  const _TopicPositionRow(),
+                  if (LinuxWindowService.isSupported) ...[
+                    const _RowDivider(),
+                    const _LinuxHideTitleBarRow(),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 16),
+              _SettingsCard(
+                title: l10n.desktopSettingsFontsTitle,
+                children: const [
+                  _DesktopAppFontRow(),
+                  _RowDivider(),
+                  _DesktopCodeFontRow(),
+                  _RowDivider(),
+                  _AppLanguageRow(),
+                  _RowDivider(),
+                  _ChatFontSizeRow(),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _SettingsCard(
+                title: l10n.displaySettingsPageTrayTitle,
+                children: const [
+                  _DesktopTrayShowRow(),
+                  _RowDivider(),
+                  _DesktopTrayMinimizeOnCloseRow(),
+                  _RowDivider(),
+                  _DesktopStartupRows(),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _SettingsCard(
+                title: l10n.displaySettingsPageChatItemDisplayTitle,
+                children: const [
+                  _ToggleRowShowProviderInCapsule(),
+                  _RowDivider(),
+                  _ToggleRowShowUserAvatar(),
+                  _RowDivider(),
+                  _ToggleRowShowUserName(),
+                  _RowDivider(),
+                  _ToggleRowShowUserTimestamp(),
+                  _RowDivider(),
+                  _ToggleRowShowUserMsgActions(),
+                  _RowDivider(),
+                  _ToggleRowShowModelIcon(),
+                  _RowDivider(),
+                  _ToggleRowUseNewAssistantAvatarUx(),
+                  _RowDivider(),
+                  _ToggleRowShowModelName(),
+                  _RowDivider(),
+                  _ToggleRowShowModelTimestamp(),
+                  _RowDivider(),
+                  _ToggleRowShowProviderInChatMessage(),
+                  _RowDivider(),
+                  _ToggleRowShowTokenStats(),
+                  _RowDivider(),
+                  _ToggleRowShowTotalTokens(),
+                  _RowDivider(),
+                  _ToggleRowShowThinkingCards(),
+                  _RowDivider(),
+                  _ToggleRowShowToolCards(),
+                  _RowDivider(),
+                  _ToggleRowShowProducedFiles(),
+                  _RowDivider(),
+                  _ToggleRowShowReasoningLevelBadge(),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _SettingsCard(
+                title: l10n.displaySettingsPageRenderingSettingsTitle,
+                children: const [
+                  _ToggleRowDollarLatex(),
+                  _RowDivider(),
+                  _ToggleRowMathRendering(),
+                  _RowDivider(),
+                  _ToggleRowLegacyInlineCodeStyle(),
+                  _RowDivider(),
+                  _ToggleRowLegacyCodeBlockStyle(),
+                  _RowDivider(),
+                  _ToggleRowUserMarkdown(),
+                  _RowDivider(),
+                  _ToggleRowReasoningMarkdown(),
+                  _RowDivider(),
+                  _ToggleRowAssistantMarkdown(),
+                  _ToggleRowGenUiHeader(),
+                  _RowDivider(),
+                  _AutoCollapseCodeBlocksSection(),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _SettingsCard(
+                title: l10n.displaySettingsPageBehaviorStartupTitle,
+                children: const [
+                  _ToggleRowAutoSwitchTopicsDesktop(),
+                  _RowDivider(),
+                  _ToggleRowAutoCollapseThinking(),
+                  _RowDivider(),
+                  _ToggleRowCollapseThinkingSteps(),
+                  _RowDivider(),
+                  _ToggleRowShowToolResultSummary(),
+                  _RowDivider(),
+                  _ToggleRowHideToolResultImages(),
+                  _RowDivider(),
+                  _ToggleRowShowBrowserPageCards(),
+                  _RowDivider(),
+                  _ToggleRowInsertSuggestionOnly(),
+                  _RowDivider(),
+                  _CollapseLongUserMessagesSection(),
+                  _RowDivider(),
+                  _ToggleRowRegenerateDeleteTrailingMessages(),
+                  _RowDivider(),
+                  _ToggleRowShowRegenerateConfirmDialog(),
+                  _RowDivider(),
+                  _ToggleRowForkKeepMessageVersions(),
+                  _RowDivider(),
+                  _ToggleRowEditAssistantKeepThinkingToolCards(),
+                  _RowDivider(),
+                  _ToggleRowShowUpdates(),
+                  _RowDivider(),
+                  _ToggleRowShowChatListDate(),
+                  _RowDivider(),
+                  _ToggleRowNewChatOnAssistantSwitch(),
+                  _RowDivider(),
+                  _ToggleRowNewChatAfterDelete(),
+                  _RowDivider(),
+                  _ToggleRowNewChatOnLaunch(),
+                  _RowDivider(),
+                  _ToggleRowMsgNavButtons(),
+                  _RowDivider(),
+                  _SendShortcutRow(),
+                  _RowDivider(),
+                  _LongPasteAsFileSection(),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _SettingsCard(
+                title: l10n.imageSettingsPageTitle,
+                children: const [_ImageCompressionRows()],
+              ),
+              const SizedBox(height: 16),
+              _SettingsCard(
+                title: l10n.displaySettingsPageOtherSettingsTitle,
+                children: const [
+                  _AutoScrollRow(),
+                  _RowDivider(),
+                  _BackgroundMaskRow(),
+                  _RowDivider(),
+                  _ChatInputBackgroundOpacityRow(),
+                  _RowDivider(),
+                  _ToggleRowRequestLogging(),
+                  _RowDivider(),
+                  _ToggleRowFlutterLogging(),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ImageCompressionRows extends StatelessWidget {
+  const _ImageCompressionRows();
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = context.watch<SettingsProvider>();
+    return Column(
+      children: [
+        const _ImageQualityRow(),
+        if (settings.imageUploadQuality == ImageUploadQuality.custom) ...[
+          const _RowDivider(),
+          const _ImageCustomQualityRow(),
+        ],
+        const _RowDivider(),
+        const _ImageCompressTransparentRow(),
+      ],
+    );
+  }
+}
+
+class _ImageQualityRow extends StatelessWidget {
+  const _ImageQualityRow();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.imageSettingsPageQualitySectionTitle,
+      trailing: const _ImageQualityDropdown(),
+    );
+  }
+}
+
+class _ImageQualityDropdown extends StatelessWidget {
+  const _ImageQualityDropdown();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.watch<SettingsProvider>();
+    return DesktopSelectDropdown<ImageUploadQuality>(
+      value: settings.imageUploadQuality,
+      options: [
+        for (final quality in ImageUploadQuality.values)
+          DesktopSelectOption(
+            value: quality,
+            label: _imageQualityTitle(quality, l10n),
+          ),
+      ],
+      minWidth: 140,
+      onSelected: (quality) =>
+          context.read<SettingsProvider>().setImageUploadQuality(quality),
+    );
+  }
+}
+
+class _ImageCustomQualityRow extends StatelessWidget {
+  const _ImageCustomQualityRow();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.watch<SettingsProvider>();
+    final quality = settings.imageCompressCustomQuality;
+    return _LabeledRow(
+      label: l10n.imageSettingsPageCustomQualityTitle,
+      trailing: SizedBox(
+        width: 280,
+        child: Row(
+          children: [
+            Expanded(
+              child: Slider(
+                value: quality.toDouble(),
+                min: 10,
+                max: 100,
+                divisions: 18,
+                label: '$quality',
+                onChanged: (value) => context
+                    .read<SettingsProvider>()
+                    .setImageCompressCustomQuality(value.round()),
+              ),
+            ),
+            SizedBox(
+              width: 32,
+              child: Text(
+                '$quality',
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.onSurface.withValues(alpha: 0.7),
+                  fontSize: 14,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ImageCompressTransparentRow extends StatelessWidget {
+  const _ImageCompressTransparentRow();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.watch<SettingsProvider>();
+    final cs = Theme.of(context).colorScheme;
+    final enabled = settings.imageUploadQuality != ImageUploadQuality.original;
+    return Opacity(
+      opacity: enabled ? 1 : 0.5,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    l10n.imageSettingsPageCompressTransparentTitle,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: AppFontWeights.regular,
+                      color: cs.onSurface.withValues(alpha: 0.9),
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    l10n.imageSettingsPageCompressTransparentSubtitle,
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.25,
+                      color: cs.onSurface.withValues(alpha: 0.58),
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            IosSwitch(
+              value: settings.imageCompressTransparentEnabled,
+              semanticLabel: l10n.imageSettingsPageCompressTransparentTitle,
+              onChanged: enabled
+                  ? (value) => context
+                        .read<SettingsProvider>()
+                        .setImageCompressTransparentEnabled(value)
+                  : null,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _imageQualityTitle(ImageUploadQuality quality, AppLocalizations l10n) {
+  return switch (quality) {
+    ImageUploadQuality.original => l10n.imageSettingsPageQualityOriginal,
+    ImageUploadQuality.high => l10n.imageSettingsPageQualityHigh,
+    ImageUploadQuality.balanced => l10n.imageSettingsPageQualityBalanced,
+    ImageUploadQuality.saver => l10n.imageSettingsPageQualitySaver,
+    ImageUploadQuality.custom => l10n.imageSettingsPageQualityCustom,
+  };
+}
+
+class _SettingsCard extends StatelessWidget {
+  const _SettingsCard({required this.title, required this.children});
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Material(
+      color: context.appColors.surfaceCard,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(
+          width: 0.5,
+          color: isDark
+              ? cs.onSurface.withValues(alpha: 0.06)
+              : cs.outlineVariant.withValues(alpha: 0.12),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SettingsSearchTarget.wrap(
+              context,
+              title,
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 2, 4, 8),
+                child: Text(
+                  title,
+                  // Align card title with other panes (15, semi-bold)
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: AppFontWeights.semibold,
+                    color: cs.onSurface,
+                  ),
+                ),
+              ),
+            ),
+            ...children,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RowDivider extends StatelessWidget {
+  const _RowDivider();
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Divider(
+        height: 1,
+        thickness: 0.5,
+        indent: 8,
+        endIndent: 8,
+        color: cs.outlineVariant.withValues(alpha: 0.12),
+      ),
+    );
+  }
+}
+
+class _LabeledRow extends StatelessWidget {
+  const _LabeledRow({required this.label, required this.trailing});
+  final String label;
+  final Widget trailing;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final row = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: DesktopLabeledControl(
+        label: Text(
+          label,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: AppFontWeights.regular,
+            color: cs.onSurface.withValues(alpha: 0.9),
+            decoration: TextDecoration.none,
+          ),
+        ),
+        controlWidth: 400,
+        control: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerRight,
+          child: trailing,
+        ),
+      ),
+    );
+    return SettingsSearchTarget.wrap(context, label, row);
+  }
+}
+
+// --- Color Mode ---
+class _ColorModeRow extends StatelessWidget {
+  const _ColorModeRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.settingsPageColorMode,
+      trailing: const _ThemeModeSegmented(),
+    );
+  }
+}
+
+class _ThemeModeSegmented extends StatefulWidget {
+  const _ThemeModeSegmented();
+  @override
+  State<_ThemeModeSegmented> createState() => _ThemeModeSegmentedState();
+}
+
+class _ThemeModeSegmentedState extends State<_ThemeModeSegmented> {
+  int _hover = -1;
+  @override
+  Widget build(BuildContext context) {
+    final sp = context.watch<SettingsProvider>();
+    final mode = sp.themeMode;
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    final items = [
+      (ThemeMode.light, l10n.settingsPageLightMode, lucide.Lucide.Sun),
+      (ThemeMode.dark, l10n.settingsPageDarkMode, lucide.Lucide.Moon),
+      (ThemeMode.system, l10n.settingsPageSystemMode, lucide.Lucide.Monitor),
+    ];
+
+    final trackBg = cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.04);
+    return Container(
+      decoration: BoxDecoration(
+        color: trackBg,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      padding: const EdgeInsets.all(3),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var i = 0; i < items.length; i++) ...[
+            MouseRegion(
+              onEnter: (_) => setState(() => _hover = i),
+              onExit: (_) => setState(() => _hover = -1),
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: () =>
+                    context.read<SettingsProvider>().setThemeMode(items[i].$1),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: () {
+                      final selected = mode == items[i].$1;
+                      if (selected) {
+                        return cs.primary.withValues(
+                          alpha: isDark ? 0.18 : 0.14,
+                        );
+                      }
+                      if (_hover == i) {
+                        return cs.onSurface.withValues(
+                          alpha: isDark ? 0.10 : 0.06,
+                        );
+                      }
+                      return Colors.transparent;
+                    }(),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        items[i].$3,
+                        size: 16,
+                        color: (mode == items[i].$1)
+                            ? cs.primary
+                            : cs.onSurface.withValues(alpha: 0.74),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        items[i].$2,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        // Reduce segmented labels to 14 for consistency
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: AppFontWeights.regular,
+                          color: (mode == items[i].$1)
+                              ? cs.primary
+                              : cs.onSurface.withValues(alpha: 0.82),
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (i != items.length - 1) const SizedBox(width: 4),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// --- Theme Color ---
+class _ThemeColorRow extends StatelessWidget {
+  const _ThemeColorRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageThemeColorTitle,
+      trailing: const _ThemeDots(),
+    );
+  }
+}
+
+class _ThemeDots extends StatelessWidget {
+  const _ThemeDots();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final selected = sp.themePaletteId;
+    final isCustomActive = selected == ThemePalettes.customPaletteId;
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        for (final p in ThemePalettes.all)
+          _ThemeDot(
+            color: p.light.primary,
+            selected: selected == p.id,
+            onTap: () => context.read<SettingsProvider>().setThemePalette(p.id),
+          ),
+        for (final t in sp.customThemes)
+          _CustomThemeDotEntry(
+            theme: t,
+            selected: isCustomActive && sp.selectedCustomThemeId == t.id,
+            onTap: () =>
+                context.read<SettingsProvider>().selectCustomTheme(t.id),
+            onMenu: (pos) => showDesktopContextMenuAt(
+              context,
+              globalPosition: pos,
+              items: [
+                DesktopContextMenuItem(
+                  icon: lucide.Lucide.Pencil,
+                  label: l10n.customThemeEditTheme,
+                  onTap: () => showCustomThemeEditor(context, initial: t),
+                ),
+                DesktopContextMenuItem(
+                  icon: lucide.Lucide.Copy,
+                  label: l10n.customThemeCopyAction,
+                  onTap: () => exportCustomThemeToClipboard(context, t),
+                ),
+                DesktopContextMenuItem(
+                  icon: lucide.Lucide.Trash2,
+                  label: l10n.customThemeDelete,
+                  danger: true,
+                  onTap: () =>
+                      context.read<SettingsProvider>().deleteCustomTheme(t.id),
+                ),
+              ],
+            ),
+          ),
+        _ThemeActionDot(
+          icon: lucide.Lucide.Plus,
+          tooltip: l10n.customThemeNewTheme,
+          onTap: () => showCustomThemeEditor(context),
+        ),
+        _ThemeActionDot(
+          icon: lucide.Lucide.Download,
+          tooltip: l10n.customThemeImportTheme,
+          onTap: () => showImportCustomThemeDialog(context),
+        ),
+      ],
+    );
+  }
+}
+
+class _CustomThemeDotEntry extends StatefulWidget {
+  const _CustomThemeDotEntry({
+    required this.theme,
+    required this.selected,
+    required this.onTap,
+    required this.onMenu,
+  });
+  final CustomTheme theme;
+  final bool selected;
+  final VoidCallback onTap;
+  final ValueChanged<Offset> onMenu;
+  @override
+  State<_CustomThemeDotEntry> createState() => _CustomThemeDotEntryState();
+}
+
+class _CustomThemeDotEntryState extends State<_CustomThemeDotEntry> {
+  bool _hover = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        onSecondaryTapDown: (d) => widget.onMenu(d.globalPosition),
+        onLongPressStart: (d) => widget.onMenu(d.globalPosition),
+        child: Container(
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: widget.selected
+                  ? cs.onSurface.withValues(alpha: 0.85)
+                  : cs.surface,
+              width: 2,
+            ),
+          ),
+          child: ClipOval(
+            child: CustomThemeDot(
+              theme: widget.theme,
+              size: 20,
+              selected: widget.selected || _hover,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ThemeActionDot extends StatefulWidget {
+  const _ThemeActionDot({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+  @override
+  State<_ThemeActionDot> createState() => _ThemeActionDotState();
+}
+
+class _ThemeActionDotState extends State<_ThemeActionDot> {
+  bool _hover = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: Tooltip(
+        message: widget.tooltip,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 140),
+            curve: Curves.easeOutCubic,
+            width: 24,
+            height: 24,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: _hover
+                  ? cs.onSurface.withValues(alpha: 0.08)
+                  : cs.onSurface.withValues(alpha: 0.04),
+              border: Border.all(
+                color: cs.onSurface.withValues(alpha: _hover ? 0.35 : 0.2),
+                width: 1,
+              ),
+            ),
+            child: Icon(
+              widget.icon,
+              size: 13,
+              color: cs.onSurface.withValues(alpha: 0.7),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ThemeDot extends StatefulWidget {
+  const _ThemeDot({
+    required this.color,
+    required this.selected,
+    required this.onTap,
+  });
+  final Color color;
+  final bool selected;
+  final VoidCallback onTap;
+  @override
+  State<_ThemeDot> createState() => _ThemeDotState();
+}
+
+class _ThemeDotState extends State<_ThemeDot> {
+  bool _hover = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOutCubic,
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(
+            color: widget.color,
+            shape: BoxShape.circle,
+            boxShadow: _hover
+                ? [
+                    BoxShadow(
+                      color: widget.color.withValues(alpha: 0.45),
+                      blurRadius: 14,
+                      spreadRadius: 1,
+                    ),
+                  ]
+                : [],
+            border: Border.all(
+              color: widget.selected
+                  ? cs.onSurface.withValues(alpha: 0.85)
+                  : cs.surface,
+              width: widget.selected ? 2 : 2,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ToggleRowPureBackground extends StatelessWidget {
+  const _ToggleRowPureBackground();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.themeSettingsPageUsePureBackgroundTitle,
+      value: sp.usePureBackground,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setUsePureBackground(v),
+    );
+  }
+}
+
+class _ToggleRowLayeredSurfaces extends StatelessWidget {
+  const _ToggleRowLayeredSurfaces();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.themeAdvancedSettingsPageUseLayeredSurfacesTitle,
+      tip: l10n.themeAdvancedSettingsPageUseLayeredSurfacesSubtitle,
+      value: sp.useLayeredSurfaces,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setUseLayeredSurfaces(v),
+    );
+  }
+}
+
+class _ToggleRowLayeredSheetTiles extends StatelessWidget {
+  const _ToggleRowLayeredSheetTiles();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.themeAdvancedSettingsPageUseLayeredSheetTilesTitle,
+      tip: l10n.themeAdvancedSettingsPageUseLayeredSheetTilesSubtitle,
+      value: sp.useLayeredSheetTiles,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setUseLayeredSheetTiles(v),
+    );
+  }
+}
+
+class _MessageStyleRow extends StatelessWidget {
+  const _MessageStyleRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final styleLabel = switch (sp.chatMessageBackgroundStyle) {
+      ChatMessageBackgroundStyle.frosted =>
+        l10n.displaySettingsPageChatMessageBackgroundFrosted,
+      ChatMessageBackgroundStyle.solid =>
+        l10n.displaySettingsPageChatMessageBackgroundSolid,
+      ChatMessageBackgroundStyle.defaultStyle =>
+        l10n.displaySettingsPageChatMessageBackgroundDefault,
+    };
+    return _LabeledRow(
+      label: l10n.messageStyleSettingsPageTitle,
+      trailing: _DesktopFontDropdownButton(
+        display: styleLabel,
+        onTap: () => showMessageStyleSettingsDialog(context),
+      ),
+    );
+  }
+}
+
+class _FullWidthChatRow extends StatelessWidget {
+  const _FullWidthChatRow();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.desktopDisplaySettingsFullWidthChatTitle,
+      tip: l10n.desktopDisplaySettingsFullWidthChatSubtitle,
+      value: settings.desktopFullWidthChat,
+      onChanged: settings.setDesktopFullWidthChat,
+    );
+  }
+}
+
+class _AutoRetryRow extends StatelessWidget {
+  const _AutoRetryRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final enabled = context.watch<SettingsProvider>().autoRetryOptions.enabled;
+    return _LabeledRow(
+      label: l10n.settingsPageAutoRetry,
+      trailing: _DesktopFontDropdownButton(
+        display: enabled
+            ? l10n.iosBackgroundStatusOn
+            : l10n.iosBackgroundStatusOff,
+        onTap: () => showDesktopAutoRetryDialog(context),
+      ),
+    );
+  }
+}
+
+// --- Topic position (desktop) ---
+class _TopicPositionRow extends StatelessWidget {
+  const _TopicPositionRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.desktopDisplaySettingsTopicPositionTitle,
+      trailing: const _TopicPositionDropdown(),
+    );
+  }
+}
+
+class _LinuxHideTitleBarRow extends StatelessWidget {
+  const _LinuxHideTitleBarRow();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.linuxHideTitleBarTitle,
+      tip: l10n.linuxHideTitleBarDescription,
+      value: settings.linuxHideTitleBar,
+      onChanged: (value) async {
+        try {
+          await settings.setLinuxHideTitleBar(value);
+        } catch (_) {
+          if (!context.mounted) return;
+          showAppSnackBar(
+            context,
+            message: l10n.linuxHideTitleBarError,
+            type: NotificationType.error,
+          );
+        }
+      },
+    );
+  }
+}
+
+class _DesktopStartupRows extends StatefulWidget {
+  const _DesktopStartupRows();
+
+  @override
+  State<_DesktopStartupRows> createState() => _DesktopStartupRowsState();
+}
+
+class _DesktopStartupRowsState extends State<_DesktopStartupRows>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
+  }
+
+  Future<void> _refresh() async {
+    if (!mounted) return;
+    final settings = context.read<SettingsProvider>();
+    await settings.loaded;
+    if (mounted) await settings.refreshDesktopStartup();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) unawaited(_refresh());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _change(Future<void> Function() update) async {
+    try {
+      await update();
+    } catch (_) {
+      if (!mounted) return;
+      await context.read<SettingsProvider>().refreshDesktopStartup();
+      if (!mounted) return;
+      showAppSnackBar(
+        context,
+        message: AppLocalizations.of(context)!.desktopAutostartError,
+        type: NotificationType.error,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.watch<SettingsProvider>();
+    final available =
+        settings.desktopAutostartSupported && !settings.desktopAutostartBusy;
+    final canHide =
+        available &&
+        settings.desktopAutostartEnabled &&
+        settings.desktopShowTray;
+    return Column(
+      children: [
+        _ToggleRow(
+          label: l10n.desktopAutostartTitle,
+          tip: !settings.desktopAutostartSupported
+              ? l10n.desktopAutostartUnsupported
+              : settings.desktopAutostartFailed
+              ? l10n.desktopAutostartError
+              : l10n.desktopAutostartDescription,
+          value: settings.desktopAutostartEnabled,
+          onChanged: available
+              ? (value) =>
+                    _change(() => settings.setDesktopAutostartEnabled(value))
+              : null,
+        ),
+        const _RowDivider(),
+        _ToggleRow(
+          label: l10n.desktopAutostartHiddenTitle,
+          tip: l10n.desktopAutostartHiddenDescription,
+          value: canHide && settings.desktopAutostartHidden,
+          onChanged: canHide
+              ? (value) =>
+                    _change(() => settings.setDesktopAutostartHidden(value))
+              : null,
+        ),
+      ],
+    );
+  }
+}
+
+// --- Desktop tray settings ---
+class _DesktopTrayShowRow extends StatelessWidget {
+  const _DesktopTrayShowRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageTrayShowTrayTitle,
+      value: sp.desktopShowTray,
+      onChanged: (v) => context.read<SettingsProvider>().setDesktopShowTray(v),
+    );
+  }
+}
+
+class _DesktopTrayMinimizeOnCloseRow extends StatelessWidget {
+  const _DesktopTrayMinimizeOnCloseRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final enabled = sp.desktopShowTray;
+    return _ToggleRow(
+      label: l10n.displaySettingsPageTrayMinimizeOnCloseTitle,
+      value: enabled && sp.desktopMinimizeToTrayOnClose,
+      onChanged: enabled
+          ? (v) => context
+                .read<SettingsProvider>()
+                .setDesktopMinimizeToTrayOnClose(v)
+          : null,
+    );
+  }
+}
+
+class _TopicPositionDropdown extends StatefulWidget {
+  const _TopicPositionDropdown();
+  @override
+  State<_TopicPositionDropdown> createState() => _TopicPositionDropdownState();
+}
+
+class _TopicPositionDropdownState extends State<_TopicPositionDropdown> {
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final options = <DesktopSelectOption<DesktopTopicPosition>>[
+      DesktopSelectOption(
+        value: DesktopTopicPosition.left,
+        label: l10n.desktopDisplaySettingsTopicPositionLeft,
+      ),
+      DesktopSelectOption(
+        value: DesktopTopicPosition.right,
+        label: l10n.desktopDisplaySettingsTopicPositionRight,
+      ),
+    ];
+
+    return DesktopSelectDropdown<DesktopTopicPosition>(
+      value: sp.desktopTopicPosition,
+      options: options,
+      onSelected: (pos) =>
+          context.read<SettingsProvider>().setDesktopTopicPosition(pos),
+    );
+  }
+}
+
+class _SimpleOptionTile extends StatefulWidget {
+  const _SimpleOptionTile({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  @override
+  State<_SimpleOptionTile> createState() => _SimpleOptionTileState();
+}
+
+class _SimpleOptionTileState extends State<_SimpleOptionTile> {
+  bool _hover = false;
+  bool _active = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = widget.selected
+        ? cs.primary.withValues(alpha: 0.12)
+        : (_hover
+              ? (cs.onSurface.withValues(alpha: isDark ? 0.08 : 0.04))
+              : Colors.transparent);
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => setState(() => _active = true),
+        onTapCancel: () => setState(() => _active = false),
+        onTapUp: (_) => setState(() => _active = false),
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: _active ? 0.98 : 1.0,
+          duration: const Duration(milliseconds: 100),
+          curve: Curves.easeOut,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            curve: Curves.easeOutCubic,
+            margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: cs.onSurface.withValues(alpha: 0.88),
+                      fontWeight: widget.selected
+                          ? AppFontWeights.semibold
+                          : AppFontWeights.regular,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Opacity(
+                  opacity: widget.selected ? 1 : 0,
+                  child: Icon(lucide.Lucide.Check, size: 14, color: cs.primary),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// --- Fonts: language + chat font size ---
+class _AppLanguageRow extends StatefulWidget {
+  const _AppLanguageRow();
+  @override
+  State<_AppLanguageRow> createState() => _AppLanguageRowState();
+}
+
+class _AppLanguageRowState extends State<_AppLanguageRow> {
+  bool _hover = false;
+  bool _open = false;
+  final GlobalKey _key = GlobalKey();
+  OverlayEntry? _entry;
+  final LayerLink _link = LayerLink();
+
+  void _openDropdownOverlay() {
+    if (_entry != null) return;
+    final rb = _key.currentContext?.findRenderObject() as RenderBox?;
+    final overlay = Overlay.of(context);
+    final overlayBox = overlay.context.findRenderObject() as RenderBox?;
+    if (rb == null || overlayBox == null) return;
+    final size = rb.size;
+    final triggerW = size.width;
+    final maxW = 280.0;
+    final minW = triggerW;
+    _entry = OverlayEntry(
+      builder: (ctx) {
+        // measure desired content width for centering under trigger
+        double measureContentWidth() {
+          // Keep measurement consistent with dropdown item text (14)
+          final style = TextStyle(fontSize: 14);
+          final labels = <String>[
+            '🖥️ ${AppLocalizations.of(ctx)!.settingsPageSystemMode}',
+            for (final language in AppLanguage.values)
+              '${language.flag} ${language.nativeName}',
+          ];
+          double maxText = 0;
+          for (final s in labels) {
+            final tp = TextPainter(
+              text: TextSpan(text: s, style: style),
+              textDirection: TextDirection.ltr,
+              maxLines: 1,
+            )..layout();
+            if (tp.width > maxText) maxText = tp.width;
+          }
+          // item padding (12*2) + check icon (16) + gap to check (10)
+          // + list padding (8*2) + gap between flag and text (8) + small fudge (2)
+          return maxText + 12 * 2 + 16 + 10 + 8 * 2 + 8 + 2;
+        }
+
+        final contentW = measureContentWidth();
+        final width = contentW.clamp(minW, maxW);
+        final dx = (triggerW - width) / 2;
+        return Stack(
+          children: [
+            // tap outside to close
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: _closeDropdownOverlay,
+                child: const SizedBox.expand(),
+              ),
+            ),
+            CompositedTransformFollower(
+              link: _link,
+              showWhenUnlinked: false,
+              offset: Offset(dx, size.height + 6),
+              child: Material(
+                color: Colors.transparent,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minWidth: width, maxWidth: width),
+                  child: _LanguageDropdown(onClose: _closeDropdownOverlay),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    overlay.insert(_entry!);
+    setState(() => _open = true);
+  }
+
+  void _closeDropdownOverlay() {
+    _entry?.remove();
+    _entry = null;
+    if (mounted) setState(() => _open = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+
+    final current = sp.isFollowingSystemLocale
+        ? l10n.settingsPageSystemMode
+        : AppLanguage.fromLocale(sp.appLocale).nativeName;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageLanguageTitle,
+      trailing: CompositedTransformTarget(
+        link: _link,
+        child: _HoverDropdownButton(
+          key: _key,
+          hovered: _hover,
+          open: _open,
+          label: current,
+          onHover: (v) => setState(() => _hover = v),
+          onTap: () {
+            if (_open) {
+              _closeDropdownOverlay();
+            } else {
+              _openDropdownOverlay();
+            }
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _HoverDropdownButton extends StatelessWidget {
+  const _HoverDropdownButton({
+    super.key,
+    required this.hovered,
+    required this.open,
+    required this.label,
+    required this.onHover,
+    required this.onTap,
+    this.fontSize = 14,
+    this.verticalPadding = 8,
+    this.borderRadius = 10,
+    this.rightAlignArrow = false,
+  });
+  final bool hovered;
+  final bool open;
+  final String label;
+  final ValueChanged<bool> onHover;
+  final VoidCallback onTap;
+  final double fontSize;
+  final double verticalPadding;
+  final double borderRadius;
+  final bool rightAlignArrow;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = hovered || open
+        ? (cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.04))
+        : Colors.transparent;
+    final angle = open ? 3.1415926 : 0.0;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => onHover(true),
+      onExit: (_) => onHover(false),
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOutCubic,
+          padding: EdgeInsets.symmetric(
+            horizontal: 12,
+            vertical: verticalPadding,
+          ),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(borderRadius),
+            // Match input border color and width
+            border: Border.all(
+              color: cs.outlineVariant.withValues(alpha: 0.12),
+              width: 0.6,
+            ),
+          ),
+          child: rightAlignArrow
+              ? Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: fontSize,
+                          color: cs.onSurface.withValues(alpha: 0.9),
+                          fontWeight: AppFontWeights.regular,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    AnimatedRotation(
+                      turns: angle / (2 * 3.1415926),
+                      duration: const Duration(milliseconds: 180),
+                      curve: Curves.easeOutCubic,
+                      child: Icon(
+                        lucide.Lucide.ChevronDown,
+                        size: 16,
+                        color: cs.onSurface.withValues(alpha: 0.8),
+                      ),
+                    ),
+                  ],
+                )
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: fontSize,
+                        color: cs.onSurface.withValues(alpha: 0.9),
+                        fontWeight: AppFontWeights.regular,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    AnimatedRotation(
+                      turns: angle / (2 * 3.1415926),
+                      duration: const Duration(milliseconds: 180),
+                      curve: Curves.easeOutCubic,
+                      child: Icon(
+                        lucide.Lucide.ChevronDown,
+                        size: 16,
+                        color: cs.onSurface.withValues(alpha: 0.8),
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OverlayMenuItem extends StatefulWidget {
+  const _OverlayMenuItem({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  @override
+  State<_OverlayMenuItem> createState() => _OverlayMenuItemState();
+}
+
+class _OverlayMenuItemState extends State<_OverlayMenuItem> {
+  bool _hover = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = widget.selected
+        ? cs.primary.withValues(alpha: 0.08)
+        : (_hover
+              ? (cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.04))
+              : Colors.transparent);
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.label,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: cs.onSurface.withValues(alpha: 0.9),
+                  ),
+                ),
+              ),
+              if (widget.selected)
+                Icon(lucide.Lucide.Check, size: 16, color: cs.primary),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Generic overlay item with leading icon, label and optional selected checkmark.
+class _OverlayItem extends StatefulWidget {
+  const _OverlayItem({
+    required this.icon,
+    required this.label,
+    required this.background,
+    required this.selected,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final Color background;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  State<_OverlayItem> createState() => _OverlayItemState();
+}
+
+class _OverlayItemState extends State<_OverlayItem> {
+  bool _hover = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = _hover
+        ? Color.alphaBlend(
+            (cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.04)),
+            widget.background,
+          )
+        : widget.background;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                widget.icon,
+                size: 16,
+                color: cs.onSurface.withValues(alpha: 0.85),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  widget.label,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: cs.onSurface.withValues(alpha: 0.9),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (widget.selected)
+                Icon(lucide.Lucide.Check, size: 16, color: cs.primary),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LanguageDropdown extends StatefulWidget {
+  const _LanguageDropdown({required this.onClose});
+  final VoidCallback onClose;
+  @override
+  State<_LanguageDropdown> createState() => _LanguageDropdownState();
+}
+
+class _LanguageDropdownState extends State<_LanguageDropdown> {
+  double _opacity = 0;
+  Offset _slide = const Offset(0, -0.02);
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _opacity = 1;
+        _slide = Offset.zero;
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final items = <(_LangItem, bool)>[
+      (
+        _LangItem(
+          flag: '🖥️',
+          label: l10n.settingsPageSystemMode,
+          tag: 'system',
+        ),
+        sp.isFollowingSystemLocale,
+      ),
+      for (final language in AppLanguage.values)
+        (
+          _LangItem(
+            flag: language.flag,
+            label: language.nativeName,
+            tag: language.tag,
+          ),
+          !sp.isFollowingSystemLocale &&
+              AppLanguage.fromLocale(sp.appLocale) == language,
+        ),
+    ];
+    final maxH = MediaQuery.of(context).size.height * 0.5;
+    return AnimatedOpacity(
+      opacity: _opacity,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+      child: AnimatedSlide(
+        offset: _slide,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOutCubic,
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: cs.outlineVariant.withValues(alpha: 0.12),
+                width: 0.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: cs.shadow.withValues(alpha: 0.05),
+                  blurRadius: 12,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: maxH),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final ent in items)
+                      _LanguageDropdownItem(
+                        item: ent.$1,
+                        checked: ent.$2,
+                        onTap: () async {
+                          final settings = context.read<SettingsProvider>();
+                          if (ent.$1.tag == 'system') {
+                            await settings.setAppLocaleFollowSystem();
+                          } else {
+                            final language = AppLanguage.fromTag(ent.$1.tag);
+                            if (language != null) {
+                              await settings.setAppLocale(language.locale);
+                            }
+                          }
+                          if (!mounted) return;
+                          widget.onClose();
+                        },
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LangItem {
+  final String flag;
+  final String label;
+  final String tag;
+  const _LangItem({required this.flag, required this.label, required this.tag});
+}
+
+class _LanguageDropdownItem extends StatefulWidget {
+  const _LanguageDropdownItem({
+    required this.item,
+    this.checked = false,
+    required this.onTap,
+  });
+  final _LangItem item;
+  final bool checked;
+  final VoidCallback onTap;
+  @override
+  State<_LanguageDropdownItem> createState() => _LanguageDropdownItemState();
+}
+
+class _LanguageDropdownItemState extends State<_LanguageDropdownItem> {
+  bool _hover = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOutCubic,
+          height: 42,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: _hover
+                ? (cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.04))
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            children: [
+              Text(
+                widget.item.flag,
+                style: TextStyle(fontSize: 16, decoration: TextDecoration.none),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  widget.item.label,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: cs.onSurface,
+                    decoration: TextDecoration.none,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                ),
+              ),
+              if (widget.checked) ...[
+                const SizedBox(width: 10),
+                Icon(lucide.Lucide.Check, size: 16, color: cs.primary),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ChatFontSizeRow extends StatefulWidget {
+  const _ChatFontSizeRow();
+  @override
+  State<_ChatFontSizeRow> createState() => _ChatFontSizeRowState();
+}
+
+class _ChatFontSizeRowState extends State<_ChatFontSizeRow> {
+  late final TextEditingController _controller;
+  @override
+  void initState() {
+    super.initState();
+    final scale = context.read<SettingsProvider>().chatFontScale;
+    _controller = TextEditingController(text: '${(scale * 100).round()}');
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _commit(String text) {
+    final v = text.trim();
+    final n = double.tryParse(v);
+    if (n == null) return;
+    final clamped = (n / 100.0).clamp(0.5, 1.5);
+    context.read<SettingsProvider>().setChatFontScale(clamped);
+    _controller.text = '${(clamped * 100).round()}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageChatFontSizeTitle,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IntrinsicWidth(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 36, maxWidth: 72),
+              child: _BorderInput(
+                controller: _controller,
+                onSubmitted: _commit,
+                onFocusLost: _commit,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '%',
+            style: TextStyle(
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurface.withValues(alpha: 0.7),
+              fontSize: 14,
+              decoration: TextDecoration.none,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BorderInput extends StatefulWidget {
+  const _BorderInput({
+    required this.controller,
+    required this.onSubmitted,
+    required this.onFocusLost,
+  });
+  final TextEditingController controller;
+  final ValueChanged<String> onSubmitted;
+  final ValueChanged<String> onFocusLost;
+  @override
+  State<_BorderInput> createState() => _BorderInputState();
+}
+
+class _BorderInputState extends State<_BorderInput> {
+  late FocusNode _focus;
+  bool _hover = false;
+  @override
+  void initState() {
+    super.initState();
+    _focus = FocusNode();
+    _focus.addListener(() {
+      // Rebuild border color on focus change
+      if (mounted) setState(() {});
+      if (!_focus.hasFocus) widget.onFocusLost(widget.controller.text);
+    });
+  }
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    // hover to change border color (not background)
+    final baseBorder = OutlineInputBorder(
+      borderRadius: BorderRadius.circular(10),
+      borderSide: BorderSide(
+        color: cs.outlineVariant.withValues(alpha: 0.28),
+        width: 0.8,
+      ),
+    );
+    final hoverBorder = OutlineInputBorder(
+      borderRadius: BorderRadius.circular(10),
+      borderSide: BorderSide(
+        color: cs.outlineVariant.withValues(alpha: 0.38),
+        width: 0.9,
+      ),
+    );
+    final focusBorder = OutlineInputBorder(
+      borderRadius: BorderRadius.circular(10),
+      borderSide: BorderSide(color: cs.primary, width: 1.0),
+    );
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: TextField(
+        controller: widget.controller,
+        focusNode: _focus,
+        textAlign: TextAlign.center,
+        keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+        decoration: InputDecoration(
+          isDense: true,
+          filled: true,
+          fillColor: context.appColors.surfaceCard,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 6,
+            vertical: 8,
+          ),
+          border: baseBorder,
+          enabledBorder: _focus.hasFocus
+              ? focusBorder
+              : (_hover ? hoverBorder : baseBorder),
+          focusedBorder: focusBorder,
+          hoverColor: Colors.transparent,
+        ),
+        onSubmitted: widget.onSubmitted,
+      ),
+    );
+  }
+}
+
+// --- Desktop Font Rows ---
+class _DesktopAppFontRow extends StatelessWidget {
+  const _DesktopAppFontRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final settingsProvider = context.read<SettingsProvider>();
+    final current = sp.appFontFamily;
+    final displayText = (current == null || current.isEmpty)
+        ? l10n.desktopFontFamilySystemDefault
+        : sp.appFontLocalAlias != null
+        ? l10n.displaySettingsPageFontLocalFileLabel
+        : current;
+    return _LabeledRow(
+      label: l10n.desktopFontAppLabel,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _DesktopFontDropdownButton(
+            display: displayText,
+            onTap: () async {
+              final fam = await _showDesktopFontChooserDialog(
+                context,
+                title: l10n.desktopFontAppLabel,
+                initial: sp.appFontFamily,
+                showSystemDefault: false,
+              );
+              if (fam == null) return;
+              if (fam == '__SYSTEM__') {
+                await settingsProvider.clearAppFont();
+              } else {
+                await settingsProvider.setAppFontSystemFamily(fam);
+              }
+            },
+          ),
+          const SizedBox(width: 8),
+          Tooltip(
+            message: l10n.googleFontsTitle,
+            child: _IconBtn(
+              icon: lucide.Lucide.Download,
+              onTap: () => showGoogleFontsPicker(context, forCode: false),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Tooltip(
+            message: l10n.displaySettingsPageFontResetLabel,
+            child: _IconBtn(
+              icon: lucide.Lucide.RotateCcw,
+              onTap: () async => settingsProvider.clearAppFont(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DesktopCodeFontRow extends StatelessWidget {
+  const _DesktopCodeFontRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final settingsProvider = context.read<SettingsProvider>();
+    final current = sp.codeFontFamily;
+    final displayText = (current == null || current.isEmpty)
+        ? l10n.desktopFontFamilyMonospaceDefault
+        : sp.codeFontLocalAlias != null
+        ? l10n.displaySettingsPageFontLocalFileLabel
+        : current;
+    return _LabeledRow(
+      label: l10n.desktopFontCodeLabel,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _DesktopFontDropdownButton(
+            display: displayText,
+            onTap: () async {
+              final fam = await _showDesktopFontChooserDialog(
+                context,
+                title: l10n.desktopFontCodeLabel,
+                initial: sp.codeFontFamily,
+                showMonospaceDefault: false,
+              );
+              if (fam == null) return;
+              if (fam == '__MONO__') {
+                await settingsProvider.clearCodeFont();
+              } else {
+                await settingsProvider.setCodeFontSystemFamily(fam);
+              }
+            },
+          ),
+          const SizedBox(width: 8),
+          Tooltip(
+            message: l10n.googleFontsTitle,
+            child: _IconBtn(
+              icon: lucide.Lucide.Download,
+              onTap: () => showGoogleFontsPicker(context, forCode: true),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Tooltip(
+            message: l10n.displaySettingsPageFontResetLabel,
+            child: _IconBtn(
+              icon: lucide.Lucide.RotateCcw,
+              onTap: () async => settingsProvider.clearCodeFont(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DesktopFontDropdownButton extends StatefulWidget {
+  const _DesktopFontDropdownButton({
+    required this.display,
+    required this.onTap,
+  });
+  final String display;
+  final VoidCallback onTap;
+  @override
+  State<_DesktopFontDropdownButton> createState() =>
+      _DesktopFontDropdownButtonState();
+}
+
+class _DesktopFontDropdownButtonState
+    extends State<_DesktopFontDropdownButton> {
+  bool _hover = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = _hover
+        ? (cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.05))
+        : Colors.transparent;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: cs.outlineVariant.withValues(alpha: 0.28),
+              width: 0.8,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 220),
+                child: Text(
+                  widget.display,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: cs.onSurface,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                lucide.Lucide.ChevronDown,
+                size: 16,
+                color: cs.onSurface.withValues(alpha: 0.7),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Future<String?> _showDesktopFontChooserDialog(
+  BuildContext context, {
+  required String title,
+  String? initial,
+  bool showSystemDefault = false,
+  bool showMonospaceDefault = false,
+}) async {
+  final l10n = AppLocalizations.of(context)!;
+  final rootNavigator = Navigator.of(context, rootNavigator: true);
+  final ctrl = TextEditingController();
+  String? result;
+
+  Future<List<String>> fetchSystemFonts() async {
+    try {
+      final sf = SystemFonts();
+      // Only fetch the font family list to avoid huge memory spikes.
+      final fontList = await Future.value(sf.getFontList());
+      final out = List<String>.from(fontList);
+      out.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+      if (out.isNotEmpty) {
+        return out;
+      }
+    } catch (_) {
+      /* ignore and fallback */
+    }
+    return <String>[
+      'System UI',
+      'Segoe UI',
+      'SF Pro Text',
+      'San Francisco',
+      'Helvetica Neue',
+      'Arial',
+      'Roboto',
+      'PingFang SC',
+      'Microsoft YaHei',
+      'SimHei',
+      'Noto Sans SC',
+      'Noto Serif',
+      'Courier New',
+      'JetBrains Mono',
+      'Fira Code',
+      'monospace',
+    ]..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  }
+
+  // Show loading dialog only if fetch takes time, and ensure it closes
+  bool loadingShown = false;
+  final loadingTimer = Timer(const Duration(milliseconds: 300), () {
+    loadingShown = true;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        final bg = Theme.of(context).colorScheme.surfaceContainerHigh;
+        final cs2 = Theme.of(ctx).colorScheme;
+        return Dialog(
+          elevation: 0,
+          backgroundColor: bg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                const CupertinoActivityIndicator(radius: 12),
+                const SizedBox(height: 12),
+                Text(
+                  l10n.desktopFontLoading,
+                  style: TextStyle(
+                    color: cs2.onSurface,
+                    fontSize: 14,
+                    fontWeight: AppFontWeights.semibold,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  });
+  final fonts = await fetchSystemFonts();
+  if (loadingTimer.isActive) {
+    loadingTimer.cancel();
+  }
+  if (loadingShown) {
+    try {
+      rootNavigator.pop();
+    } catch (_) {}
+  }
+  if (!context.mounted) {
+    return null;
+  }
+  await showDialog<String>(
+    context: context,
+    barrierDismissible: true,
+    builder: (ctx) {
+      return Dialog(
+        backgroundColor: context.overlaySurface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520, maxHeight: 520),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            child: StatefulBuilder(
+              builder: (context, setState) {
+                String q = ctrl.text.trim().toLowerCase();
+                final filtered = q.isEmpty
+                    ? fonts
+                    : fonts.where((f) => f.toLowerCase().contains(q)).toList();
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: AppFontWeights.emphasis,
+                            ),
+                          ),
+                        ),
+                        _IconBtn(
+                          icon: lucide.Lucide.X,
+                          onTap: () => Navigator.of(ctx).maybePop(),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: ctrl,
+                      autofocus: true,
+                      decoration: InputDecoration(
+                        isDense: true,
+                        filled: true,
+                        hintText: l10n.desktopFontFilterHint,
+                        fillColor: context.appColors.surfaceFill,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide(
+                            color: Theme.of(context).colorScheme.outlineVariant
+                                .withValues(alpha: 0.12),
+                            width: 0.6,
+                          ),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide(
+                            color: Theme.of(context).colorScheme.outlineVariant
+                                .withValues(alpha: 0.12),
+                            width: 0.6,
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.primary.withValues(alpha: 0.35),
+                            width: 0.8,
+                          ),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 12,
+                        ),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                    const SizedBox(height: 10),
+                    Expanded(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: context.appColors.surfaceFill,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: ListView.builder(
+                          itemCount: filtered.length,
+                          itemBuilder: (context, i) {
+                            final fam = filtered[i];
+                            final selected = fam == initial;
+                            return _FontRowItem(
+                              family: fam,
+                              selected: selected,
+                              onTap: () => Navigator.of(ctx).pop(fam),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+    },
+  ).then((v) => result = v);
+  return result;
+}
+
+class _FontRowItem extends StatefulWidget {
+  const _FontRowItem({
+    required this.family,
+    required this.onTap,
+    this.selected = false,
+  });
+  final String family;
+  final VoidCallback onTap;
+  final bool selected;
+  @override
+  State<_FontRowItem> createState() => _FontRowItemState();
+}
+
+// Cache loaded/ongoing system fonts to avoid duplicate loads
+final Set<String> _loadedSystemFontFamilies = <String>{};
+final Set<String> _loadingSystemFontFamilies = <String>{};
+
+class _FontRowItemState extends State<_FontRowItem> {
+  bool _hover = false;
+  @override
+  void initState() {
+    super.initState();
+    // Lazy-load this row's font family for preview (only for visible items)
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final fam = widget.family;
+      if (_loadedSystemFontFamilies.contains(fam) ||
+          _loadingSystemFontFamilies.contains(fam)) {
+        return;
+      }
+      _loadingSystemFontFamilies.add(fam);
+      try {
+        await SystemFonts().loadFont(fam);
+      } catch (_) {
+        // best-effort; fallback rendering will be used if load fails
+      } finally {
+        _loadingSystemFontFamilies.remove(fam);
+        _loadedSystemFontFamilies.add(fam);
+        if (mounted) setState(() {});
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = _hover
+        ? (cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.04))
+        : Colors.transparent;
+    final sample = 'Aa字';
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          height: 44,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        widget.family,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: cs.onSurface,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      sample,
+                      style: TextStyle(
+                        fontFamily: widget.family,
+                        fontSize: 16,
+                        color: cs.onSurface,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (widget.selected) ...[
+                const SizedBox(width: 10),
+                Icon(lucide.Lucide.Check, size: 16, color: cs.primary),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// --- Toggles Groups ---
+class _ToggleRowShowUserAvatar extends StatelessWidget {
+  const _ToggleRowShowUserAvatar();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowUserAvatarTitle,
+      value: sp.showUserAvatar,
+      onChanged: (v) => context.read<SettingsProvider>().setShowUserAvatar(v),
+    );
+  }
+}
+
+class _ToggleRowShowUserName extends StatelessWidget {
+  const _ToggleRowShowUserName();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowUserNameTitle,
+      value: sp.showUserName,
+      onChanged: (v) => context.read<SettingsProvider>().setShowUserName(v),
+    );
+  }
+}
+
+class _ToggleRowShowUserTimestamp extends StatelessWidget {
+  const _ToggleRowShowUserTimestamp();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowUserTimestampTitle,
+      value: sp.showUserTimestamp,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowUserTimestamp(v),
+    );
+  }
+}
+
+class _ToggleRowShowUserMsgActions extends StatelessWidget {
+  const _ToggleRowShowUserMsgActions();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowUserMessageActionsTitle,
+      value: sp.showUserMessageActions,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowUserMessageActions(v),
+    );
+  }
+}
+
+class _ToggleRowShowModelIcon extends StatelessWidget {
+  const _ToggleRowShowModelIcon();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageChatModelIconTitle,
+      value: sp.showModelIcon,
+      onChanged: (v) => context.read<SettingsProvider>().setShowModelIcon(v),
+    );
+  }
+}
+
+class _ToggleRowShowModelName extends StatelessWidget {
+  const _ToggleRowShowModelName();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowModelNameTitle,
+      value: sp.showModelName,
+      onChanged: (v) => context.read<SettingsProvider>().setShowModelName(v),
+    );
+  }
+}
+
+class _ToggleRowShowModelTimestamp extends StatelessWidget {
+  const _ToggleRowShowModelTimestamp();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowModelTimestampTitle,
+      value: sp.showModelTimestamp,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowModelTimestamp(v),
+    );
+  }
+}
+
+class _ToggleRowShowProviderInChatMessage extends StatelessWidget {
+  const _ToggleRowShowProviderInChatMessage();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowProviderInChatMessageTitle,
+      value: sp.showProviderInChatMessage,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowProviderInChatMessage(v),
+    );
+  }
+}
+
+class _ToggleRowShowTokenStats extends StatelessWidget {
+  const _ToggleRowShowTokenStats();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowTokenStatsTitle,
+      value: sp.showTokenStats,
+      onChanged: (v) => context.read<SettingsProvider>().setShowTokenStats(v),
+    );
+  }
+}
+
+class _ToggleRowShowTotalTokens extends StatelessWidget {
+  const _ToggleRowShowTotalTokens();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowTotalTokensTitle,
+      tip: l10n.displaySettingsPageShowTotalTokensSubtitle,
+      value: sp.showTotalTokens,
+      onChanged: (v) => context.read<SettingsProvider>().setShowTotalTokens(v),
+    );
+  }
+}
+
+class _ToggleRowShowProviderInCapsule extends StatelessWidget {
+  const _ToggleRowShowProviderInCapsule();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.desktopShowProviderInModelCapsule,
+      value: sp.showProviderInModelCapsule,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowProviderInModelCapsule(v),
+    );
+  }
+}
+
+class _ToggleRowDollarLatex extends StatelessWidget {
+  const _ToggleRowDollarLatex();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageEnableDollarLatexTitle,
+      value: sp.enableDollarLatex,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setEnableDollarLatex(v),
+    );
+  }
+}
+
+class _ToggleRowMathRendering extends StatelessWidget {
+  const _ToggleRowMathRendering();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageEnableMathTitle,
+      value: sp.enableMathRendering,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setEnableMathRendering(v),
+    );
+  }
+}
+
+class _ToggleRowLegacyInlineCodeStyle extends StatelessWidget {
+  const _ToggleRowLegacyInlineCodeStyle();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageUseLegacyInlineCodeStyleTitle,
+      tip: l10n.displaySettingsPageUseLegacyInlineCodeStyleSubtitle,
+      value: sp.useLegacyInlineCodeStyle,
+      onChanged: (value) =>
+          context.read<SettingsProvider>().setUseLegacyInlineCodeStyle(value),
+    );
+  }
+}
+
+class _ToggleRowLegacyCodeBlockStyle extends StatelessWidget {
+  const _ToggleRowLegacyCodeBlockStyle();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageUseLegacyCodeBlockStyleTitle,
+      tip: l10n.displaySettingsPageUseLegacyCodeBlockStyleSubtitle,
+      value: sp.useLegacyCodeBlockStyle,
+      onChanged: (value) =>
+          context.read<SettingsProvider>().setUseLegacyCodeBlockStyle(value),
+    );
+  }
+}
+
+class _ToggleRowUserMarkdown extends StatelessWidget {
+  const _ToggleRowUserMarkdown();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageEnableUserMarkdownTitle,
+      value: sp.enableUserMarkdown,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setEnableUserMarkdown(v),
+    );
+  }
+}
+
+class _ToggleRowReasoningMarkdown extends StatelessWidget {
+  const _ToggleRowReasoningMarkdown();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageEnableReasoningMarkdownTitle,
+      value: sp.enableReasoningMarkdown,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setEnableReasoningMarkdown(v),
+    );
+  }
+}
+
+class _ToggleRowAssistantMarkdown extends StatelessWidget {
+  const _ToggleRowAssistantMarkdown();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageEnableAssistantMarkdownTitle,
+      value: sp.enableAssistantMarkdown,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setEnableAssistantMarkdown(v),
+    );
+  }
+}
+
+class _ToggleRowGenUiHeader extends StatelessWidget {
+  const _ToggleRowGenUiHeader();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsShowGenUiHeader,
+      tip: l10n.displaySettingsShowGenUiHeaderSubtitle,
+      value: sp.showGenUiHeader,
+      onChanged: (value) =>
+          context.read<SettingsProvider>().setShowGenUiHeader(value),
+    );
+  }
+}
+
+class _ToggleRowAutoCollapseCodeBlocks extends StatelessWidget {
+  const _ToggleRowAutoCollapseCodeBlocks();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageAutoCollapseCodeBlockTitle,
+      value: sp.autoCollapseCodeBlock,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setAutoCollapseCodeBlock(v),
+    );
+  }
+}
+
+class _ToggleRowShowThinkingCards extends StatelessWidget {
+  const _ToggleRowShowThinkingCards();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowThinkingCardsTitle,
+      tip: l10n.displaySettingsPageShowThinkingCardsSubtitle,
+      value: sp.showThinkingCards,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowThinkingCards(v),
+    );
+  }
+}
+
+class _ToggleRowShowToolCards extends StatelessWidget {
+  const _ToggleRowShowToolCards();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowToolCardsTitle,
+      tip: l10n.displaySettingsPageShowToolCardsSubtitle,
+      value: sp.showToolCards,
+      onChanged: (v) => context.read<SettingsProvider>().setShowToolCards(v),
+    );
+  }
+}
+
+class _ToggleRowShowProducedFiles extends StatelessWidget {
+  const _ToggleRowShowProducedFiles();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowProducedFilesTitle,
+      tip: l10n.displaySettingsPageShowProducedFilesSubtitle,
+      value: sp.showProducedFiles,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowProducedFiles(v),
+    );
+  }
+}
+
+class _ToggleRowShowReasoningLevelBadge extends StatelessWidget {
+  const _ToggleRowShowReasoningLevelBadge();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsShowReasoningLevelBadge,
+      tip: l10n.displaySettingsShowReasoningLevelBadgeSubtitle,
+      value: sp.showReasoningLevelBadge,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowReasoningLevelBadge(v),
+    );
+  }
+}
+
+class _ToggleRowAutoCollapseThinking extends StatelessWidget {
+  const _ToggleRowAutoCollapseThinking();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageAutoCollapseThinkingTitle,
+      value: sp.autoCollapseThinking,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setAutoCollapseThinking(v),
+    );
+  }
+}
+
+class _ToggleRowCollapseThinkingSteps extends StatelessWidget {
+  const _ToggleRowCollapseThinkingSteps();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageCollapseThinkingStepsTitle,
+      value: sp.collapseThinkingSteps,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setCollapseThinkingSteps(v),
+    );
+  }
+}
+
+class _ToggleRowShowToolResultSummary extends StatelessWidget {
+  const _ToggleRowShowToolResultSummary();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowToolResultSummaryTitle,
+      value: sp.showToolResultSummary,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowToolResultSummary(v),
+    );
+  }
+}
+
+class _ToggleRowHideToolResultImages extends StatelessWidget {
+  const _ToggleRowHideToolResultImages();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageHideToolResultImagesTitle,
+      value: sp.hideToolResultImages,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setHideToolResultImages(v),
+    );
+  }
+}
+
+class _ToggleRowShowBrowserPageCards extends StatelessWidget {
+  const _ToggleRowShowBrowserPageCards();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowBrowserPageCardsTitle,
+      value: sp.showBrowserPageCards,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowBrowserPageCards(v),
+    );
+  }
+}
+
+class _ToggleRowInsertSuggestionOnly extends StatelessWidget {
+  const _ToggleRowInsertSuggestionOnly();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageInsertSuggestionOnlyTitle,
+      value: sp.insertSuggestionOnTapOnly,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setInsertSuggestionOnTapOnly(v),
+    );
+  }
+}
+
+class _ToggleRowRegenerateDeleteTrailingMessages extends StatelessWidget {
+  const _ToggleRowRegenerateDeleteTrailingMessages();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageRegenerateDeleteTrailingMessagesTitle,
+      value: sp.regenerateDeleteTrailingMessages,
+      onChanged: (v) => context
+          .read<SettingsProvider>()
+          .setRegenerateDeleteTrailingMessages(v),
+    );
+  }
+}
+
+class _ToggleRowShowRegenerateConfirmDialog extends StatelessWidget {
+  const _ToggleRowShowRegenerateConfirmDialog();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowRegenerateConfirmDialogTitle,
+      value: sp.showRegenerateConfirmDialog,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowRegenerateConfirmDialog(v),
+    );
+  }
+}
+
+class _ToggleRowForkKeepMessageVersions extends StatelessWidget {
+  const _ToggleRowForkKeepMessageVersions();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageForkKeepMessageVersionsTitle,
+      value: sp.forkKeepMessageVersions,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setForkKeepMessageVersions(v),
+    );
+  }
+}
+
+class _ToggleRowEditAssistantKeepThinkingToolCards extends StatelessWidget {
+  const _ToggleRowEditAssistantKeepThinkingToolCards();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageEditAssistantKeepThinkingToolCardsTitle,
+      tip: l10n.displaySettingsPageEditAssistantKeepThinkingToolCardsSubtitle,
+      value: sp.keepThinkingAndToolCardsWhenEditingAssistant,
+      onChanged: (v) => context
+          .read<SettingsProvider>()
+          .setKeepThinkingAndToolCardsWhenEditingAssistant(v),
+    );
+  }
+}
+
+class _AutoScrollRow extends StatelessWidget {
+  const _AutoScrollRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return Tooltip(
+      message: l10n.displaySettingsPageAutoScrollSubtitle,
+      child: _LabeledRow(
+        label: l10n.displaySettingsPageAutoScrollEnableTitle,
+        trailing: DesktopSelectDropdown<bool>(
+          value: sp.autoScrollEnabled,
+          options: [
+            DesktopSelectOption(
+              value: true,
+              label: l10n.displaySettingsPageAutoScrollEnabledLabel,
+            ),
+            DesktopSelectOption(
+              value: false,
+              label: l10n.displaySettingsPageAutoScrollDisabledLabel,
+            ),
+          ],
+          onSelected: (enabled) =>
+              context.read<SettingsProvider>().setAutoScrollEnabled(enabled),
+        ),
+      ),
+    );
+  }
+}
+
+class _ToggleRowRequestLogging extends StatelessWidget {
+  const _ToggleRowRequestLogging();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              l10n.requestLogSettingTitle,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: AppFontWeights.regular,
+                color: cs.onSurface.withValues(alpha: 0.9),
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ),
+          Tooltip(
+            message: l10n.logViewerOpenFolder,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: () async {
+                final dir = await AppDirectories.getContentDirectory();
+                final logsDir = Directory('${dir.path}/logs');
+                if (!await logsDir.exists()) {
+                  await logsDir.create(recursive: true);
+                }
+                final uri = Uri.file(logsDir.path);
+                await launchUrl(uri);
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: Icon(
+                  lucide.Lucide.FolderOpen,
+                  size: 18,
+                  color: cs.primary,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IosSwitch(
+            value: sp.requestLogEnabled,
+            onChanged: (v) =>
+                context.read<SettingsProvider>().setRequestLogEnabled(v),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ToggleRowFlutterLogging extends StatelessWidget {
+  const _ToggleRowFlutterLogging();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              l10n.flutterLogSettingTitle,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: AppFontWeights.regular,
+                color: cs.onSurface.withValues(alpha: 0.9),
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ),
+          Tooltip(
+            message: l10n.logViewerOpenFolder,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: () async {
+                final dir = await AppDirectories.getContentDirectory();
+                final logsDir = Directory('${dir.path}/logs');
+                if (!await logsDir.exists()) {
+                  await logsDir.create(recursive: true);
+                }
+                final uri = Uri.file(logsDir.path);
+                await launchUrl(uri);
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: Icon(
+                  lucide.Lucide.FolderOpen,
+                  size: 18,
+                  color: cs.primary,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IosSwitch(
+            value: sp.flutterLogEnabled,
+            onChanged: (v) =>
+                context.read<SettingsProvider>().setFlutterLogEnabled(v),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ToggleRowShowUpdates extends StatelessWidget {
+  const _ToggleRowShowUpdates();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowUpdatesTitle,
+      value: sp.showAppUpdates,
+      onChanged: (v) => context.read<SettingsProvider>().setShowAppUpdates(v),
+    );
+  }
+}
+
+class _ToggleRowAutoSwitchTopicsDesktop extends StatelessWidget {
+  const _ToggleRowAutoSwitchTopicsDesktop();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageAutoSwitchTopicsTitle,
+      value: sp.desktopAutoSwitchTopics,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setDesktopAutoSwitchTopics(v),
+    );
+  }
+}
+
+class _ToggleRowMsgNavButtons extends StatelessWidget {
+  const _ToggleRowMsgNavButtons();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    final options = <DesktopSelectOption<DesktopMessageNavButtonsMode>>[
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.always,
+        label: l10n.displaySettingsPageMessageNavButtonsModeAlways,
+      ),
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.scroll,
+        label: l10n.displaySettingsPageMessageNavButtonsModeScroll,
+      ),
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.hover,
+        label: l10n.displaySettingsPageMessageNavButtonsModeHover,
+      ),
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.scrollAndHover,
+        label: l10n.displaySettingsPageMessageNavButtonsModeScrollAndHover,
+      ),
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.never,
+        label: l10n.displaySettingsPageMessageNavButtonsModeNever,
+      ),
+    ];
+
+    return _LabeledRow(
+      label: l10n.displaySettingsPageMessageNavButtonsTitle,
+      trailing: DesktopSelectDropdown<DesktopMessageNavButtonsMode>(
+        value: sp.desktopMessageNavButtonsMode,
+        options: options,
+        minWidth: 168,
+        maxLabelWidth: 190,
+        onSelected: (mode) => context
+            .read<SettingsProvider>()
+            .setDesktopMessageNavButtonsMode(mode),
+      ),
+    );
+  }
+}
+
+class _ToggleRowUseNewAssistantAvatarUx extends StatelessWidget {
+  const _ToggleRowUseNewAssistantAvatarUx();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageUseNewAssistantAvatarUxTitle,
+      value: sp.useNewAssistantAvatarUx,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setUseNewAssistantAvatarUx(v),
+    );
+  }
+}
+
+class _ToggleRowShowChatListDate extends StatelessWidget {
+  const _ToggleRowShowChatListDate();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowChatListDateTitle,
+      value: sp.showChatListDate,
+      onChanged: (v) => context.read<SettingsProvider>().setShowChatListDate(v),
+    );
+  }
+}
+
+class _ToggleRowNewChatOnAssistantSwitch extends StatelessWidget {
+  const _ToggleRowNewChatOnAssistantSwitch();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageNewChatOnAssistantSwitchTitle,
+      value: sp.newChatOnAssistantSwitch,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setNewChatOnAssistantSwitch(v),
+    );
+  }
+}
+
+class _ToggleRowNewChatAfterDelete extends StatelessWidget {
+  const _ToggleRowNewChatAfterDelete();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageNewChatAfterDeleteTitle,
+      value: sp.newChatAfterDelete,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setNewChatAfterDelete(v),
+    );
+  }
+}
+
+class _ToggleRowNewChatOnLaunch extends StatelessWidget {
+  const _ToggleRowNewChatOnLaunch();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageNewChatOnLaunchTitle,
+      value: sp.newChatOnLaunch,
+      onChanged: (v) => context.read<SettingsProvider>().setNewChatOnLaunch(v),
+    );
+  }
+}
+
+class _LongPasteAsFileSection extends StatelessWidget {
+  const _LongPasteAsFileSection();
+  @override
+  Widget build(BuildContext context) {
+    final sp = context.watch<SettingsProvider>();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const _ToggleRowLongPasteAsFile(),
+        if (sp.longPasteAsFile) ...[
+          const _RowDivider(),
+          const _LongPasteAsFileThresholdRow(),
+        ],
+      ],
+    );
+  }
+}
+
+class _ToggleRowLongPasteAsFile extends StatelessWidget {
+  const _ToggleRowLongPasteAsFile();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageLongPasteAsFileTitle,
+      value: sp.longPasteAsFile,
+      onChanged: (v) => context.read<SettingsProvider>().setLongPasteAsFile(v),
+    );
+  }
+}
+
+class _LongPasteAsFileThresholdRow extends StatefulWidget {
+  const _LongPasteAsFileThresholdRow();
+  @override
+  State<_LongPasteAsFileThresholdRow> createState() =>
+      _LongPasteAsFileThresholdRowState();
+}
+
+class _LongPasteAsFileThresholdRowState
+    extends State<_LongPasteAsFileThresholdRow> {
+  late final SettingsProvider _settings;
+  late final TextEditingController _controller;
+  @override
+  void initState() {
+    super.initState();
+    _settings = context.read<SettingsProvider>();
+    _controller = TextEditingController(
+      text: '${_settings.longPasteAsFileThreshold}',
+    );
+  }
+
+  @override
+  void dispose() {
+    _commit(_controller.text);
+    super.dispose();
+    _controller.dispose();
+  }
+
+  void _commit(String text) {
+    final next = SettingsProvider.resolveLongPasteAsFileThreshold(
+      text,
+      fallback: _settings.longPasteAsFileThreshold,
+    );
+    _settings.setLongPasteAsFileThreshold(next);
+    final nextText = '$next';
+    if (_controller.text != nextText) {
+      _controller.text = nextText;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageLongPasteAsFileThresholdTitle,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IntrinsicWidth(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 48, maxWidth: 88),
+              child: _BorderInput(
+                controller: _controller,
+                onSubmitted: _commit,
+                onFocusLost: _commit,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            l10n.displaySettingsPageLongPasteAsFileThresholdUnit,
+            style: TextStyle(
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurface.withValues(alpha: 0.7),
+              fontSize: 14,
+              decoration: TextDecoration.none,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ToggleRow extends StatelessWidget {
+  const _ToggleRow({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+    this.tip,
+  });
+  final String label;
+  final String? tip;
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final row = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  // Reduce toggle row label size to 14 to match other panes
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: AppFontWeights.regular,
+                    color: cs.onSurface.withValues(alpha: 0.9),
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (tip != null) TipIcon(message: tip!),
+          const SizedBox(width: 12),
+          IosSwitch(value: value, onChanged: onChanged),
+        ],
+      ),
+    );
+    return SettingsSearchTarget.wrap(context, label, row);
+  }
+}
+
+class _AutoCollapseCodeBlocksSection extends StatelessWidget {
+  const _AutoCollapseCodeBlocksSection();
+  @override
+  Widget build(BuildContext context) {
+    final sp = context.watch<SettingsProvider>();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const _ToggleRowAutoCollapseCodeBlocks(),
+        if (sp.autoCollapseCodeBlock) ...[
+          const _RowDivider(),
+          const _AutoCollapseCodeBlockLinesRow(),
+        ],
+      ],
+    );
+  }
+}
+
+class _CollapseLongUserMessagesSection extends StatelessWidget {
+  const _CollapseLongUserMessagesSection();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _ToggleRow(
+          label: l10n.displaySettingsPageCollapseLongUserMessagesTitle,
+          value: sp.collapseLongUserMessages,
+          onChanged: (v) =>
+              context.read<SettingsProvider>().setCollapseLongUserMessages(v),
+        ),
+        if (sp.collapseLongUserMessages) ...[
+          const _RowDivider(),
+          const _CollapseLongUserMessageCharsRow(),
+        ],
+      ],
+    );
+  }
+}
+
+class _CollapseLongUserMessageCharsRow extends StatefulWidget {
+  const _CollapseLongUserMessageCharsRow();
+  @override
+  State<_CollapseLongUserMessageCharsRow> createState() =>
+      _CollapseLongUserMessageCharsRowState();
+}
+
+class _CollapseLongUserMessageCharsRowState
+    extends State<_CollapseLongUserMessageCharsRow> {
+  late final TextEditingController _controller;
+  @override
+  void initState() {
+    super.initState();
+    final v = context.read<SettingsProvider>().collapseLongUserMessageChars;
+    _controller = TextEditingController(text: '$v');
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _commit(String text) {
+    final n = int.tryParse(text.trim());
+    if (n == null) return;
+    final clamped = n.clamp(
+      SettingsProvider.minCollapseLongUserMessageChars,
+      SettingsProvider.maxCollapseLongUserMessageChars,
+    );
+    context.read<SettingsProvider>().setCollapseLongUserMessageChars(clamped);
+    _controller.text = '$clamped';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageCollapseLongUserMessagesCharsTitle,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IntrinsicWidth(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 36, maxWidth: 72),
+              child: _BorderInput(
+                controller: _controller,
+                onSubmitted: _commit,
+                onFocusLost: _commit,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            l10n.displaySettingsPageCollapseLongUserMessagesCharsUnit,
+            style: TextStyle(
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurface.withValues(alpha: 0.7),
+              fontSize: 14,
+              decoration: TextDecoration.none,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// --- Others: inputs ---
+class _AutoCollapseCodeBlockLinesRow extends StatefulWidget {
+  const _AutoCollapseCodeBlockLinesRow();
+  @override
+  State<_AutoCollapseCodeBlockLinesRow> createState() =>
+      _AutoCollapseCodeBlockLinesRowState();
+}
+
+class _AutoCollapseCodeBlockLinesRowState
+    extends State<_AutoCollapseCodeBlockLinesRow> {
+  late final TextEditingController _controller;
+  @override
+  void initState() {
+    super.initState();
+    final v = context.read<SettingsProvider>().autoCollapseCodeBlockLines;
+    _controller = TextEditingController(text: '${v.round()}');
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _commit(String text) {
+    final v = text.trim();
+    final n = int.tryParse(v);
+    if (n == null) return;
+    final clamped = n.clamp(1, 999);
+    context.read<SettingsProvider>().setAutoCollapseCodeBlockLines(clamped);
+    _controller.text = '$clamped';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageAutoCollapseCodeBlockLinesTitle,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IntrinsicWidth(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 36, maxWidth: 72),
+              child: _BorderInput(
+                controller: _controller,
+                onSubmitted: _commit,
+                onFocusLost: _commit,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            l10n.displaySettingsPageAutoCollapseCodeBlockLinesUnit,
+            style: TextStyle(
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurface.withValues(alpha: 0.7),
+              fontSize: 14,
+              decoration: TextDecoration.none,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BackgroundMaskRow extends StatefulWidget {
+  const _BackgroundMaskRow();
+  @override
+  State<_BackgroundMaskRow> createState() => _BackgroundMaskRowState();
+}
+
+class _BackgroundMaskRowState extends State<_BackgroundMaskRow> {
+  late final TextEditingController _controller;
+  @override
+  void initState() {
+    super.initState();
+    final v = context.read<SettingsProvider>().chatBackgroundMaskStrength;
+    _controller = TextEditingController(text: '${(v * 100).round()}');
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _commit(String text) {
+    final v = text.trim();
+    final n = double.tryParse(v);
+    if (n == null) return;
+    final clamped = (n / 100.0).clamp(0.0, 1.0);
+    context.read<SettingsProvider>().setChatBackgroundMaskStrength(clamped);
+    _controller.text = '${(clamped * 100).round()}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageChatBackgroundMaskTitle,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IntrinsicWidth(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 36, maxWidth: 72),
+              child: _BorderInput(
+                controller: _controller,
+                onSubmitted: _commit,
+                onFocusLost: _commit,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '%',
+            style: TextStyle(
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurface.withValues(alpha: 0.7),
+              fontSize: 14,
+              decoration: TextDecoration.none,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChatInputBackgroundOpacityRow extends StatefulWidget {
+  const _ChatInputBackgroundOpacityRow();
+  @override
+  State<_ChatInputBackgroundOpacityRow> createState() =>
+      _ChatInputBackgroundOpacityRowState();
+}
+
+class _ChatInputBackgroundOpacityRowState
+    extends State<_ChatInputBackgroundOpacityRow> {
+  late final TextEditingController _lightController;
+  late final TextEditingController _darkController;
+  @override
+  void initState() {
+    super.initState();
+    final settings = context.read<SettingsProvider>();
+    _lightController = TextEditingController(
+      text: '${(settings.chatInputBackgroundOpacityLight * 100).round()}',
+    );
+    _darkController = TextEditingController(
+      text: '${(settings.chatInputBackgroundOpacityDark * 100).round()}',
+    );
+  }
+
+  @override
+  void dispose() {
+    _lightController.dispose();
+    _darkController.dispose();
+    super.dispose();
+  }
+
+  void _commit(Brightness brightness, TextEditingController controller) {
+    final text = controller.text;
+    final v = text.trim();
+    final n = double.tryParse(v);
+    if (n == null) return;
+    final clamped = (n / 100.0).clamp(0.0, 1.0);
+    context.read<SettingsProvider>().setChatInputBackgroundOpacity(
+      brightness,
+      clamped,
+    );
+    controller.text = '${(clamped * 100).round()}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageChatInputBackgroundOpacityTitle,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _OpacityInputGroup(
+            label: l10n.settingsPageLightMode,
+            controller: _lightController,
+            onCommit: () => _commit(Brightness.light, _lightController),
+          ),
+          const SizedBox(width: 12),
+          _OpacityInputGroup(
+            label: l10n.settingsPageDarkMode,
+            controller: _darkController,
+            onCommit: () => _commit(Brightness.dark, _darkController),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OpacityInputGroup extends StatelessWidget {
+  const _OpacityInputGroup({
+    required this.label,
+    required this.controller,
+    required this.onCommit,
+  });
+  final String label;
+  final TextEditingController controller;
+  final VoidCallback onCommit;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            color: cs.onSurface.withValues(alpha: 0.72),
+            fontSize: 13,
+            decoration: TextDecoration.none,
+          ),
+        ),
+        const SizedBox(width: 6),
+        IntrinsicWidth(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 36, maxWidth: 72),
+            child: _BorderInput(
+              controller: controller,
+              onSubmitted: (_) => onCommit(),
+              onFocusLost: (_) => onCommit(),
+            ),
+          ),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          '%',
+          style: TextStyle(
+            color: cs.onSurface.withValues(alpha: 0.7),
+            fontSize: 14,
+            decoration: TextDecoration.none,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// --- Send shortcut ---
+class _SendShortcutRow extends StatelessWidget {
+  const _SendShortcutRow();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageSendShortcutTitle,
+      trailing: const _SendShortcutDropdown(),
+    );
+  }
+}
+
+class _SendShortcutDropdown extends StatefulWidget {
+  const _SendShortcutDropdown();
+  @override
+  State<_SendShortcutDropdown> createState() => _SendShortcutDropdownState();
+}
+
+class _SendShortcutDropdownState extends State<_SendShortcutDropdown> {
+  bool _hover = false;
+  bool _open = false;
+  final LayerLink _link = LayerLink();
+  final GlobalKey _triggerKey = GlobalKey();
+  OverlayEntry? _entry;
+
+  void _toggle() {
+    if (_open) {
+      _close();
+    } else {
+      _openMenu();
+    }
+  }
+
+  void _close() {
+    _entry?.remove();
+    _entry = null;
+    if (mounted) setState(() => _open = false);
+  }
+
+  String _labelFor(BuildContext context, DesktopSendShortcut s) {
+    final l10n = AppLocalizations.of(context)!;
+    switch (s) {
+      case DesktopSendShortcut.ctrlEnter:
+        final modifier = Platform.isMacOS ? '⌘' : 'Ctrl';
+        return '$modifier + Enter';
+      case DesktopSendShortcut.enter:
+        return l10n.displaySettingsPageSendShortcutEnter;
+    }
+  }
+
+  void _openMenu() {
+    if (_entry != null) return;
+    final rb = _triggerKey.currentContext?.findRenderObject() as RenderBox?;
+    final overlay = Overlay.of(context);
+    if (rb == null) return;
+    final triggerSize = rb.size;
+    final triggerWidth = triggerSize.width;
+
+    _entry = OverlayEntry(
+      builder: (ctx) {
+        final bgColor = ctx.appColors.surfaceCard;
+        final sp = Provider.of<SettingsProvider>(ctx, listen: false);
+
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: _close,
+                child: const SizedBox.expand(),
+              ),
+            ),
+            CompositedTransformFollower(
+              link: _link,
+              showWhenUnlinked: false,
+              offset: Offset(0, triggerSize.height + 6),
+              child: _SendShortcutOverlay(
+                width: triggerWidth,
+                backgroundColor: bgColor,
+                selected: sp.desktopSendShortcut,
+                onSelected: (shortcut) async {
+                  await sp.setDesktopSendShortcut(shortcut);
+                  _close();
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    overlay.insert(_entry!);
+    setState(() => _open = true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final sp = context.watch<SettingsProvider>();
+    final label = _labelFor(context, sp.desktopSendShortcut);
+
+    final baseBorder = cs.outlineVariant.withValues(alpha: 0.18);
+    final hoverBorder = cs.primary;
+    final borderColor = _open || _hover ? hoverBorder : baseBorder;
+
+    return CompositedTransformTarget(
+      link: _link,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: _toggle,
+          child: AnimatedContainer(
+            key: _triggerKey,
+            duration: const Duration(milliseconds: 120),
+            curve: Curves.easeOutCubic,
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+            constraints: const BoxConstraints(minWidth: 130, minHeight: 34),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: borderColor, width: 1),
+              boxShadow: _open
+                  ? [
+                      BoxShadow(
+                        color: cs.primary.withValues(alpha: 0.10),
+                        blurRadius: 0,
+                        spreadRadius: 2,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.max,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: cs.onSurface.withValues(alpha: 0.88),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                AnimatedRotation(
+                  turns: _open ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeOutCubic,
+                  child: Icon(
+                    lucide.Lucide.ChevronDown,
+                    size: 14,
+                    color: cs.onSurface.withValues(alpha: 0.5),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SendShortcutOverlay extends StatefulWidget {
+  const _SendShortcutOverlay({
+    required this.width,
+    required this.backgroundColor,
+    required this.selected,
+    required this.onSelected,
+  });
+  final double width;
+  final Color backgroundColor;
+  final DesktopSendShortcut selected;
+  final ValueChanged<DesktopSendShortcut> onSelected;
+  @override
+  State<_SendShortcutOverlay> createState() => _SendShortcutOverlayState();
+}
+
+class _SendShortcutOverlayState extends State<_SendShortcutOverlay>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _opacity;
+  late final Animation<Offset> _slide;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    );
+    _opacity = CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic);
+    _slide = Tween<Offset>(
+      begin: const Offset(0, -0.06),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _ctrl.forward());
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final borderColor = cs.outlineVariant.withValues(alpha: 0.12);
+
+    // Platform-specific modifier key
+    final modifier = Platform.isMacOS ? '⌘' : 'Ctrl';
+    final items = <(DesktopSendShortcut, String)>[
+      (
+        DesktopSendShortcut.enter,
+        AppLocalizations.of(context)!.displaySettingsPageSendShortcutEnter,
+      ),
+      (DesktopSendShortcut.ctrlEnter, '$modifier + Enter'),
+    ];
+
+    return FadeTransition(
+      opacity: _opacity,
+      child: SlideTransition(
+        position: _slide,
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            width: widget.width,
+            decoration: BoxDecoration(
+              color: widget.backgroundColor,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: borderColor, width: 0.5),
+              boxShadow: [
+                BoxShadow(
+                  color: cs.shadow.withValues(alpha: isDark ? 0.32 : 0.08),
+                  blurRadius: 16,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final it in items)
+                  _SimpleOptionTile(
+                    label: it.$2,
+                    selected: widget.selected == it.$1,
+                    onTap: () => widget.onSelected(it.$1),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

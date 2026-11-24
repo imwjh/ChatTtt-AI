@@ -1,0 +1,409 @@
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:path/path.dart' as p;
+import '../../../l10n/app_localizations.dart';
+import '../../../utils/file_import_helper.dart';
+import '../../../utils/image_compressor.dart';
+import '../../../utils/platform_utils.dart';
+import '../../../shared/widgets/snackbar.dart';
+import '../../../core/models/chat_input_data.dart';
+import '../../../core/models/image_edit_document.dart';
+import '../../../core/utils/multimodal_input_utils.dart';
+import '../../chat/pages/image_editor_page.dart';
+import '../widgets/chat_input_bar.dart';
+
+/// 文件选取和上传服务
+///
+/// 负责处理：
+/// - 图片选择 (相册/相机)
+/// - 文件选择
+/// - 桌面拖放处理
+/// - 文件复制到应用目录
+class FileUploadService {
+  FileUploadService({
+    required this.getContext,
+    required this.mediaController,
+    required this.isImageCropperEnabled,
+    required this.getImageCompressConfig,
+    this.hasWorkspace,
+  });
+
+  /// 媒体控制器，用于添加图片和文件到输入栏
+  final ChatInputBarController mediaController;
+
+  /// Context provider callback to avoid storing stale context
+  final BuildContext Function() getContext;
+  final bool Function() isImageCropperEnabled;
+  final ImageCompressConfig Function() getImageCompressConfig;
+  final bool Function()? hasWorkspace;
+
+  static const supportedExtensions = [
+    'png',
+    'jpg',
+    'jpeg',
+    'gif',
+    'webp',
+    'bmp',
+    'heic',
+    'heif',
+    'mp4',
+    'avi',
+    'mkv',
+    'mov',
+    'flv',
+    'wmv',
+    'mpeg',
+    'mpg',
+    'webm',
+    '3gp',
+    '3gpp',
+    'wav',
+    'mp3',
+    'm4a',
+    'aac',
+    'flac',
+    'ogg',
+    'oga',
+    'opus',
+    'aiff',
+    'aif',
+    'pcm',
+    'pcm16',
+    'txt',
+    'md',
+    'json',
+    'js',
+    'pdf',
+    'docx',
+    'html',
+    'xml',
+    'py',
+    'java',
+    'kt',
+    'dart',
+    'ts',
+    'tsx',
+    'markdown',
+    'mdx',
+    'yml',
+    'yaml',
+  ];
+
+  /// 复制选中的文件到应用上传目录
+  ///
+  /// [files] 要复制的文件列表
+  /// 返回复制后的文件路径列表
+  Future<List<String>> copyPickedFiles(List<XFile> files) async {
+    final saved = await _copyPickedFilesKeepingSlots(files);
+    return saved.whereType<String>().toList(growable: false);
+  }
+
+  Future<List<String?>> _copyPickedFilesKeepingSlots(
+    List<XFile> files, {
+    ChatInputBarController? target,
+  }) async {
+    final dir = await (target ?? mediaController.capture()).uploadDirectory();
+    final out = <String?>[];
+    final context = getContext();
+    if (!context.mounted) return out;
+    final compressConfig = getImageCompressConfig();
+    for (final f in files) {
+      final sourceName = f.name.isNotEmpty ? f.name : f.path;
+      final savedPath = isImageExtension(sourceName) && f.path.isNotEmpty
+          ? (await ImageCompressor.compressToUploadDir(
+              f.path,
+              dir,
+              compressConfig,
+            ))?.path
+          : await FileImportHelper.copyXFile(f, dir);
+      out.add(savedPath);
+    }
+    return out;
+  }
+
+  void _enqueuePickedImages(
+    Iterable<XFile> files,
+    ChatInputBarController target,
+  ) {
+    final paths = [
+      for (final file in files)
+        if (file.path.isNotEmpty) file.path,
+    ];
+    if (paths.isEmpty) return;
+    target.enqueueImages(paths, getImageCompressConfig());
+  }
+
+  /// 从相册选取图片
+  Future<void> onPickPhotos() async {
+    if (mediaController.restoringDraft) return;
+    final target = mediaController.capture();
+    try {
+      // On desktop, fall back to FilePicker as image_picker is not supported.
+      if (PlatformUtils.isDesktopTarget) {
+        final res = await FilePicker.platform.pickFiles(
+          allowMultiple: true,
+          withData: false,
+          type: FileType.custom,
+          allowedExtensions: const [
+            'png',
+            'jpg',
+            'jpeg',
+            'gif',
+            'webp',
+            'bmp',
+            'heic',
+            'heif',
+          ],
+        );
+        if (res == null || res.files.isEmpty) return;
+        final toCopy = <XFile>[];
+        for (final f in res.files) {
+          if (f.path != null && f.path!.isNotEmpty) {
+            toCopy.add(XFile(f.path!));
+          }
+        }
+        _enqueuePickedImages(toCopy, target);
+        return;
+      }
+
+      final picker = ImagePicker();
+      final files = await picker.pickMultiImage();
+      await _addCameraOrGalleryImages(files, target);
+    } catch (_) {}
+  }
+
+  /// 从相机拍照
+  ///
+  /// [context] 用于显示权限提示和错误消息
+  Future<void> onPickCamera(BuildContext context) async {
+    if (mediaController.restoringDraft) return;
+    final target = mediaController.capture();
+    try {
+      // Proactive permission check on mobile
+      if (PlatformUtils.isMobile) {
+        var status = await Permission.camera.status;
+        // Request if not determined; otherwise guide user
+        if (status.isDenied || status.isRestricted) {
+          status = await Permission.camera.request();
+        }
+        if (!status.isGranted) {
+          if (!context.mounted) return;
+          final l10n = AppLocalizations.of(context)!;
+          showAppSnackBar(
+            context,
+            message: l10n.cameraPermissionDeniedMessage,
+            type: NotificationType.error,
+            duration: const Duration(seconds: 4),
+            actionLabel: l10n.openSystemSettings,
+            onAction: () {
+              try {
+                openAppSettings();
+              } catch (_) {}
+            },
+          );
+          return;
+        }
+      }
+      final picker = ImagePicker();
+      final file = await picker.pickImage(source: ImageSource.camera);
+      if (file == null || !context.mounted) return;
+      await _addCameraOrGalleryImages([file], target);
+    } catch (e) {
+      try {
+        if (!context.mounted) return;
+        final l10n = AppLocalizations.of(context)!;
+        showAppSnackBar(
+          context,
+          message: l10n.cameraPermissionDeniedMessage,
+          type: NotificationType.error,
+          duration: const Duration(seconds: 3),
+        );
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _addCameraOrGalleryImages(
+    List<XFile> files,
+    ChatInputBarController target,
+  ) async {
+    if (files.isEmpty || !target.isValid) return;
+    if (!PlatformUtils.isMobileTarget || !isImageCropperEnabled()) {
+      _enqueuePickedImages(files, target);
+      return;
+    }
+    final context = getContext();
+    if (!context.mounted) return;
+    final selected = {
+      for (final (id, file) in files.indexed)
+        if (file.path.isNotEmpty) id: EditorImage(id: id, path: file.path),
+    };
+    if (selected.isEmpty) return;
+    var edits = <int, ImageEditDocument>{};
+    final confirmed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => ImageEditorPage(
+          images: selected.values.toList(),
+          startInCropMode: true,
+          onRetry: (id) async => selected[id],
+          onRemove: selected.remove,
+          onSave: (documents) async {
+            edits = documents;
+          },
+        ),
+      ),
+    );
+    if (confirmed != true || selected.isEmpty || !target.isValid) return;
+    target.enqueueImages(
+      [for (final image in selected.values) image.path],
+      getImageCompressConfig(),
+      editsByIndex: {
+        for (final (index, image) in selected.values.indexed)
+          if (edits[image.id] case final document?) index: document,
+      },
+    );
+  }
+
+  /// 根据文件扩展名推断 MIME 类型
+  String inferMimeByExtension(String name) {
+    final mediaMime = inferMediaMimeFromSource(name);
+    if (mediaMime.isNotEmpty) return mediaMime;
+    final lower = name.toLowerCase();
+    // Documents / text
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    if (lower.endsWith('.doc')) return 'application/msword';
+    if (lower.endsWith('.docx')) {
+      return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    }
+    if (lower.endsWith('.json')) return 'application/json';
+    if (lower.endsWith('.js')) return 'application/javascript';
+    if (lower.endsWith('.txt') || lower.endsWith('.md')) return 'text/plain';
+    return supportedExtensions.contains(
+          p.extension(lower).replaceFirst('.', ''),
+        )
+        ? 'text/plain'
+        : 'application/octet-stream';
+  }
+
+  /// 判断文件是否为图片（根据扩展名）
+  bool isImageExtension(String name) {
+    final lower = name.toLowerCase();
+    return lower.endsWith('.png') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp') ||
+        lower.endsWith('.bmp') ||
+        lower.endsWith('.heic') ||
+        lower.endsWith('.heif');
+  }
+
+  /// 选取图片附件（ChatTtt 与网页端一致，只支持图片）。
+  Future<void> onPickImageFiles() async {
+    if (mediaController.restoringDraft) return;
+    final target = mediaController.capture();
+    try {
+      final res = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        withData: false,
+        type: FileType.image,
+      );
+      if (res == null || res.files.isEmpty) return;
+      final files = <XFile>[];
+      for (final f in res.files) {
+        if (f.path != null && f.path!.isNotEmpty) {
+          files.add(XFile(f.path!));
+        }
+      }
+      _enqueuePickedImages(files, target);
+    } catch (_) {}
+  }
+
+  /// 选取文件（图片、视频、文档等）
+  Future<void> onPickFiles() async {
+    if (mediaController.restoringDraft) return;
+    final target = mediaController.capture();
+    try {
+      final anyFile = hasWorkspace?.call() ?? false;
+      final res = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        withData: false,
+        type: anyFile ? FileType.any : FileType.custom,
+        allowedExtensions: anyFile ? null : supportedExtensions,
+      );
+      if (res == null || res.files.isEmpty) return;
+      final docs = <DocumentAttachment>[];
+      final images = <XFile>[];
+      final documents = <XFile>[];
+      for (final f in res.files) {
+        final path = f.path;
+        if (path != null && path.isNotEmpty) {
+          final file = XFile(path);
+          if (isImageExtension(f.name)) {
+            images.add(file);
+          } else {
+            documents.add(file);
+          }
+        }
+      }
+      if (images.isEmpty && documents.isEmpty) return;
+      _enqueuePickedImages(images, target);
+
+      final saved = await _copyPickedFilesKeepingSlots(
+        documents,
+        target: target,
+      );
+      for (final savedPath in saved) {
+        if (savedPath == null) continue;
+        final savedName = p.basename(savedPath);
+        final mime = inferMimeByExtension(savedName);
+        docs.add(
+          DocumentAttachment(path: savedPath, fileName: savedName, mime: mime),
+        );
+      }
+      if (docs.isNotEmpty) {
+        target.addFiles(docs);
+      }
+    } catch (_) {}
+  }
+
+  /// 处理桌面端拖放的文件 (macOS/Windows/Linux)
+  Future<void> onFilesDroppedDesktop(List<XFile> files) async {
+    if (mediaController.restoringDraft) return;
+    final target = mediaController.capture();
+    if (files.isEmpty) return;
+    try {
+      final docs = <DocumentAttachment>[];
+      final images = <XFile>[];
+      final documents = <XFile>[];
+      for (final f in files) {
+        final name = (f.name.isNotEmpty
+            ? f.name
+            : (f.path.split(Platform.pathSeparator).last));
+        if (isImageExtension(name)) {
+          images.add(f);
+        } else {
+          documents.add(f);
+        }
+      }
+      _enqueuePickedImages(images, target);
+
+      final saved = await _copyPickedFilesKeepingSlots(
+        documents,
+        target: target,
+      );
+      for (final savedPath in saved) {
+        if (savedPath == null) continue;
+        final savedName = p.basename(savedPath);
+        final mime = inferMimeByExtension(savedName);
+        docs.add(
+          DocumentAttachment(path: savedPath, fileName: savedName, mime: mime),
+        );
+      }
+      if (docs.isNotEmpty) target.addFiles(docs);
+    } catch (_) {}
+  }
+}

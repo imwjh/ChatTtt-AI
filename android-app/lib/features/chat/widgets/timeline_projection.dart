@@ -1,0 +1,1313 @@
+import 'package:Kelivo/utils/protected_text.dart';
+import 'package:Kelivo/utils/source_text_map.dart';
+import 'package:markstream/markstream_core.dart' show SourceSpan;
+import 'dart:convert';
+
+import '../../../core/models/message_part.dart';
+import '../utils/thinking_tag_parser.dart';
+import 'timeline_visibility.dart';
+import '../../home/services/local_tools_service.dart';
+import '../../intelligent_ui/host/ui_source_map.dart';
+
+/// A tool as the timeline projector sees it.
+///
+/// Field-compatible with [ToolUIPart] so the renderer and estimator share one
+/// walk without importing the widget file.
+class TimelineToolRef {
+  const TimelineToolRef({
+    required this.providerId,
+    required this.fallbackOrdinal,
+    required this.toolName,
+    required this.arguments,
+    this.content,
+    this.metadata,
+    this.loading = false,
+    this.memoToken,
+  });
+
+  /// Provider-supplied id. Empty when the payload had no id. Never synthesized.
+  final String providerId;
+
+  /// Tool ordinal used when [providerId] is empty. Disjoint from real ids.
+  final int fallbackOrdinal;
+
+  final String toolName;
+  final Map<String, dynamic> arguments;
+  final String? content;
+  final Map<String, dynamic>? metadata;
+  final bool loading;
+
+  /// Identity of the original [ToolUIPart] (or a stable field hash).
+  ///
+  /// The renderer must not memo on a temporary converted object.
+  final int? memoToken;
+
+  /// Raw provider id. Empty when the tool has no provider id.
+  String get id => providerId;
+
+  TimelineToolRef copyWith({
+    String? providerId,
+    int? fallbackOrdinal,
+    String? toolName,
+    Map<String, dynamic>? arguments,
+    String? content,
+    Map<String, dynamic>? metadata,
+    bool? loading,
+    int? memoToken,
+  }) {
+    return TimelineToolRef(
+      providerId: providerId ?? this.providerId,
+      fallbackOrdinal: fallbackOrdinal ?? this.fallbackOrdinal,
+      toolName: toolName ?? this.toolName,
+      arguments: arguments ?? this.arguments,
+      content: content ?? this.content,
+      metadata: metadata ?? this.metadata,
+      loading: loading ?? this.loading,
+      memoToken: memoToken ?? this.memoToken,
+    );
+  }
+}
+
+/// Reasoning overlay used when structured parts or legacy segments are present.
+class TimelineReasoningRef {
+  const TimelineReasoningRef({
+    required this.text,
+    this.expanded = true,
+    this.loading = false,
+    this.startAt,
+    this.finishedAt,
+    this.toolStartIndex = 0,
+  });
+
+  final String text;
+  final bool expanded;
+  final bool loading;
+  final DateTime? startAt;
+  final DateTime? finishedAt;
+  final int toolStartIndex;
+}
+
+class TimelineProjectedStep {
+  const TimelineProjectedStep.reasoning({
+    required this.sourceOrdinal,
+    required this.reasoning,
+    required this.reasoningCountAfter,
+    required this.toolCountAfter,
+    this.reasoningOverlayIndex,
+  }) : tool = null,
+       browserTools = null,
+       browserLite = false;
+
+  const TimelineProjectedStep.tool({
+    required this.sourceOrdinal,
+    required this.tool,
+    required this.reasoningCountAfter,
+    required this.toolCountAfter,
+  }) : reasoning = null,
+       browserTools = null,
+       browserLite = false,
+       reasoningOverlayIndex = null;
+
+  TimelineProjectedStep.browserGroup(
+    List<TimelineProjectedStep> steps, {
+    required bool lite,
+  }) : sourceOrdinal = steps.first.sourceOrdinal,
+       reasoning = null,
+       reasoningOverlayIndex = null,
+       tool = steps.last.tool,
+       browserTools = List.unmodifiable(steps.map((step) => step.tool!)),
+       browserLite = lite,
+       reasoningCountAfter = steps.last.reasoningCountAfter,
+       toolCountAfter = steps.last.toolCountAfter;
+
+  final List<TimelineToolRef>? browserTools;
+  final bool browserLite;
+  final int sourceOrdinal;
+  final TimelineReasoningRef? reasoning;
+  final TimelineToolRef? tool;
+  final int reasoningCountAfter;
+  final int toolCountAfter;
+
+  /// Index into the provided reasoning-segment overlay, if any.
+  final int? reasoningOverlayIndex;
+
+  bool get isReasoning => reasoning != null;
+  bool get isTool => tool != null;
+}
+
+/// The renderer and height estimator share exactly the same adjacency and
+/// approval boundaries. This operates after visibility filtering, before collapse.
+List<T> groupAdjacentBrowserSteps<T>(
+  List<T> steps, {
+  required bool Function(T step) eligible,
+  required T Function(List<T> steps, bool lite) group,
+}) {
+  final runs = <List<T>>[];
+  final browserRuns = <bool>[];
+  for (final step in steps) {
+    final browser = eligible(step);
+    if (browser && browserRuns.isNotEmpty && browserRuns.last) {
+      runs.last.add(step);
+    } else {
+      runs.add([step]);
+      browserRuns.add(browser);
+    }
+  }
+  final lastBrowser = browserRuns.lastIndexOf(true);
+  return [
+    for (var i = 0; i < runs.length; i++)
+      browserRuns[i]
+          ? group(List.unmodifiable(runs[i]), i != lastBrowser)
+          : runs[i].single,
+  ];
+}
+
+List<TimelineProjectedStep> groupBrowserTimelineSteps(
+  List<TimelineProjectedStep> steps, {
+  required bool Function(TimelineToolRef tool) isPendingApproval,
+}) => groupAdjacentBrowserSteps(
+  steps,
+  eligible: (step) =>
+      step.tool?.toolName == LocalToolNames.browser &&
+      !isPendingApproval(step.tool!),
+  group: (steps, lite) => TimelineProjectedStep.browserGroup(steps, lite: lite),
+);
+
+class TimelineProjectedBlock {
+  const TimelineProjectedBlock.text(this.text, {this.uiSource, this.sourceMap})
+    : steps = const [],
+      imageUri = null,
+      imageKey = null,
+      aspectRatio = null;
+
+  const TimelineProjectedBlock.thinking(this.steps)
+    : text = null,
+      sourceMap = null,
+      uiSource = null,
+      imageUri = null,
+      imageKey = null,
+      aspectRatio = null;
+
+  const TimelineProjectedBlock.image(
+    this.imageUri, {
+    this.imageKey,
+    this.aspectRatio,
+  }) : text = null,
+       sourceMap = null,
+       uiSource = null,
+       steps = const [];
+
+  final String? text;
+  final UiTextSlice? uiSource;
+  final SourceTextMap? sourceMap;
+  final String? imageUri;
+  final String? imageKey;
+  final double? aspectRatio;
+  final List<TimelineProjectedStep> steps;
+
+  bool get isText => text != null;
+  bool get isImage => imageUri != null;
+  bool get isThinking => steps.isNotEmpty;
+}
+
+/// Fallback height of an inlined [ImagePart] before aspect is known.
+/// Width is the message/bubble width. Do not infer from Markdown.
+const double kTimelineImageBlockHeight = 240;
+
+/// Laid-out height from a known width/height aspect (`width / height`).
+double estimateTimelineImageHeight({
+  required double maxWidth,
+  double? aspectRatio,
+}) {
+  if (aspectRatio == null || !aspectRatio.isFinite || aspectRatio <= 0) {
+    return kTimelineImageBlockHeight;
+  }
+  return maxWidth / aspectRatio;
+}
+
+/// Stable image identity. Never the payload URI.
+String timelineImageBlockKey({
+  String? imageId,
+  String? assetId,
+  required int sourceOrdinal,
+}) {
+  final streamId = imageId?.trim() ?? '';
+  if (streamId.isNotEmpty) return 'image-id:$streamId';
+  final asset = assetId?.trim() ?? '';
+  if (asset.isNotEmpty) return 'image-id:$asset';
+  return 'image-ordinal:$sourceOrdinal';
+}
+
+/// In-memory aspects keyed by [timelineImageBlockKey].
+final Map<String, double> timelineImageAspects = <String, double>{};
+
+/// Shared reasoning-loading decision for renderer and estimator.
+bool timelineReasoningLoading({
+  required DateTime? finishedAt,
+  required bool isStreaming,
+  bool usingInlineThink = false,
+}) {
+  if (usingInlineThink) return false;
+  if (finishedAt != null) return false;
+  return isStreaming;
+}
+
+class VisibleTimelineBlock {
+  const VisibleTimelineBlock({
+    required this.visibleSteps,
+    required this.hiddenCount,
+  });
+
+  final List<TimelineProjectedStep> visibleSteps;
+  final int hiddenCount;
+
+  bool get hasExpandRow => hiddenCount > 0;
+}
+
+/// Shared [fromParts] decision plus the blocks the renderer and estimator walk.
+class TimelineProjection {
+  const TimelineProjection({
+    required this.fromParts,
+    required this.blocks,
+    this.partsArrivalOrdered = false,
+    this.previous,
+    this.unchangedBlockPrefix = 0,
+  });
+
+  final bool fromParts;
+  final List<TimelineProjectedBlock> blocks;
+
+  /// Caller-supplied: current streaming messages walk arrival order.
+  ///
+  /// Do not infer this from the presence of [ReasoningPart] / [ToolCallPart].
+  /// Legal historical [contentSplits] still restore prefix → tool/thinking →
+  /// suffix when this is false.
+  final bool partsArrivalOrdered;
+
+  /// Incremental projections retain only a weak link to the preceding result.
+  /// Blocks before [unchangedBlockPrefix] have the same identity and contents.
+  /// Ordinary projections leave these unset and require a complete filter.
+  final WeakReference<TimelineProjection>? previous;
+  final int unchangedBlockPrefix;
+}
+
+/// One visible assistant block after role settings and approval filters.
+class TimelineVisibleBlock {
+  const TimelineVisibleBlock.text(this.text, {this.uiSource, this.sourceMap})
+    : imageUri = null,
+      imageKey = null,
+      aspectRatio = null,
+      thinkingSteps = const [];
+
+  const TimelineVisibleBlock.image(
+    this.imageUri, {
+    this.imageKey,
+    this.aspectRatio,
+  }) : text = null,
+       uiSource = null,
+       sourceMap = null,
+       thinkingSteps = const [];
+
+  const TimelineVisibleBlock.thinking(this.thinkingSteps)
+    : text = null,
+      uiSource = null,
+      sourceMap = null,
+      imageUri = null,
+      imageKey = null,
+      aspectRatio = null;
+
+  final String? text;
+  final UiTextSlice? uiSource;
+  final SourceTextMap? sourceMap;
+  final String? imageUri;
+  final String? imageKey;
+  final double? aspectRatio;
+
+  /// Approval/settings-filtered steps. Collapse is applied by the walker.
+  final List<TimelineProjectedStep> thinkingSteps;
+
+  bool get isText => text != null;
+  bool get isImage => imageUri != null;
+  bool get isThinking => thinkingSteps.isNotEmpty;
+}
+
+/// Parse a persisted tool_call payload the same way the renderer does.
+final _toolPayloadMemo = Expando<TimelineToolRef>('timeline tool payload');
+
+/// Parts are immutable and stable across text-only streaming snapshots. Weak
+/// keys let an off-window part and its decoded result be collected together.
+TimelineToolRef? parseTimelineToolPart(
+  ToolCallPart part, {
+  int fallbackOrdinal = 0,
+}) {
+  var parsed = _toolPayloadMemo[part];
+  if (parsed == null) {
+    parsed = parseTimelineToolPayload(part.payloadJson);
+    if (parsed == null) return null;
+    parsed = parsed.copyWith(memoToken: identityHashCode(part));
+    _toolPayloadMemo[part] = parsed;
+  }
+  return fallbackOrdinal == 0
+      ? parsed
+      : parsed.copyWith(
+          fallbackOrdinal: fallbackOrdinal,
+          memoToken: Object.hash(parsed.memoToken, fallbackOrdinal),
+        );
+}
+
+TimelineToolRef? parseTimelineToolPayload(
+  String payloadJson, {
+  int fallbackOrdinal = 0,
+}) {
+  try {
+    final decoded = _decodeJsonMap(payloadJson);
+    if (decoded == null) return null;
+    final providerId = (decoded['id'] ?? '').toString().trim();
+    final name = (decoded['name'] ?? '').toString();
+    final args = decoded['arguments'];
+    final content = decoded['content']?.toString();
+    final rawMeta = decoded['metadata'];
+    final metadata = rawMeta is Map ? Map<String, dynamic>.from(rawMeta) : null;
+    final arguments = args is Map
+        ? args.cast<String, dynamic>()
+        : const <String, dynamic>{};
+    final loading = content == null || content.isEmpty;
+    return TimelineToolRef(
+      providerId: providerId,
+      fallbackOrdinal: fallbackOrdinal,
+      toolName: name,
+      arguments: arguments,
+      content: content,
+      metadata: metadata,
+      loading: loading,
+      memoToken: Object.hash(
+        providerId,
+        fallbackOrdinal,
+        name,
+        content,
+        loading,
+        Object.hashAll(
+          arguments.entries.map((entry) => Object.hash(entry.key, entry.value)),
+        ),
+      ),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+Map<String, dynamic>? _decodeJsonMap(String raw) {
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is Map<String, dynamic>) return decoded;
+    if (decoded is Map) return decoded.cast<String, dynamic>();
+  } catch (_) {}
+  return null;
+}
+
+/// Stable tool key. Trimmed ids and fallbacks use disjoint namespaces so an
+/// id of `fallback:0:search` cannot collide with an empty-id tool.
+String timelineToolStepKey({
+  required String id,
+  required int sourceOrdinal,
+  required String toolName,
+}) {
+  final trimmed = id.trim();
+  if (trimmed.isNotEmpty) return 'tool-id:$trimmed';
+  return 'tool-fallback:$sourceOrdinal:$toolName';
+}
+
+/// Whether an image part starts a new render block, matching the renderer.
+bool timelineImagePartFlushesBlock(ImagePart part) =>
+    !part.unavailable && part.uri.trim().isNotEmpty;
+
+/// Project assistant timeline blocks using the same rules as the renderer:
+/// structured parts, or mixed reasoning+tool order with content-split fallback.
+TimelineProjection projectAssistantTimeline({
+  required List<MessagePart> parts,
+  required List<TimelineToolRef> liveTools,
+  required List<TimelineReasoningRef> reasoningSegments,
+  required String visualContent,
+  SourceTextMap? visualSourceMap,
+  List<int>? contentSplitOffsets,
+  List<int>? reasoningCountAtSplit,
+  List<int>? toolCountAtSplit,
+  String Function(String text)? transformText,
+  ProtectedText Function(ProtectedText)? transformProtectedText,
+  bool? renderFromParts,
+  bool partsArrivalOrdered = false,
+  // True when reasoningSegments carries the synthesized inline-think overlay.
+  // Provider reasoning keeps tag-like text literal.
+  bool? parseInlineThinking,
+  bool inlineThinkingExpanded = true,
+}) {
+  final uiSource = UiMessageSource.of(parts);
+  final usableSplits = contentSplitsAreUsable(
+    contentSplitOffsets,
+    reasoningCountAtSplit,
+    toolCountAtSplit,
+  );
+  final naturalFromParts =
+      renderFromParts ??
+      _shouldProjectFromParts(
+        parts: parts,
+        visualContent: uiSource.hasFences
+            ? parts.whereType<TextPart>().map((p) => p.text).join()
+            : visualContent,
+        liveTools: liveTools,
+        reasoningSegments: reasoningSegments,
+        contentSplitOffsets: contentSplitOffsets,
+        reasoningCountAtSplit: reasoningCountAtSplit,
+        toolCountAtSplit: toolCountAtSplit,
+        usableSplits: usableSplits,
+        partsArrivalOrdered: partsArrivalOrdered,
+      );
+  if (uiSource.hasFences && !naturalFromParts && usableSplits) {
+    final nativeSplits = _projectNativeSplits(
+      source: uiSource,
+      parts: parts,
+      liveTools: liveTools,
+      reasoningSegments: reasoningSegments,
+      offsets: contentSplitOffsets!,
+      reasoningCounts: reasoningCountAtSplit!,
+      toolCounts: toolCountAtSplit!,
+      transformText: transformText,
+      transformProtectedText: transformProtectedText,
+      parseInlineThinking: parseInlineThinking,
+      partsArrivalOrdered: partsArrivalOrdered,
+    );
+    if (nativeSplits != null) return nativeSplits;
+  }
+  final fromParts = uiSource.hasFences || naturalFromParts;
+  if (fromParts) {
+    // Inline reasoning is only a substitute for absent provider reasoning.
+    final useInlineThinking =
+        (parseInlineThinking ?? reasoningSegments.isEmpty) &&
+        !parts.any((part) => part is ReasoningPart);
+    var displayParts = parts;
+    var joinedOffset = 0;
+    var sourceMaps = <SourceTextMap?>[
+      for (final part in parts)
+        if (part is TextPart)
+          (() {
+            final map = SourceTextMap.identity(
+              part.text.length,
+              offset: joinedOffset,
+            );
+            joinedOffset += part.text.length;
+            return map;
+          })()
+        else
+          null,
+    ];
+    List<UiTextSlice?>? textSources = uiSource.hasFences
+        ? [
+            for (final (ordinal, part) in parts.indexed)
+              part is TextPart
+                  ? uiSource.sliceForPart(ordinal, 0, part.text.length)
+                  : null,
+          ]
+        : null;
+    if (useInlineThinking) {
+      final joined = parts.whereType<TextPart>().map((p) => p.text).join();
+      final ranges = ThinkingTagParser.parseWithRanges(
+        joined,
+        includeUnclosed: uiSource.hasFences,
+        protectedRanges: uiSource.protectedJoinedRanges,
+      );
+      if (ranges.hiddenRanges.isNotEmpty) {
+        displayParts = <MessagePart>[];
+        final projectedSources = textSources == null ? null : <UiTextSlice?>[];
+        final projectedMaps = <SourceTextMap?>[];
+        ThinkingTagParser.walkSlices(
+          parts,
+          joined,
+          ranges,
+          onVisible: (text, ordinal, span) {
+            displayParts.add(TextPart(text));
+            projectedMaps.add(sourceMaps[ordinal]!.slice(span.start, span.end));
+            projectedSources?.add(
+              uiSource.sliceForPart(ordinal, span.start, span.end),
+            );
+          },
+          onThinking: (_, text) {
+            displayParts.add(ReasoningPart(text));
+            projectedMaps.add(null);
+            projectedSources?.add(null);
+          },
+          onOther: (part) {
+            displayParts.add(part);
+            projectedMaps.add(null);
+            projectedSources?.add(null);
+          },
+        );
+        textSources = projectedSources;
+        sourceMaps = projectedMaps;
+      }
+    }
+    return mergeLiveToolsIntoProjection(
+      TimelineProjection(
+        fromParts: true,
+        partsArrivalOrdered: partsArrivalOrdered,
+        blocks: _projectFromParts(
+          parts: displayParts,
+          textSources: textSources,
+          sourceMaps: sourceMaps,
+          reasoningSegments: reasoningSegments,
+          transformText: transformText,
+          transformProtectedText: transformProtectedText,
+          inlineThinking: useInlineThinking,
+          inlineThinkingExpanded: inlineThinkingExpanded,
+        ),
+      ),
+      liveTools,
+    );
+  }
+
+  final mixed = _interleaveReasoningAndTools(
+    liveTools: [
+      for (final tool in liveTools)
+        if (toolCreatesTimelineCard(tool.toolName)) tool,
+    ],
+    reasoningSegments: reasoningSegments,
+  );
+  if (mixed.isEmpty) {
+    return mergeLiveToolsIntoProjection(
+      TimelineProjection(
+        fromParts: false,
+        partsArrivalOrdered: partsArrivalOrdered,
+        blocks: visualContent.trim().isEmpty
+            ? const <TimelineProjectedBlock>[]
+            : <TimelineProjectedBlock>[
+                TimelineProjectedBlock.text(
+                  visualContent,
+                  sourceMap: visualSourceMap,
+                ),
+              ],
+      ),
+      liveTools,
+    );
+  }
+  final offsets = contentSplitOffsets;
+  final reasoningCounts = reasoningCountAtSplit;
+  final toolCounts = toolCountAtSplit;
+  if (offsets == null ||
+      reasoningCounts == null ||
+      toolCounts == null ||
+      !contentSplitsMatchTimeline(
+        offsets: offsets,
+        reasoningCounts: reasoningCounts,
+        toolCounts: toolCounts,
+        contentLength: visualContent.length,
+        stepReasoningCounts: [
+          for (final step in mixed) step.reasoningCountAfter,
+        ],
+        stepToolCounts: [for (final step in mixed) step.toolCountAfter],
+      )) {
+    return mergeLiveToolsIntoProjection(
+      TimelineProjection(
+        fromParts: false,
+        partsArrivalOrdered: partsArrivalOrdered,
+        blocks: <TimelineProjectedBlock>[
+          TimelineProjectedBlock.thinking(mixed),
+          if (visualContent.trim().isNotEmpty)
+            TimelineProjectedBlock.text(
+              visualContent,
+              sourceMap: visualSourceMap,
+            ),
+        ],
+      ),
+      liveTools,
+    );
+  }
+
+  final blocks = <TimelineProjectedBlock>[];
+  var stepIndex = 0;
+  var textStart = 0;
+  for (var i = 0; i < offsets.length; i++) {
+    final safeOffset = offsets[i].clamp(0, visualContent.length);
+    final textSlice = visualContent.substring(textStart, safeOffset);
+    if (textSlice.trim().isNotEmpty) {
+      final trimStart = textSlice.length - textSlice.trimLeft().length;
+      final trimmed = textSlice.trim();
+      blocks.add(
+        TimelineProjectedBlock.text(
+          trimmed,
+          sourceMap: visualSourceMap?.slice(
+            textStart + trimStart,
+            textStart + trimStart + trimmed.length,
+          ),
+        ),
+      );
+    }
+    final targetReasoning = reasoningCounts[i];
+    final targetTool = toolCounts[i];
+    final blockSteps = <TimelineProjectedStep>[];
+    while (stepIndex < mixed.length) {
+      final step = mixed[stepIndex];
+      blockSteps.add(step);
+      stepIndex++;
+      if (step.reasoningCountAfter == targetReasoning &&
+          step.toolCountAfter == targetTool) {
+        break;
+      }
+    }
+    if (blockSteps.isNotEmpty) {
+      blocks.add(TimelineProjectedBlock.thinking(blockSteps));
+    }
+    textStart = safeOffset;
+  }
+  final trailing = visualContent.substring(textStart);
+  if (trailing.trim().isNotEmpty) {
+    final trimStart = trailing.length - trailing.trimLeft().length;
+    final trimmed = trailing.trim();
+    blocks.add(
+      TimelineProjectedBlock.text(
+        trimmed,
+        sourceMap: visualSourceMap?.slice(
+          textStart + trimStart,
+          textStart + trimStart + trimmed.length,
+        ),
+      ),
+    );
+  }
+  return mergeLiveToolsIntoProjection(
+    TimelineProjection(
+      fromParts: false,
+      partsArrivalOrdered: partsArrivalOrdered,
+      blocks: blocks,
+    ),
+    liveTools,
+  );
+}
+
+/// Retain the established historical text/thinking/tool order, with source
+/// intervals attached before display transforms instead of matching text later.
+TimelineProjection? _projectNativeSplits({
+  required UiMessageSource source,
+  required List<MessagePart> parts,
+  required List<TimelineToolRef> liveTools,
+  required List<TimelineReasoningRef> reasoningSegments,
+  required List<int> offsets,
+  required List<int> reasoningCounts,
+  required List<int> toolCounts,
+  required bool partsArrivalOrdered,
+  String Function(String)? transformText,
+  ProtectedText Function(ProtectedText)? transformProtectedText,
+  bool? parseInlineThinking,
+}) {
+  final mixed = _interleaveReasoningAndTools(
+    liveTools: [
+      for (final tool in liveTools)
+        if (toolCreatesTimelineCard(tool.toolName)) tool,
+    ],
+    reasoningSegments: reasoningSegments,
+  );
+  final joined = parts.whereType<TextPart>().map((p) => p.text).join();
+  if (!contentSplitsMatchTimeline(
+    offsets: offsets,
+    reasoningCounts: reasoningCounts,
+    toolCounts: toolCounts,
+    contentLength: joined.length,
+    stepReasoningCounts: [for (final step in mixed) step.reasoningCountAfter],
+    stepToolCounts: [for (final step in mixed) step.toolCountAfter],
+  )) {
+    return null;
+  }
+  final hidden =
+      (parseInlineThinking ?? reasoningSegments.isEmpty) &&
+          !parts.any((p) => p is ReasoningPart)
+      ? ThinkingTagParser.parseWithRanges(
+          joined,
+          includeUnclosed: true,
+          protectedRanges: source.protectedJoinedRanges,
+        ).hiddenRanges
+      : const <ThinkingTagHiddenRange>[];
+  final anchors = [0, ...offsets, joined.length];
+  final processed = [
+    for (final run in source.runs)
+      UiTextSlice.visible(
+        run,
+        pieces: source
+            .slicesBetween(
+              run.joinedStart,
+              run.joinedStart + run.source.length,
+              excluded: [for (final h in hidden) SourceSpan(h.start, h.end)],
+            )
+            .toList(),
+        offsets: [
+          for (final anchor in anchors)
+            (anchor - run.joinedStart).clamp(0, run.source.length),
+        ],
+      ).transform(transformProtectedText ?? (text) => text),
+  ];
+  final blocks = <TimelineProjectedBlock>[];
+  var ordinal = 0;
+  var webOrdinal = 0;
+  void textBetween(int index) {
+    for (final run in processed) {
+      final mapped = run
+          .slice(run.trackedOffsets[index], run.trackedOffsets[index + 1])
+          .withFirstMessageOrdinal(ordinal, webOrdinal: webOrdinal);
+      if (mapped.text.trim().isEmpty) continue;
+      ordinal += mapped.topLevelFenceCount;
+      webOrdinal += mapped.topLevelWebFenceCount;
+      blocks.add(
+        TimelineProjectedBlock.text(
+          mapped.text,
+          uiSource: mapped,
+          sourceMap: mapped.sourceMap,
+        ),
+      );
+    }
+  }
+
+  var stepIndex = 0;
+  for (var i = 0; i < offsets.length; i++) {
+    textBetween(i);
+    final steps = <TimelineProjectedStep>[];
+    while (stepIndex < mixed.length) {
+      final step = mixed[stepIndex++];
+      steps.add(step);
+      if (step.reasoningCountAfter == reasoningCounts[i] &&
+          step.toolCountAfter == toolCounts[i]) {
+        break;
+      }
+    }
+    if (steps.isNotEmpty) blocks.add(TimelineProjectedBlock.thinking(steps));
+  }
+  textBetween(offsets.length);
+  return mergeLiveToolsIntoProjection(
+    TimelineProjection(
+      fromParts: false,
+      partsArrivalOrdered: partsArrivalOrdered,
+      blocks: blocks,
+    ),
+    liveTools,
+  );
+}
+
+/// Assign live tools once across every thinking block.
+///
+/// Matches by [TimelineToolRef.providerId] first. Remaining empty-id live
+/// tools (except [kBuiltinSearchToolName]) are assigned in encounter order
+/// to empty-id projected steps. Never synthesizes string ids.
+TimelineProjection mergeLiveToolsIntoProjection(
+  TimelineProjection projection,
+  List<TimelineToolRef> liveTools,
+) {
+  final liveById = <String, TimelineToolRef>{};
+  final emptyIdLive = <TimelineToolRef>[];
+  for (final tool in liveTools) {
+    if (tool.toolName == kBuiltinSearchToolName) continue;
+    final trimmed = tool.providerId.trim();
+    if (trimmed.isNotEmpty) {
+      liveById[trimmed] = tool;
+    } else {
+      emptyIdLive.add(tool);
+    }
+  }
+  var emptyIndex = 0;
+  TimelineToolRef resolve(TimelineToolRef projected) {
+    final trimmed = projected.providerId.trim();
+    if (trimmed.isNotEmpty) {
+      final live = liveById[trimmed];
+      if (live != null) {
+        return live.copyWith(fallbackOrdinal: projected.fallbackOrdinal);
+      }
+      return projected;
+    }
+    if (emptyIndex >= emptyIdLive.length) return projected;
+    final live = emptyIdLive[emptyIndex++];
+    return live.copyWith(fallbackOrdinal: projected.fallbackOrdinal);
+  }
+
+  return TimelineProjection(
+    fromParts: projection.fromParts,
+    partsArrivalOrdered: projection.partsArrivalOrdered,
+    blocks: [
+      for (final block in projection.blocks)
+        if (block.isThinking)
+          TimelineProjectedBlock.thinking([
+            for (final step in block.steps)
+              if (step.isTool)
+                TimelineProjectedStep.tool(
+                  sourceOrdinal: step.sourceOrdinal,
+                  tool: resolve(step.tool!),
+                  reasoningCountAfter: step.reasoningCountAfter,
+                  toolCountAfter: step.toolCountAfter,
+                )
+              else
+                step,
+          ])
+        else
+          block,
+    ],
+  );
+}
+
+bool _shouldProjectFromParts({
+  required List<MessagePart> parts,
+  required String visualContent,
+  required List<TimelineToolRef> liveTools,
+  required List<TimelineReasoningRef> reasoningSegments,
+  required List<int>? contentSplitOffsets,
+  required List<int>? reasoningCountAtSplit,
+  required List<int>? toolCountAtSplit,
+  required bool usableSplits,
+  required bool partsArrivalOrdered,
+}) {
+  if (partsArrivalOrdered &&
+      (renderAssistantFromParts(parts: parts, hasContentSplits: false) ||
+          parts.any(
+            (part) => part is ImagePart && timelineImagePartFlushesBlock(part),
+          ))) {
+    return true;
+  }
+  if (renderAssistantFromParts(parts: parts, hasContentSplits: usableSplits)) {
+    return true;
+  }
+  // Same structured signal as the old renderer: reasoning, tools, or images
+  // that should inline. ImagePart must not be dropped when splits exist but
+  // do not match the live timeline.
+  if (!renderAssistantFromParts(parts: parts, hasContentSplits: false)) {
+    return false;
+  }
+  if (!usableSplits ||
+      contentSplitOffsets == null ||
+      reasoningCountAtSplit == null ||
+      toolCountAtSplit == null) {
+    return false;
+  }
+  final mixed = _interleaveReasoningAndTools(
+    liveTools: [
+      for (final tool in liveTools)
+        if (toolCreatesTimelineCard(tool.toolName)) tool,
+    ],
+    reasoningSegments: reasoningSegments,
+  );
+  return !contentSplitsMatchTimeline(
+    offsets: contentSplitOffsets,
+    reasoningCounts: reasoningCountAtSplit,
+    toolCounts: toolCountAtSplit,
+    contentLength: visualContent.length,
+    stepReasoningCounts: [for (final step in mixed) step.reasoningCountAfter],
+    stepToolCounts: [for (final step in mixed) step.toolCountAfter],
+  );
+}
+
+List<TimelineProjectedBlock> _projectFromParts({
+  required List<MessagePart> parts,
+  List<UiTextSlice?>? textSources,
+  List<SourceTextMap?>? sourceMaps,
+  required List<TimelineReasoningRef> reasoningSegments,
+  String Function(String text)? transformText,
+  ProtectedText Function(ProtectedText)? transformProtectedText,
+  bool inlineThinking = false,
+  bool inlineThinkingExpanded = true,
+}) {
+  final blocks = <TimelineProjectedBlock>[];
+  var pending = <TimelineProjectedStep>[];
+  var reasoningCount = 0;
+  var toolCount = 0;
+  var reasoningIndex = 0;
+  var sourceOrdinal = 0;
+  var imageOrdinal = 0;
+  var uiOrdinal = 0;
+  var webOrdinal = 0;
+  UiTextSlice? pendingText;
+
+  final sourceProjection = textSources == null
+      ? null
+      : UiTextProjection(
+          textSources.whereType<UiTextSlice>(),
+          transformProtectedText ?? (text) => text,
+        );
+
+  void flushSteps() {
+    if (pending.isEmpty) return;
+    blocks.add(TimelineProjectedBlock.thinking(List.of(pending)));
+    pending = <TimelineProjectedStep>[];
+  }
+
+  void emitText(String text, UiTextSlice? source, SourceTextMap? sourceMap) {
+    final mapped = source == null
+        ? null
+        : sourceProjection!
+              .project(source)
+              .withFirstMessageOrdinal(uiOrdinal, webOrdinal: webOrdinal);
+    final transformed = mapped == null && transformProtectedText != null
+        ? transformProtectedText(
+            ProtectedText(text, const [], sourceMap: sourceMap),
+          )
+        : null;
+    final visual =
+        mapped?.text ?? transformed?.text ?? transformText?.call(text) ?? text;
+    if (visual.trim().isEmpty) return;
+    uiOrdinal += mapped?.topLevelFenceCount ?? 0;
+    webOrdinal += mapped?.topLevelWebFenceCount ?? 0;
+    flushSteps();
+    blocks.add(
+      TimelineProjectedBlock.text(
+        visual,
+        uiSource: mapped,
+        sourceMap:
+            mapped?.sourceMap ??
+            transformed?.sourceMap ??
+            (visual == text ? sourceMap : null),
+      ),
+    );
+  }
+
+  void flushText() {
+    final text = pendingText;
+    if (text == null) return;
+    pendingText = null;
+    emitText(text.text, text, text.sourceMap);
+  }
+
+  for (final (partIndex, part) in parts.indexed) {
+    if (part is! TextPart) flushText();
+    switch (part) {
+      case TextPart(:final text):
+        final source = textSources?[partIndex];
+        if (source == null) {
+          flushText();
+          emitText(text, null, sourceMaps?[partIndex]);
+        } else {
+          final appended = pendingText?.append(source);
+          if (appended != null) {
+            pendingText = appended;
+          } else {
+            flushText();
+            pendingText = source;
+          }
+        }
+      case ImagePart(:final uri):
+        if (!timelineImagePartFlushesBlock(part)) continue;
+        flushSteps();
+        final imageKey = timelineImageBlockKey(
+          imageId: part.id,
+          assetId: part.assetId,
+          sourceOrdinal: imageOrdinal++,
+        );
+        blocks.add(
+          TimelineProjectedBlock.image(
+            uri,
+            imageKey: imageKey,
+            aspectRatio: timelineImageAspects[imageKey],
+          ),
+        );
+      case ReasoningPart(:final text):
+        final overlayIndex = inlineThinking ? 0 : reasoningIndex;
+        final provided = overlayIndex < reasoningSegments.length
+            ? reasoningSegments[overlayIndex]
+            : null;
+        reasoningIndex++;
+        reasoningCount++;
+        final ordinal = sourceOrdinal++;
+        if (text.isEmpty && provided?.loading != true) continue;
+        pending.add(
+          TimelineProjectedStep.reasoning(
+            sourceOrdinal: ordinal,
+            reasoning: TimelineReasoningRef(
+              text: text,
+              expanded:
+                  provided?.expanded ??
+                  (inlineThinking ? inlineThinkingExpanded : false),
+              loading: provided?.loading ?? false,
+              startAt: provided?.startAt,
+              finishedAt: provided?.finishedAt,
+              toolStartIndex: provided?.toolStartIndex ?? toolCount,
+            ),
+            reasoningCountAfter: reasoningCount,
+            toolCountAfter: toolCount,
+            reasoningOverlayIndex: provided == null ? null : overlayIndex,
+          ),
+        );
+      case final ToolCallPart part:
+        final parsed = parseTimelineToolPart(part, fallbackOrdinal: toolCount);
+        if (parsed == null || parsed.toolName == kBuiltinSearchToolName) {
+          continue;
+        }
+        pending.add(
+          TimelineProjectedStep.tool(
+            sourceOrdinal: sourceOrdinal++,
+            tool: parsed,
+            reasoningCountAfter: reasoningCount,
+            toolCountAfter: ++toolCount,
+          ),
+        );
+      default:
+        break;
+    }
+  }
+  flushText();
+  flushSteps();
+  return blocks;
+}
+
+List<TimelineProjectedStep> _interleaveReasoningAndTools({
+  required List<TimelineToolRef> liveTools,
+  required List<TimelineReasoningRef> reasoningSegments,
+}) {
+  var sourceOrdinal = 0;
+  var assignedFallback = 0;
+  TimelineToolRef withFallback(TimelineToolRef tool) {
+    if (tool.providerId.trim().isNotEmpty) return tool;
+    return tool.copyWith(fallbackOrdinal: assignedFallback++);
+  }
+
+  if (reasoningSegments.isEmpty) {
+    var toolCount = 0;
+    return [
+      for (final tool in liveTools)
+        TimelineProjectedStep.tool(
+          sourceOrdinal: sourceOrdinal++,
+          tool: withFallback(tool),
+          reasoningCountAfter: 0,
+          toolCountAfter: ++toolCount,
+        ),
+    ];
+  }
+
+  final steps = <TimelineProjectedStep>[];
+  var reasoningCount = 0;
+  var toolCount = 0;
+  var toolIndex = 0;
+
+  for (var i = 0; i < reasoningSegments.length; i++) {
+    final segment = reasoningSegments[i];
+    final segmentToolStart = segment.toolStartIndex.clamp(0, liveTools.length);
+    while (toolIndex < segmentToolStart && toolIndex < liveTools.length) {
+      steps.add(
+        TimelineProjectedStep.tool(
+          sourceOrdinal: sourceOrdinal++,
+          tool: withFallback(liveTools[toolIndex]),
+          reasoningCountAfter: reasoningCount,
+          toolCountAfter: ++toolCount,
+        ),
+      );
+      toolIndex++;
+    }
+    reasoningCount++;
+    final ordinal = sourceOrdinal++;
+    if (segment.text.isNotEmpty || segment.loading) {
+      steps.add(
+        TimelineProjectedStep.reasoning(
+          sourceOrdinal: ordinal,
+          reasoning: segment,
+          reasoningCountAfter: reasoningCount,
+          toolCountAfter: toolCount,
+          reasoningOverlayIndex: i,
+        ),
+      );
+    }
+    final nextToolBoundary = i < reasoningSegments.length - 1
+        ? reasoningSegments[i + 1].toolStartIndex.clamp(0, liveTools.length)
+        : liveTools.length;
+    while (toolIndex < nextToolBoundary && toolIndex < liveTools.length) {
+      steps.add(
+        TimelineProjectedStep.tool(
+          sourceOrdinal: sourceOrdinal++,
+          tool: withFallback(liveTools[toolIndex]),
+          reasoningCountAfter: reasoningCount,
+          toolCountAfter: ++toolCount,
+        ),
+      );
+      toolIndex++;
+    }
+  }
+  while (toolIndex < liveTools.length) {
+    steps.add(
+      TimelineProjectedStep.tool(
+        sourceOrdinal: sourceOrdinal++,
+        tool: withFallback(liveTools[toolIndex]),
+        reasoningCountAfter: reasoningCount,
+        toolCountAfter: ++toolCount,
+      ),
+    );
+    toolIndex++;
+  }
+  return steps;
+}
+
+List<TimelineProjectedStep> _filteredThinkingSteps(
+  TimelineProjectedBlock block, {
+  required bool showThinkingCards,
+  required bool showToolCards,
+  required bool Function(TimelineToolRef tool) isPendingApproval,
+}) {
+  if (!block.isThinking) return const [];
+  return [
+    for (final step in block.steps)
+      if (step.isReasoning
+          ? showThinkingCards
+          : isTimelineToolVisible(
+              toolName: step.tool!.toolName,
+              loading: step.tool!.loading,
+              showToolCards: showToolCards,
+              pendingApproval: isPendingApproval(step.tool!),
+            ))
+        step,
+  ];
+}
+
+VisibleTimelineBlock? _visibleThinkingFromProjected(
+  TimelineProjectedBlock block, {
+  required bool showThinkingCards,
+  required bool showToolCards,
+  required bool collapseThinkingSteps,
+  required bool Function(TimelineToolRef tool) isPendingApproval,
+}) {
+  final filtered = _filteredThinkingSteps(
+    block,
+    showThinkingCards: showThinkingCards,
+    showToolCards: showToolCards,
+    isPendingApproval: isPendingApproval,
+  );
+  if (filtered.isEmpty) return null;
+  final collapsed = collapseTimelineSteps(
+    groupBrowserTimelineSteps(filtered, isPendingApproval: isPendingApproval),
+    collapseThinkingSteps: collapseThinkingSteps,
+  );
+  return VisibleTimelineBlock(
+    visibleSteps: collapsed.visibleSteps,
+    hiddenCount: collapsed.hiddenCount,
+  );
+}
+
+/// Visibility filter + per-block collapse. Expand-row is [VisibleTimelineBlock.hasExpandRow].
+List<VisibleTimelineBlock> collapseProjectedTimeline(
+  List<TimelineProjectedBlock> blocks, {
+  required bool showThinkingCards,
+  required bool showToolCards,
+  required bool collapseThinkingSteps,
+  required bool Function(TimelineToolRef tool) isPendingApproval,
+}) {
+  return [
+    for (final block in blocks)
+      if (_visibleThinkingFromProjected(
+            block,
+            showThinkingCards: showThinkingCards,
+            showToolCards: showToolCards,
+            collapseThinkingSteps: collapseThinkingSteps,
+            isPendingApproval: isPendingApproval,
+          )
+          case final visible?)
+        visible,
+  ];
+}
+
+/// Final visible assistant blocks after settings and approval filters.
+///
+/// Renderer and estimator both walk this list and apply the same 8px gaps.
+List<TimelineVisibleBlock> visibleAssistantTimeline(
+  TimelineProjection projection, {
+  required bool showThinkingCards,
+  required bool showToolCards,
+  required bool Function(TimelineToolRef tool) isPendingApproval,
+}) {
+  return [
+    for (final block in projection.blocks)
+      if (_visibleAssistantBlock(
+            block,
+            showThinkingCards: showThinkingCards,
+            showToolCards: showToolCards,
+            isPendingApproval: isPendingApproval,
+          )
+          case final visible?)
+        visible,
+  ];
+}
+
+/// Per-message visibility state. Only a changed suffix visits the block memo;
+/// published lists stay immutable for widgets that still hold an older result.
+class TimelineVisibilityCache {
+  TimelineProjection? _projection;
+  List<TimelineVisibleBlock> _visible = const [];
+  final _visiblePrefixCounts = <int>[0];
+  bool? _showThinkingCards, _showToolCards;
+  int filteredBlockCount = 0;
+
+  List<TimelineVisibleBlock> project(
+    TimelineProjection projection, {
+    required bool showThinkingCards,
+    required bool showToolCards,
+    required bool Function(TimelineToolRef tool) isPendingApproval,
+  }) {
+    final canReuse =
+        showToolCards &&
+        _showToolCards == showToolCards &&
+        _showThinkingCards == showThinkingCards;
+    if (canReuse && identical(projection, _projection)) return _visible;
+    final prefix =
+        canReuse &&
+            _projection != null &&
+            identical(projection.previous?.target, _projection)
+        ? projection.unchangedBlockPrefix
+        : 0;
+    final visible = _visible.sublist(0, _visiblePrefixCounts[prefix]);
+    _visiblePrefixCounts.length = prefix + 1;
+    for (var i = prefix; i < projection.blocks.length; i++) {
+      filteredBlockCount++;
+      final block = _visibleAssistantBlock(
+        projection.blocks[i],
+        showThinkingCards: showThinkingCards,
+        showToolCards: showToolCards,
+        isPendingApproval: isPendingApproval,
+      );
+      if (block != null) visible.add(block);
+      _visiblePrefixCounts.add(visible.length);
+    }
+    _projection = projection;
+    _showThinkingCards = showThinkingCards;
+    _showToolCards = showToolCards;
+    return _visible = List.unmodifiable(visible);
+  }
+}
+
+TimelineVisibleBlock? _visibleAssistantBlock(
+  TimelineProjectedBlock block, {
+  required bool showThinkingCards,
+  required bool showToolCards,
+  required bool Function(TimelineToolRef tool) isPendingApproval,
+}) {
+  // With tool cards visible, approval changes cannot affect filtering.
+  final cached = showToolCards ? _visibleBlockMemo[block] : null;
+  if (cached != null && cached.$1 == showThinkingCards) return cached.$2;
+  final TimelineVisibleBlock? visible;
+  if (block.isText && (block.text?.trim().isNotEmpty ?? false)) {
+    visible = TimelineVisibleBlock.text(
+      block.text!,
+      uiSource: block.uiSource,
+      sourceMap: block.sourceMap,
+    );
+  } else if (block.isImage && (block.imageUri?.trim().isNotEmpty ?? false)) {
+    visible = TimelineVisibleBlock.image(
+      block.imageUri!,
+      imageKey: block.imageKey,
+      aspectRatio: block.aspectRatio ?? timelineImageAspects[block.imageKey],
+    );
+  } else {
+    final thinking = _filteredThinkingSteps(
+      block,
+      showThinkingCards: showThinkingCards,
+      showToolCards: showToolCards,
+      isPendingApproval: isPendingApproval,
+    );
+    visible = thinking.isEmpty ? null : TimelineVisibleBlock.thinking(thinking);
+  }
+  if (showToolCards) _visibleBlockMemo[block] = (showThinkingCards, visible);
+  return visible;
+}
+
+final _visibleBlockMemo = Expando<(bool, TimelineVisibleBlock?)>();
+
+int visibleTimelineStepCount(List<VisibleTimelineBlock> blocks) {
+  var count = 0;
+  for (final block in blocks) {
+    count += block.visibleSteps.length;
+  }
+  return count;
+}

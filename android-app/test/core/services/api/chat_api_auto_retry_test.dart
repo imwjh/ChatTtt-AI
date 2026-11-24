@@ -1,0 +1,540 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:Kelivo/core/models/auto_retry_options.dart';
+import 'package:Kelivo/core/providers/settings_provider.dart';
+import 'package:Kelivo/core/services/api/chat_api_service.dart';
+import 'package:Kelivo/core/services/network/provider_http_exception.dart';
+import 'package:Kelivo/core/services/api/stream/stream_chunk.dart';
+import 'package:Kelivo/core/services/api/stream/stream_chunk_handler.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+ProviderConfig _openAIConfig(
+  String baseUrl, {
+  Map<String, dynamic> modelOverrides = const <String, dynamic>{},
+}) {
+  return ProviderConfig(
+    id: 'AutoRetryApiTest',
+    enabled: true,
+    name: 'AutoRetryApiTest',
+    apiKey: 'test-key',
+    baseUrl: baseUrl,
+    providerType: ProviderKind.openai,
+    modelOverrides: modelOverrides,
+  );
+}
+
+ProviderConfig _geminiConfig(String baseUrl) {
+  return ProviderConfig(
+    id: 'Gemini',
+    enabled: true,
+    name: 'Gemini',
+    apiKey: 'test-key',
+    baseUrl: baseUrl,
+    providerType: ProviderKind.google,
+  );
+}
+
+AutoRetryOptions _retryTwice() {
+  return AutoRetryOptions(
+    enabled: true,
+    maxRetries: 2,
+    initialDelayMs: 0,
+    multiplier: 2,
+    maxDelayMs: 0,
+    jitter: false,
+    retryOnNetworkError: true,
+    retryStatusCodes: AutoRetryOptions.defaultRetryStatusCodes,
+    retryKeywords: AutoRetryOptions.defaultRetryKeywords,
+    stopKeywords: AutoRetryOptions.defaultStopKeywords,
+  );
+}
+
+Future<HttpServer> _dropConnectionServer(void Function() onRequest) async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen((request) async {
+    onRequest();
+    await request.drain();
+    final socket = await request.response.detachSocket();
+    socket.destroy();
+  });
+  return server;
+}
+
+void main() {
+  for (final noRetry in [false, true]) {
+    test('truncated HTTP error retains no-retry verdict: $noRetry', () async {
+      var requests = 0;
+      final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final sockets = <Socket>[];
+      addTearDown(() async {
+        for (final socket in sockets) {
+          socket.destroy();
+        }
+        await server.close();
+      });
+      server.listen((socket) {
+        sockets.add(socket);
+        var replied = false;
+        final incoming = StringBuffer();
+        socket.listen((bytes) async {
+          incoming.write(utf8.decode(bytes));
+          if (replied || !incoming.toString().contains('\r\n\r\n')) return;
+          replied = true;
+          requests++;
+          socket.write(
+            'HTTP/1.1 503 Service Unavailable\r\n'
+            'Content-Length: 100\r\n'
+            '${noRetry ? 'X-Should-Retry: false\r\n' : ''}'
+            'Connection: close\r\n\r\nshort',
+          );
+          await socket.flush();
+          socket.destroy();
+        });
+      });
+      await expectLater(
+        ChatApiService.sendMessageStream(
+          config: _openAIConfig(
+            'http://127.0.0.1:${server.port}/v1',
+          ).copyWith(useResponseApi: true),
+          modelId: 'gpt-4o-mini',
+          messages: const [
+            {'role': 'user', 'content': 'Hi'},
+          ],
+          retryOverride: _retryTwice(),
+        ).toList(),
+        throwsA(isA<ProviderHttpException>()),
+      );
+      expect(requests, noRetry ? 1 : 3);
+    });
+  }
+
+  for (final backend in ['chat', 'responses', 'claude', 'gemini']) {
+    for (final status in [429, 503]) {
+      for (final verdict in [null, 'false', 'true']) {
+        test('$backend HTTP $status respects retry verdict $verdict', () async {
+          var requests = 0;
+          final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          addTearDown(() => server.close(force: true));
+          server.listen((request) async {
+            requests++;
+            await request.drain<void>();
+            request.response.statusCode = status;
+            if (verdict != null) {
+              request.response.headers.set('X-Should-Retry', verdict);
+            }
+            request.response.write('overloaded, try again');
+            await request.response.close();
+          });
+          final baseUrl = 'http://${server.address.address}:${server.port}/v1';
+          final config = ProviderConfig(
+            id: 'retry-$backend',
+            enabled: true,
+            name: backend,
+            apiKey: 'test-key',
+            baseUrl: baseUrl,
+            providerType: backend == 'claude'
+                ? ProviderKind.claude
+                : backend == 'gemini'
+                ? ProviderKind.google
+                : ProviderKind.openai,
+            useResponseApi: backend == 'responses',
+          );
+          await expectLater(
+            ChatApiService.sendMessageStream(
+              config: config,
+              modelId: backend == 'claude'
+                  ? 'claude-sonnet-4-6'
+                  : backend == 'gemini'
+                  ? 'gemini-2.5-flash'
+                  : 'gpt-4o-mini',
+              messages: const [
+                {'role': 'user', 'content': 'Hi'},
+              ],
+              retryOverride: _retryTwice(),
+            ).toList(),
+            throwsA(
+              isA<ProviderHttpException>()
+                  .having((error) => error.statusCode, 'status', status)
+                  .having(
+                    (error) => error.headers['x-should-retry'],
+                    'verdict',
+                    verdict,
+                  ),
+            ),
+          );
+          expect(requests, verdict == 'false' ? 1 : 3);
+        });
+      }
+    }
+  }
+
+  test(
+    'non-stream usage is delivered before a later tool request fails',
+    () async {
+      var requests = 0;
+      var executedTools = 0;
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((request) async {
+        requests++;
+        await request.drain<void>();
+        if (requests == 1) {
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {
+                    'role': 'assistant',
+                    'tool_calls': [
+                      {
+                        'id': 'call-1',
+                        'type': 'function',
+                        'function': {'name': 'lookup', 'arguments': '{}'},
+                      },
+                    ],
+                  },
+                  'finish_reason': 'tool_calls',
+                },
+              ],
+              'usage': {'prompt_tokens': 100, 'completion_tokens': 20},
+            }),
+          );
+        } else {
+          request.response.statusCode = HttpStatus.serviceUnavailable;
+          request.response.headers.set('x-should-retry', 'false');
+          request.response.write('unavailable');
+        }
+        await request.response.close();
+      });
+      final captured = StreamChunkHandler();
+      await expectLater(
+        ChatApiService.generateMessage(
+          config: _openAIConfig(
+            'http://${server.address.address}:${server.port}/v1',
+          ),
+          modelId: 'gpt-4o-mini',
+          messages: const [
+            {'role': 'user', 'content': 'look up'},
+          ],
+          tools: const [
+            {
+              'type': 'function',
+              'function': {
+                'name': 'lookup',
+                'parameters': {'type': 'object', 'properties': {}},
+              },
+            },
+          ],
+          onToolCall: (name, arguments, {toolCallId}) async {
+            executedTools++;
+            return 'ok';
+          },
+          retryOverride: _retryTwice(),
+          onUsage: captured.handle,
+        ),
+        throwsA(isA<HttpException>()),
+      );
+      expect(requests, 2);
+      expect(executedTools, 1);
+      expect(captured.totalUsage!.totalTokens, 120);
+    },
+  );
+
+  test('image generation does not retry status-less network errors', () async {
+    var requests = 0;
+    final server = await _dropConnectionServer(() => requests++);
+    addTearDown(() async {
+      await server.close(force: true);
+    });
+    final baseUrl = 'http://${server.address.address}:${server.port}/v1';
+
+    await expectLater(
+      ChatApiService.sendMessageStream(
+        config: _openAIConfig(baseUrl),
+        modelId: 'dall-e-3',
+        messages: [
+          {'role': 'user', 'content': 'a cat'},
+        ],
+        retryOverride: _retryTwice(),
+      ).toList(),
+      throwsA(anything),
+    );
+    expect(requests, 1);
+  });
+
+  test('chat text still retries status-less network errors', () async {
+    var requests = 0;
+    final server = await _dropConnectionServer(() => requests++);
+    addTearDown(() async {
+      await server.close(force: true);
+    });
+    final baseUrl = 'http://${server.address.address}:${server.port}/v1';
+
+    await expectLater(
+      ChatApiService.sendMessageStream(
+        config: _openAIConfig(baseUrl),
+        modelId: 'gpt-4o-mini',
+        messages: [
+          {'role': 'user', 'content': 'hi'},
+        ],
+        retryOverride: _retryTwice(),
+      ).toList(),
+      throwsA(anything),
+    );
+    expect(requests, 3);
+  });
+
+  test('cancelRequest aborts backoff wait', () async {
+    var requests = 0;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() async {
+      await server.close(force: true);
+    });
+    server.listen((request) async {
+      requests++;
+      await request.drain();
+      request.response.statusCode = HttpStatus.tooManyRequests;
+      request.response.write('HTTP 429: 访问量过大');
+      await request.response.close();
+    });
+    final baseUrl = 'http://${server.address.address}:${server.port}/v1';
+    final options = AutoRetryOptions(
+      enabled: true,
+      maxRetries: 3,
+      initialDelayMs: 8000,
+      multiplier: 2,
+      maxDelayMs: 8000,
+      jitter: false,
+      retryOnNetworkError: true,
+      retryStatusCodes: AutoRetryOptions.defaultRetryStatusCodes,
+      retryKeywords: AutoRetryOptions.defaultRetryKeywords,
+      stopKeywords: AutoRetryOptions.defaultStopKeywords,
+    );
+    const requestId = 'translate-test-1';
+    final sw = Stopwatch()..start();
+    final done = ChatApiService.sendMessageStream(
+      config: _openAIConfig(baseUrl),
+      modelId: 'gpt-4o-mini',
+      messages: [
+        {'role': 'user', 'content': 'hi'},
+      ],
+      requestId: requestId,
+      retryOverride: options,
+    ).toList();
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    ChatApiService.cancelRequest(requestId);
+    await expectLater(done, throwsA(anything));
+    expect(sw.elapsedMilliseconds, lessThan(1500));
+    expect(requests, 1);
+  });
+
+  test('generateMessage forwards RetryPending during aggregation', () async {
+    var requests = 0;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() async {
+      await server.close(force: true);
+    });
+    server.listen((request) async {
+      requests++;
+      await request.drain();
+      if (requests == 1) {
+        request.response.statusCode = HttpStatus.tooManyRequests;
+        request.response.write('HTTP 429: 访问量过大');
+        await request.response.close();
+        return;
+      }
+      request.response.statusCode = HttpStatus.ok;
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'choices': [
+            {
+              'finish_reason': 'stop',
+              'message': {'content': 'hello'},
+            },
+          ],
+        }),
+      );
+      await request.response.close();
+    });
+    final baseUrl = 'http://${server.address.address}:${server.port}/v1';
+    final pending = <RetryPending?>[];
+    final result = await ChatApiService.generateMessage(
+      config: _openAIConfig(baseUrl),
+      modelId: 'gpt-4o-mini',
+      messages: [
+        {'role': 'user', 'content': 'hi'},
+      ],
+      retryOverride: _retryTwice(),
+      onRetry: pending.add,
+    );
+    expect(requests, 2);
+    expect(pending, hasLength(2));
+    expect(pending.first, isA<RetryPending>());
+    expect(pending.first!.attempt, 1);
+    expect(pending.first!.retryAt, isNotNull);
+    expect(pending.last, isNull);
+    expect(result.text, 'hello');
+  });
+
+  test('retries an empty tool follow-up without rerunning the tool', () async {
+    var requests = 0;
+    var toolCalls = 0;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() async {
+      await server.close(force: true);
+    });
+    server.listen((request) async {
+      requests++;
+      await request.drain<void>();
+      if (requests == 2) {
+        request.response.statusCode = HttpStatus.tooManyRequests;
+        request.response.write(
+          '{"error":{"code":"1305","message":"该模型当前访问量过大，请您稍后再试"}}',
+        );
+        await request.response.close();
+        return;
+      }
+
+      request.response.statusCode = HttpStatus.ok;
+      request.response.headers.contentType = ContentType(
+        'text',
+        'event-stream',
+      );
+      final data = requests == 1
+          ? {
+              'choices': [
+                {
+                  'index': 0,
+                  'delta': {
+                    'role': 'assistant',
+                    'tool_calls': [
+                      {
+                        'index': 0,
+                        'id': 'call_1',
+                        'type': 'function',
+                        'function': {'name': 'get_time', 'arguments': '{}'},
+                      },
+                    ],
+                  },
+                  'finish_reason': 'tool_calls',
+                },
+              ],
+            }
+          : {
+              'choices': [
+                {
+                  'index': 0,
+                  'delta': {'content': 'recovered'},
+                  'finish_reason': 'stop',
+                },
+              ],
+            };
+      request.response.write('data: ${jsonEncode(data)}\n\n');
+      request.response.write(
+        'data: ${jsonEncode({
+          'choices': [],
+          'usage': {'prompt_tokens': requests == 1 ? 100 : 200, 'completion_tokens': requests == 1 ? 20 : 30},
+        })}\n\n',
+      );
+      request.response.write('data: [DONE]\n\n');
+      await request.response.close();
+    });
+    final baseUrl = 'http://${server.address.address}:${server.port}/v1';
+
+    final chunks = await ChatApiService.sendMessageStream(
+      config: _openAIConfig(baseUrl),
+      modelId: 'gpt-4o-mini',
+      messages: [
+        {'role': 'user', 'content': 'what time is it?'},
+      ],
+      tools: const [
+        {
+          'type': 'function',
+          'function': {
+            'name': 'get_time',
+            'description': 'Get the current time',
+            'parameters': {'type': 'object', 'properties': <String, dynamic>{}},
+          },
+        },
+      ],
+      onToolCall: (name, arguments, {toolCallId}) async {
+        toolCalls++;
+        return '12:34';
+      },
+      retryOverride: _retryTwice(),
+    ).toList();
+
+    expect(requests, 3);
+    expect(toolCalls, 1);
+    final result = StreamChunkHandler.collect(chunks);
+    expect(result.usage!.totalTokens, 230);
+    expect(result.totalUsage!.totalTokens, 350);
+    expect(chunks.whereType<RetryPending>(), hasLength(1));
+    expect(chunks.whereType<RetryAttemptStart>(), hasLength(1));
+    expect(
+      chunks.whereType<TextDelta>().map((chunk) => chunk.text).join(),
+      'recovered',
+    );
+    expect(chunks.whereType<Finish>(), hasLength(1));
+  });
+
+  test(
+    'Gemini native image-output models do not retry status-less disconnects',
+    () async {
+      var requests = 0;
+      final server = await _dropConnectionServer(() => requests++);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+      final baseUrl = 'http://${server.address.address}:${server.port}';
+
+      await expectLater(
+        ChatApiService.sendMessageStream(
+          config: _geminiConfig(baseUrl),
+          modelId: 'gemini-2.0-flash-preview-image-generation',
+          messages: [
+            {'role': 'user', 'content': 'a cat'},
+          ],
+          retryOverride: _retryTwice(),
+        ).toList(),
+        throwsA(anything),
+      );
+      expect(requests, 1);
+    },
+  );
+
+  test(
+    'OpenAI-compatible image-output chat does not retry status-less disconnects',
+    () async {
+      var requests = 0;
+      final server = await _dropConnectionServer(() => requests++);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+      final baseUrl = 'http://${server.address.address}:${server.port}/v1';
+
+      await expectLater(
+        ChatApiService.sendMessageStream(
+          config: _openAIConfig(
+            baseUrl,
+            modelOverrides: const {
+              'gpt-4o-mini': {
+                'output': ['text', 'image'],
+              },
+            },
+          ),
+          modelId: 'gpt-4o-mini',
+          messages: [
+            {'role': 'user', 'content': 'a cat'},
+          ],
+          retryOverride: _retryTwice(),
+        ).toList(),
+        throwsA(anything),
+      );
+      expect(requests, 1);
+    },
+  );
+}

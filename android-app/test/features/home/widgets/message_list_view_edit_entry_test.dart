@@ -1,0 +1,239 @@
+import 'package:Kelivo/core/models/context_operation.dart';
+import 'package:Kelivo/features/chat/widgets/chat_message_widget.dart';
+import "../../../support/business_test_harness.dart";
+import '../../../support/markdown_render_helpers.dart';
+import 'package:Kelivo/core/models/chat_message.dart';
+import 'package:Kelivo/core/providers/assistant_provider.dart';
+import 'package:Kelivo/core/providers/settings_provider.dart';
+import 'package:Kelivo/core/providers/tts_provider.dart';
+import 'package:Kelivo/core/providers/user_provider.dart';
+import 'package:Kelivo/features/home/controllers/stream_controller.dart'
+    as stream_ctrl;
+import 'package:Kelivo/features/home/services/ask_user_interaction_service.dart';
+import 'package:Kelivo/features/home/services/tool_approval_service.dart';
+import 'package:Kelivo/features/home/widgets/message_list_view.dart';
+import 'package:Kelivo/l10n/app_localizations.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:super_sliver_list/super_sliver_list.dart';
+
+void main() {
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
+
+  testWidgets(
+    'cancel fixed start targets the operation shown when the menu opened',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        tester.view.physicalSize = const Size(1000, 1400);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        ContextOperation pin(String id, String anchor) => ContextOperation(
+          id: id,
+          kind: ContextOperationKind.start,
+          anchorGroupId: anchor,
+          appliedAfterGroupId: anchor,
+          sourceGroups: [anchor],
+          dependencies: [],
+          createdAt: DateTime(2026),
+        );
+        final first = pin('pin-a', 'a');
+        final second = pin('pin-b', 'b');
+        final undone = <String>[];
+        final key = GlobalKey<_MessageListHarnessState>();
+        await tester.pumpWidget(
+          _MessageListHarness(
+            key: key,
+            messages: [
+              ChatMessage(
+                id: 'a',
+                role: 'user',
+                content: 'first question',
+                conversationId: 'c',
+              ),
+              ChatMessage(
+                id: 'b',
+                role: 'user',
+                content: 'second question',
+                conversationId: 'c',
+              ),
+            ],
+            onEditMessage: (_) {},
+            contextOperations: [first],
+            onUndoContextOperation: (op) => undone.add(op.id),
+          ),
+        );
+        final message = tester.widget<ChatMessageWidget>(
+          find.byType(ChatMessageWidget).first,
+        );
+        message.onMore!();
+        await tester.pumpAndSettle();
+        expect(find.text('Cancel fixed context start'), findsOneWidget);
+        key.currentState!.setOperations([
+          first.copyWith(revoked: true),
+          second,
+        ]);
+        await tester.pump();
+        await tester.tap(find.text('Cancel fixed context start'));
+        await tester.pumpAndSettle();
+        expect(undone, ['pin-a']);
+        expect(tester.takeException(), isNull);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  testWidgets('all user messages expose edit from long press menu', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      final editedMessages = <String>[];
+      final messages = <ChatMessage>[
+        ChatMessage(
+          id: 'user-old',
+          role: 'user',
+          content: 'old question',
+          conversationId: 'conversation-1',
+        ),
+        ChatMessage(
+          id: 'assistant-answer',
+          role: 'assistant',
+          content: 'answer',
+          conversationId: 'conversation-1',
+        ),
+        ChatMessage(
+          id: 'user-latest',
+          role: 'user',
+          content: 'latest question',
+          conversationId: 'conversation-1',
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _MessageListHarness(
+          messages: messages,
+          onEditMessage: (message) => editedMessages.add(message.id),
+        ),
+      );
+
+      await tester.longPressAt(markdownGlyphCenter(tester, 'old question'));
+      await tester.pumpAndSettle();
+      expect(find.text('Edit'), findsOneWidget);
+      await tester.tap(find.text('Edit'));
+      await tester.pumpAndSettle();
+
+      await tester.longPressAt(markdownGlyphCenter(tester, 'latest question'));
+      await tester.pumpAndSettle();
+      expect(find.text('Edit'), findsOneWidget);
+
+      await tester.tap(find.text('Edit'));
+      await tester.pumpAndSettle();
+
+      expect(editedMessages, <String>['user-old', 'user-latest']);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+}
+
+class _MessageListHarness extends StatefulWidget {
+  const _MessageListHarness({
+    super.key,
+    this.contextOperations = const [],
+    this.onUndoContextOperation,
+    required this.messages,
+    required this.onEditMessage,
+  });
+
+  final List<ChatMessage> messages;
+  final List<ContextOperation> contextOperations;
+  final ValueChanged<ContextOperation>? onUndoContextOperation;
+  final ValueChanged<ChatMessage> onEditMessage;
+
+  @override
+  State<_MessageListHarness> createState() => _MessageListHarnessState();
+}
+
+class _MessageListHarnessState extends State<_MessageListHarness> {
+  late List<ContextOperation> operations = widget.contextOperations;
+  void setOperations(List<ContextOperation> value) =>
+      setState(() => operations = value);
+  late final ScrollController scrollController;
+  late final ListController listController;
+  late final ValueNotifier<String?> processingFilesMessageId;
+
+  @override
+  void initState() {
+    super.initState();
+    scrollController = ScrollController();
+    listController = ListController();
+    processingFilesMessageId = ValueNotifier<String?>(null);
+  }
+
+  @override
+  void dispose() {
+    scrollController.dispose();
+    listController.dispose();
+    processingFilesMessageId.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(
+          create: (_) => SettingsProvider(createBusinessTestPreferences()),
+        ),
+        ChangeNotifierProvider(
+          create: (_) =>
+              AssistantProvider(preferences: createBusinessTestPreferences()),
+        ),
+        ChangeNotifierProvider(
+          create: (_) =>
+              UserProvider(preferences: createBusinessTestPreferences()),
+        ),
+        ChangeNotifierProvider(
+          create: (_) =>
+              TtsProvider(preferences: createBusinessTestPreferences()),
+        ),
+        ChangeNotifierProvider(create: (_) => AskUserInteractionService()),
+        ChangeNotifierProvider(create: (_) => ToolApprovalService()),
+      ],
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: MessageListView(
+            scrollController: scrollController,
+            listController: listController,
+            messages: widget.messages,
+            byGroup: const {},
+            versionSelections: const {},
+            reasoning: const <String, stream_ctrl.ReasoningData>{},
+            reasoningSegments:
+                const <String, List<stream_ctrl.ReasoningSegmentData>>{},
+            contentSplits: const <String, stream_ctrl.ContentSplitData>{},
+            toolParts: const {},
+            translations: const {},
+            selecting: false,
+            selectedItems: const {},
+            dividerPadding: EdgeInsets.zero,
+            processingFilesMessageId: processingFilesMessageId,
+            onEditMessage: widget.onEditMessage,
+            contextOperations: operations,
+            onSetContextStart: (_) {},
+            onUndoContextOperation: widget.onUndoContextOperation,
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,1599 @@
+import 'dart:async';
+import 'dart:io';
+import '../../core/database/private_data_storage.dart';
+import 'package:crypto/crypto.dart';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:share_plus/share_plus.dart';
+
+import '../../core/database/startup_failure_report.dart';
+import '../../core/database/empty_database_recovery_guard.dart';
+import '../../core/database/chat_database_repository.dart';
+import '../../core/database/startup_recovery_service.dart';
+import '../../core/services/backup/local_copy_catalog.dart';
+import '../../core/services/backup/data_sync.dart';
+import '../../core/services/backup/restore_business_lease.dart';
+import '../../core/services/storage/storage_space.dart';
+import '../../icons/lucide_adapter.dart';
+import '../../l10n/app_localizations.dart';
+import 'package:Kelivo/theme/app_font_weights.dart';
+
+export '../../core/database/startup_failure_report.dart'
+    show
+        StartupFailureReport,
+        StartupFailureStage,
+        restoreFailureDiagnosticCode;
+
+/// A persistence-free shell used when the startup restore gate fails closed.
+///
+/// Its first job is evidence, not recovery: a fail-closed startup that cannot
+/// explain itself leaves the user with nothing but a reset button, which is
+/// exactly the action that destroys the evidence. So the screen shows the
+/// unwrapped error, collects what the data directory looks like, writes both
+/// to a log file, and only then offers actions — ordered from harmless to
+/// irreversible.
+/// Resolves the running build's version for the diagnostics card.
+typedef StartupAppVersionLoader =
+    Future<({String? version, String? build})> Function();
+
+class RestoreFailureScreen extends StatefulWidget {
+  const RestoreFailureScreen({
+    super.key,
+    required this.report,
+    required this.restart,
+    this.retryRestore,
+    this.appDataDirectory,
+    this.appVersionLoader,
+    this.businessLease,
+    this.privateStorageSource,
+  });
+
+  final StartupFailureReport report;
+  final RestoreBusinessLease? businessLease;
+  final Future<void> Function() restart;
+  final Future<void> Function()? retryRestore;
+
+  /// Overridable so widget tests do not have to wait on a platform channel.
+  final StartupAppVersionLoader? appVersionLoader;
+
+  /// When provided (and the failure is not a lease conflict), the screen
+  /// offers file-level recovery actions so a fail-closed startup can never be
+  /// a permanent lockout.
+  final Directory? appDataDirectory;
+  final Directory? privateStorageSource;
+
+  @override
+  State<RestoreFailureScreen> createState() => _RestoreFailureScreenState();
+}
+
+class _RestoreFailureScreenState extends State<RestoreFailureScreen> {
+  late StartupFailureReport _report = widget.report;
+  bool _collectingDiagnostics = true;
+  File? _savedReport;
+
+  bool _snapshotPrepared = false;
+  bool _restoringSnapshot = false;
+  String? _snapshotError;
+  bool _restarting = false;
+  bool _restartFailed = false;
+  bool _copied = false;
+  bool _recoveryBusy = false;
+  bool _detailsExpanded = false;
+  bool _dangerExpanded = false;
+  String? _recoveryMessage;
+  bool _recoveryMessageIsError = false;
+  StartupIntegrityResult? _integrity;
+  String? _integrityError;
+  List<LocalCopy> _localCopies = const <LocalCopy>[];
+  final Map<String, ChatDatabaseSnapshotInfo> _verifiedCopies = {};
+  final Set<String> _invalidCopies = {};
+  final Set<String> _unavailableCopies = {};
+  final Set<String> _newerCopies = {};
+  final Map<String, String> _copyErrors = {};
+  bool _validationNeedsSpace = false;
+
+  bool get _needsSpace =>
+      _validationNeedsSpace ||
+      _report.diagnosticCode == 'storage_insufficient_space' ||
+      _report.diagnosticCode == 'private_storage_insufficient_space';
+
+  String get _diagnosticText => [
+    _report.toText(),
+    if (_copyErrors.isNotEmpty) 'Local copy checks:',
+    for (final entry in _copyErrors.entries) '${entry.key}: ${entry.value}',
+  ].join('\n');
+
+  List<LocalCopy> get _orderedVerifiedCopies {
+    final copies = _localCopies.where(
+      (copy) => _verifiedCopies.containsKey(copy.id),
+    );
+    bool hasChats(LocalCopy copy) {
+      final info = _verifiedCopies[copy.id]!;
+      return info.conversationCount > 0 || info.messageCount > 0;
+    }
+
+    return [
+      ...copies.where(hasChats),
+      ...copies.where((copy) => !hasChats(copy)),
+    ];
+  }
+
+  bool _validatingCopies = true;
+  bool _copySearchFailed = false;
+
+  bool get _isEmptyDatabase =>
+      _report.diagnosticCode == 'database_empty_with_recovery_copies';
+  bool get _isMissingDatabase =>
+      _report.diagnosticCode == 'database_missing_with_prior_data';
+  bool get _isStorageActivationFailure =>
+      _report.step == 'private_storage_activation';
+
+  bool get _isDesktop =>
+      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+
+  bool get _isLeaseUnavailable =>
+      _report.diagnosticCode == 'RestoreBusinessLeaseUnavailable';
+
+  String? get _blockedDirectory => _report.blockedRestoreDirectory;
+
+  bool get _canContinueRestore =>
+      _blockedDirectory != null && widget.retryRestore != null;
+
+  bool get _busy => _restarting || _recoveryBusy || _validatingCopies;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_collectDiagnostics());
+  }
+
+  /// Fills the report in with everything that needs I/O, then persists it.
+  /// Deliberately fire-and-forget: the screen is already useful without it.
+  Future<void> _collectDiagnostics() async {
+    setState(() {
+      _collectingDiagnostics = true;
+      _validatingCopies = true;
+      _copySearchFailed = false;
+      _validationNeedsSpace = false;
+      _verifiedCopies.clear();
+      _invalidCopies.clear();
+      _unavailableCopies.clear();
+      _newerCopies.clear();
+      _copyErrors.clear();
+    });
+    try {
+      final loaded = await (widget.appVersionLoader ?? _loadAppVersion)();
+      final version = loaded.version;
+      final build = loaded.build;
+      StartupFailureReport report = _report;
+      try {
+        final environment = await StartupFailureEnvironment.collect(
+          appDataDirectory: widget.appDataDirectory,
+          appVersion: version,
+          buildNumber: build,
+          inspectDatabase:
+              !_isStorageActivationFailure && _blockedDirectory == null,
+        );
+        report = _report.withEnvironment(environment);
+      } catch (_) {
+        // Keep the error-only report rather than showing nothing.
+      }
+      File? saved;
+      final directory = widget.appDataDirectory;
+      if (directory != null) {
+        saved = await StartupDiagnosticsService.writeFailureReport(
+          appDataDirectory: _isStorageActivationFailure
+              ? PrivateDataStorage.diagnosticsDirectory(directory)
+              : directory,
+          text: report.toText(),
+        );
+      }
+      // Listing only reads names and sizes; nothing here opens a database,
+      // which is exactly what this screen cannot assume is safe to do.
+      var copies = const <LocalCopy>[];
+      if (directory != null && _blockedDirectory == null) {
+        try {
+          final catalog = LocalCopyCatalog(
+            appDataDirectory: directory,
+            includeActiveDatabase: _isStorageActivationFailure,
+            additionalRoots: widget.privateStorageSource == null
+                ? const []
+                : await PrivateDataStorage.recoveryDirectories(
+                    source: widget.privateStorageSource!,
+                    target: directory,
+                  ),
+          );
+          copies = await catalog.list();
+          _copySearchFailed = catalog.hadReadErrors;
+        } catch (_) {
+          _copySearchFailed = true;
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _report = report;
+        _savedReport = saved;
+        _localCopies = copies;
+        _collectingDiagnostics = false;
+      });
+      final verifiedArchives = <String>{};
+      if (!_isLeaseUnavailable) {
+        for (final copy in copies) {
+          if (!mounted) break;
+          File? prepared;
+          try {
+            final digest = copy.isArchive
+                ? (await sha256.bind(copy.file.openRead()).first).toString()
+                : null;
+            if (digest != null && verifiedArchives.contains(digest)) continue;
+            final archive = copy.isArchive
+                ? copy.file
+                : (prepared = await DataSync.prepareRecoveryDatabaseArchive(
+                    copy.file,
+                  ));
+            final info = await DataSync.inspectRecoverySnapshot(archive);
+            if (digest != null) verifiedArchives.add(digest);
+            if (mounted) setState(() => _verifiedCopies[copy.id] = info);
+          } catch (error) {
+            if (mounted) {
+              setState(() {
+                _copyErrors[copy.file.path] = error.toString();
+                if (InsufficientStorageSpace.causedBy(error)) {
+                  _validationNeedsSpace = true;
+                  _unavailableCopies.add(copy.id);
+                } else if (const {
+                  'manifest_database_schema_too_new',
+                  'database_schema_too_new',
+                }.contains(
+                  restoreFailureDiagnosticCode(error).split(':').last,
+                )) {
+                  _newerCopies.add(copy.id);
+                } else if (error is FormatException) {
+                  _invalidCopies.add(copy.id);
+                } else {
+                  // I/O, lock, timeout and newer-schema errors are not proof of
+                  // corruption. Keep the candidate available for another check.
+                  _unavailableCopies.add(copy.id);
+                }
+              });
+            }
+          } finally {
+            if (prepared != null) {
+              await DataSync.cleanupTemporaryBackupFile(prepared);
+            }
+          }
+        }
+      }
+      if (mounted && directory != null && _copyErrors.isNotEmpty) {
+        _savedReport = await StartupDiagnosticsService.writeFailureReport(
+          appDataDirectory: _isStorageActivationFailure
+              ? PrivateDataStorage.diagnosticsDirectory(directory)
+              : directory,
+          text: _diagnosticText,
+        );
+      }
+    } catch (error) {
+      _copySearchFailed = true;
+      _validationNeedsSpace = InsufficientStorageSpace.causedBy(error);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _collectingDiagnostics = false;
+          _validatingCopies = false;
+        });
+      }
+    }
+  }
+
+  /// Bounded on purpose: this screen runs before the app is known to be
+  /// healthy, and a plugin that never answers must not cost the user the whole
+  /// report.
+  static Future<({String? version, String? build})> _loadAppVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform().timeout(
+        const Duration(seconds: 3),
+      );
+      return (version: info.version, build: info.buildNumber);
+    } catch (_) {
+      return (version: null, build: null);
+    }
+  }
+
+  Future<void> _restart() async {
+    if (_busy) return;
+    setState(() {
+      _restarting = true;
+      _restartFailed = false;
+    });
+    try {
+      await (_canContinueRestore ? widget.retryRestore! : widget.restart)();
+    } catch (error, stackTrace) {
+      _reportError(error, stackTrace, 'while restarting after restore failure');
+      if (!mounted) return;
+      setState(() {
+        _restarting = false;
+        _restartFailed = true;
+      });
+    }
+  }
+
+  Future<void> _copyReport() async {
+    await Clipboard.setData(ClipboardData(text: _diagnosticText));
+    if (!mounted) return;
+    setState(() => _copied = true);
+  }
+
+  Future<void> _shareReport() async {
+    if (_busy) return;
+    final l10n = AppLocalizations.of(context)!;
+    setState(() {
+      _recoveryBusy = true;
+      _recoveryMessage = null;
+    });
+    try {
+      final stamp = DateTime.now().toUtc().toIso8601String().replaceAll(
+        RegExp(r'[:.]'),
+        '-',
+      );
+      final file = File(
+        '${Directory.systemTemp.path}/kelivo-startup-failure-$stamp.txt',
+      );
+      await file.writeAsString(_diagnosticText, flush: true);
+      if (_isDesktop) {
+        final destination = await FilePicker.platform.getDirectoryPath();
+        if (destination == null || destination.trim().isEmpty) {
+          if (mounted) setState(() => _recoveryBusy = false);
+          return;
+        }
+        final target = File(
+          '$destination${Platform.pathSeparator}${_basename(file.path)}',
+        );
+        await file.copy(target.path);
+        _finishRecovery(l10n.startupRecoveryReportSaved(target.path));
+      } else {
+        await SharePlus.instance.share(
+          ShareParams(files: [XFile(file.path)], subject: _basename(file.path)),
+        );
+        _finishRecovery(l10n.startupRecoveryReportShared);
+      }
+    } catch (error) {
+      _finishRecovery(l10n.startupRecoveryReportSaveFailed, isError: true);
+    }
+  }
+
+  Future<void> _exportData() async {
+    final directory = widget.appDataDirectory;
+    if (directory == null || _busy) return;
+    final l10n = AppLocalizations.of(context)!;
+    setState(() {
+      _recoveryBusy = true;
+      _recoveryMessage = null;
+    });
+    try {
+      if (_isDesktop) {
+        final destination = await FilePicker.platform.getDirectoryPath();
+        if (destination == null || destination.trim().isEmpty) {
+          if (mounted) setState(() => _recoveryBusy = false);
+          return;
+        }
+        final target = await StartupRecoveryService.exportDataCopy(
+          appDataDirectory: widget.privateStorageSource == null
+              ? directory
+              : directory.parent,
+          additionalDataDirectories: [
+            if (widget.privateStorageSource != null)
+              widget.privateStorageSource!,
+          ],
+          destinationParent: Directory(destination),
+        );
+        _finishRecovery(l10n.startupRecoveryExportSavedTo(target.path));
+        return;
+      }
+      // Mobile has no folder to hand back, so the copy leaves as one archive
+      // through the share sheet. The temporary file is removed either way.
+      final archive = await StartupDiagnosticsService.createDataArchive(
+        appDataDirectory: widget.privateStorageSource == null
+            ? directory
+            : directory.parent,
+        additionalDataDirectories: [
+          if (widget.privateStorageSource != null) widget.privateStorageSource!,
+        ],
+        workingDirectory: Directory(
+          '${Directory.systemTemp.path}/kelivo-recovery',
+        ),
+      );
+      try {
+        await SharePlus.instance.share(
+          ShareParams(
+            files: [XFile(archive.path)],
+            subject: _basename(archive.path),
+          ),
+        );
+        _finishRecovery(l10n.startupRecoveryExportSucceeded);
+      } finally {
+        try {
+          await archive.delete();
+        } catch (_) {
+          // A leftover temp archive is harmless; the OS clears it.
+        }
+      }
+    } catch (error) {
+      _finishRecovery(l10n.startupRecoveryExportFailed, isError: true);
+    }
+  }
+
+  Future<void> _checkIntegrity() async {
+    final directory = widget.appDataDirectory;
+    if (directory == null || _busy) return;
+    setState(() {
+      _recoveryBusy = true;
+      _recoveryMessage = null;
+      _integrity = null;
+      _integrityError = null;
+    });
+    try {
+      final result = await StartupDiagnosticsService.checkIntegrity(
+        appDataDirectory: directory,
+      );
+      if (!mounted) return;
+      setState(() {
+        _recoveryBusy = false;
+        _integrity = result;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _recoveryBusy = false;
+        _integrityError = '$error';
+      });
+    }
+  }
+
+  Future<void> _repairAndRestart() async {
+    final directory = widget.appDataDirectory;
+    if (directory == null || _busy) return;
+    final l10n = AppLocalizations.of(context)!;
+    setState(() {
+      _recoveryBusy = true;
+      _recoveryMessage = null;
+      _restartFailed = false;
+    });
+    try {
+      await StartupRecoveryService.repair(appDataDirectory: directory);
+      await widget.restart();
+      if (!mounted) return;
+      setState(() {
+        _recoveryBusy = false;
+        _restartFailed = true;
+      });
+    } catch (error, stackTrace) {
+      _reportError(error, stackTrace, 'while repairing after startup failure');
+      _finishRecovery(l10n.startupRecoveryRepairFailed, isError: true);
+    }
+  }
+
+  Future<void> _restoreSnapshot() async {
+    final directory = widget.appDataDirectory;
+    if (directory == null || _busy || _snapshotPrepared) return;
+    final l10n = AppLocalizations.of(context)!;
+    final ordered = _orderedVerifiedCopies;
+    final selected = await showDialog<LocalCopy>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(l10n.startupRecoverySnapshotTitle),
+        content: SizedBox(
+          width: 420,
+          child: ListView.separated(
+            shrinkWrap: true,
+            itemCount: ordered.length,
+            separatorBuilder: (_, _) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final copy = ordered[index];
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(_localCopyDate(copy)),
+                subtitle: Text(
+                  l10n.localSnapshotCopyContents(
+                    _verifiedCopies[copy.id]!.conversationCount,
+                    _verifiedCopies[copy.id]!.messageCount,
+                  ),
+                ),
+                trailing: const Icon(Lucide.ChevronRight, size: 18),
+                onTap: () => Navigator.of(context).pop(copy),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(l10n.startupRecoveryResetDialogCancel),
+          ),
+        ],
+      ),
+    );
+    if (selected == null || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(l10n.localSnapshotRestoreTitle),
+        content: Text(
+          l10n.startupRecoverySnapshotConfirm(_localCopyDate(selected)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text(l10n.startupRecoveryResetDialogCancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(l10n.localSnapshotActionRestore),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted || _busy) return;
+    setState(() {
+      _recoveryBusy = true;
+      _restoringSnapshot = true;
+      _snapshotError = null;
+      _recoveryMessage = null;
+    });
+    File? prepared;
+    try {
+      final archive = selected.isArchive
+          ? selected.file
+          : (prepared = await DataSync.prepareRecoveryDatabaseArchive(
+              selected.file,
+            ));
+      if (widget.privateStorageSource != null) {
+        await PrivateDataStorage.recover(
+          source: widget.privateStorageSource!,
+          target: directory,
+          snapshot: archive,
+        );
+      } else {
+        await DataSync.prepareStartupSnapshotRestore(
+          appDataDirectory: directory,
+          snapshot: archive,
+          businessLease: widget.businessLease,
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _recoveryBusy = false;
+        _restoringSnapshot = false;
+        _snapshotError = InsufficientStorageSpace.causedBy(error)
+            ? l10n.recoveryStorageInsufficientSpaceBody
+            : l10n.recoveryRestoreRetryBody;
+        _validationNeedsSpace = InsufficientStorageSpace.causedBy(error);
+        _copyErrors[selected.file.path] = error.toString();
+      });
+      return;
+    } finally {
+      if (prepared != null) await DataSync.cleanupTemporaryBackupFile(prepared);
+    }
+    if (!mounted) return;
+    setState(() {
+      _snapshotPrepared = true;
+      _restoringSnapshot = false;
+    });
+    _finishRecovery(l10n.startupRecoverySnapshotReady);
+    await _restart();
+  }
+
+  Future<void> _keepCurrentData() async {
+    final directory = widget.appDataDirectory;
+    if (directory == null || _busy) return;
+    final l10n = AppLocalizations.of(context)!;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) =>
+          _ResetConfirmationDialog(l10n: l10n, keepCurrent: true),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _recoveryBusy = true);
+    try {
+      await EmptyDatabaseRecoveryGuard.acknowledge(directory);
+      _recoveryBusy = false;
+      await _restart();
+    } catch (_) {
+      _finishRecovery(l10n.startupRecoveryRepairFailed, isError: true);
+    }
+  }
+
+  Future<void> _resetAndRestart() async {
+    final directory = widget.appDataDirectory;
+    if (directory == null || _busy) return;
+    final l10n = AppLocalizations.of(context)!;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => _ResetConfirmationDialog(l10n: l10n),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      _recoveryBusy = true;
+      _recoveryMessage = null;
+      _restartFailed = false;
+    });
+    try {
+      if (widget.privateStorageSource != null) {
+        await PrivateDataStorage.recover(
+          source: widget.privateStorageSource!,
+          target: directory,
+        );
+      } else {
+        await StartupRecoveryService.reset(
+          appDataDirectory: directory,
+          businessLease: widget.businessLease,
+        );
+      }
+      await widget.restart();
+      if (!mounted) return;
+      setState(() {
+        _recoveryBusy = false;
+        _restartFailed = true;
+      });
+    } catch (error, stackTrace) {
+      _reportError(error, stackTrace, 'while resetting after startup failure');
+      _finishRecovery(l10n.startupRecoveryResetFailed, isError: true);
+    }
+  }
+
+  void _finishRecovery(String message, {bool isError = false}) {
+    if (!mounted) return;
+    setState(() {
+      _recoveryBusy = false;
+      _recoveryMessage = message;
+      _recoveryMessageIsError = isError;
+    });
+  }
+
+  void _reportError(Object error, StackTrace stackTrace, String context) {
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: error,
+        stack: stackTrace,
+        library: 'Kelivo restore',
+        context: ErrorDescription(context),
+      ),
+    );
+  }
+
+  static String _basename(String path) =>
+      path.split(Platform.pathSeparator).last.split('/').last;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final showRecoveryActions =
+        widget.appDataDirectory != null &&
+        !_isLeaseUnavailable &&
+        _blockedDirectory == null;
+
+    return Scaffold(
+      backgroundColor: colors.surface,
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 620),
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(20, 28, 20, 40),
+              children: [
+                _Header(
+                  title: _needsSpace
+                      ? l10n.recoverySpaceTitle
+                      : _blockedDirectory != null
+                      ? l10n.backupRestoreDirectoryBlockedTitle
+                      : _isLeaseUnavailable
+                      ? l10n.backupRestoreBusinessLeaseUnavailableTitle
+                      : l10n.recoveryGuideTitle,
+                  body: _needsSpace
+                      ? l10n.recoveryStorageInsufficientSpaceBody
+                      : _blockedDirectory != null
+                      ? l10n.backupRestoreDirectoryBlockedContent
+                      : _isLeaseUnavailable
+                      ? l10n.backupRestoreBusinessLeaseUnavailableContent
+                      : _isStorageActivationFailure
+                      ? l10n.recoveryStorageFailureBody
+                      : _isMissingDatabase
+                      ? l10n.recoveryMissingDataBody
+                      : _isEmptyDatabase
+                      ? l10n.recoveryEmptyDataBody
+                      : l10n.recoveryGuideBody,
+                ),
+                if (_needsSpace && _report.storageSpace != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    l10n.recoverySpaceAmount(
+                      formatBytes(_report.storageSpace!.required),
+                      formatBytes(_report.storageSpace!.available),
+                    ),
+                  ),
+                ],
+                if (!showRecoveryActions &&
+                    (_collectingDiagnostics || _validatingCopies)) ...[
+                  const SizedBox(height: 16),
+                  const LinearProgressIndicator(),
+                  const SizedBox(height: 8),
+                  Text(l10n.recoverySearchingCopies),
+                ],
+                if (_blockedDirectory != null && _detailsExpanded) ...[
+                  const SizedBox(height: 12),
+                  SelectableText(_blockedDirectory!),
+                ],
+                const SizedBox(height: 24),
+                if (showRecoveryActions) ...[
+                  _Section(
+                    icon: Lucide.History,
+                    title: l10n.startupRecoverySnapshotTitle,
+                    description: _collectingDiagnostics || _validatingCopies
+                        ? l10n.recoverySearchingCopies
+                        : _verifiedCopies.isNotEmpty
+                        ? l10n.recoveryFoundCopies(_verifiedCopies.length)
+                        : _validationNeedsSpace
+                        ? l10n.recoveryChecksNeedSpace
+                        : _unavailableCopies.isNotEmpty
+                        ? l10n.recoveryChecksUnavailable
+                        : _copySearchFailed
+                        ? l10n.recoverySearchFailed
+                        : _newerCopies.isNotEmpty
+                        ? l10n.recoveryCopiesNeedUpdate
+                        : _invalidCopies.isNotEmpty
+                        ? l10n.recoveryNoValidCopies
+                        : l10n.startupRecoverySnapshotEmpty,
+                    children: [
+                      if (_validatingCopies)
+                        LinearProgressIndicator(
+                          value: _localCopies.isEmpty
+                              ? 0
+                              : (_verifiedCopies.length +
+                                        _invalidCopies.length +
+                                        _unavailableCopies.length +
+                                        _newerCopies.length) /
+                                    _localCopies.length,
+                        ),
+                      for (final copy in _localCopies.where(
+                        (copy) => _invalidCopies.contains(copy.id),
+                      ))
+                        Text(
+                          l10n.recoveryInvalidCopy(_basename(copy.file.path)),
+                        ),
+                      if (_verifiedCopies.isNotEmpty) ...[
+                        Text(l10n.recoveryCopyPreview),
+                        Text(_localCopyDate(_orderedVerifiedCopies.first)),
+                        Text(
+                          l10n.localSnapshotCopyContents(
+                            _verifiedCopies[_orderedVerifiedCopies.first.id]!
+                                .conversationCount,
+                            _verifiedCopies[_orderedVerifiedCopies.first.id]!
+                                .messageCount,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _ActionTile(
+                          icon: Lucide.RotateCcw,
+                          label: _restoringSnapshot
+                              ? l10n.localSnapshotRestorePreparing
+                              : l10n.startupRecoverySnapshotButton,
+                          onPressed: _busy || _snapshotPrepared
+                              ? null
+                              : _restoreSnapshot,
+                          emphasized: true,
+                        ),
+                      ],
+                      if (!_validatingCopies && !_snapshotPrepared) ...[
+                        if (_newerCopies.isNotEmpty &&
+                            (_verifiedCopies.isNotEmpty ||
+                                _validationNeedsSpace ||
+                                _unavailableCopies.isNotEmpty ||
+                                _copySearchFailed))
+                          Text(l10n.recoveryCopiesNeedUpdate),
+                        if (_unavailableCopies.isNotEmpty &&
+                            _verifiedCopies.isNotEmpty)
+                          Text(
+                            _validationNeedsSpace
+                                ? l10n.recoveryChecksNeedSpace
+                                : l10n.recoveryChecksUnavailable,
+                          ),
+                        const SizedBox(height: 10),
+                        _ActionTile(
+                          icon: Lucide.RefreshCw,
+                          label: l10n.recoveryRecheckCopies,
+                          onPressed: _busy ? null : _collectDiagnostics,
+                        ),
+                      ],
+                      if (_restoringSnapshot) ...[
+                        const SizedBox(height: 12),
+                        const LinearProgressIndicator(),
+                      ],
+                      if (_snapshotError != null) ...[
+                        const SizedBox(height: 12),
+                        _Notice(text: _snapshotError!, isError: true),
+                      ],
+                      if (_snapshotPrepared)
+                        Text(l10n.startupRecoverySnapshotReady),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                ],
+                _DiagnosticsCard(
+                  report: _report,
+                  details: _diagnosticText,
+                  collecting: _collectingDiagnostics,
+                  savedReport: _savedReport,
+                  expanded: _detailsExpanded,
+                  copied: _copied,
+                  busy: _busy,
+                  onToggleExpanded: () =>
+                      setState(() => _detailsExpanded = !_detailsExpanded),
+                  onCopy: _copyReport,
+                  onShare: _shareReport,
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  height: 48,
+                  child: FilledButton.icon(
+                    onPressed: _busy ? null : _restart,
+                    icon: _restarting
+                        ? SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: colors.onPrimary,
+                            ),
+                          )
+                        : const Icon(Lucide.RefreshCw, size: 18),
+                    label: Text(
+                      _canContinueRestore
+                          ? l10n.backupRestoreContinueButton
+                          : l10n.backupRestoreFailureRestartButton,
+                    ),
+                  ),
+                ),
+                if (_restartFailed) ...[
+                  const SizedBox(height: 10),
+                  _Notice(text: l10n.restartAppFailedMessage, isError: true),
+                ],
+                if (showRecoveryActions) ...[
+                  const SizedBox(height: 24),
+                  _Section(
+                    icon: Lucide.HardDrive,
+                    title: l10n.startupRecoverySectionDataTitle,
+                    description: l10n.startupRecoverySectionDataBody,
+                    children: [
+                      _ActionTile(
+                        icon: Lucide.Download,
+                        label: l10n.startupRecoveryExportButton,
+                        onPressed: _busy ? null : _exportData,
+                      ),
+                    ],
+                  ),
+                  if (!_isStorageActivationFailure && _detailsExpanded) ...[
+                    const SizedBox(height: 16),
+                    _Section(
+                      icon: Lucide.Wrench,
+                      title: l10n.startupRecoverySectionRepairTitle,
+                      description: l10n.startupRecoverySectionRepairBody,
+                      children: [
+                        _ActionTile(
+                          icon: Lucide.Activity,
+                          label: l10n.startupRecoveryIntegrityButton,
+                          onPressed: _busy ? null : _checkIntegrity,
+                        ),
+                        if (_integrity != null || _integrityError != null) ...[
+                          const SizedBox(height: 10),
+                          _IntegrityResultView(
+                            result: _integrity,
+                            error: _integrityError,
+                          ),
+                        ],
+                        const SizedBox(height: 10),
+                        _ActionTile(
+                          icon: Lucide.RotateCcw,
+                          label: l10n.startupRecoveryRepairButton,
+                          onPressed: _busy || _snapshotPrepared
+                              ? null
+                              : _repairAndRestart,
+                        ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  _DangerZone(
+                    expanded: _dangerExpanded,
+                    busy: _busy || _snapshotPrepared || _needsSpace,
+                    onKeepCurrent: _isEmptyDatabase ? _keepCurrentData : null,
+                    localCopies: _localCopies,
+                    onToggle: () =>
+                        setState(() => _dangerExpanded = !_dangerExpanded),
+                    onReset: _resetAndRestart,
+                  ),
+                ],
+                if (_recoveryBusy) ...[
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: colors.primary,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        l10n.startupRecoveryBusy,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                if (_recoveryMessage != null) ...[
+                  const SizedBox(height: 16),
+                  _Notice(
+                    text: _recoveryMessage!,
+                    isError: _recoveryMessageIsError,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Header extends StatelessWidget {
+  const _Header({required this.title, required this.body});
+
+  final String title;
+  final String body;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 52,
+          height: 52,
+          decoration: BoxDecoration(
+            color: colors.primaryContainer,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Icon(
+            Lucide.History,
+            size: 26,
+            color: colors.onPrimaryContainer,
+          ),
+        ),
+        const SizedBox(height: 18),
+        Text(
+          title,
+          style: textTheme.headlineSmall?.copyWith(
+            fontWeight: AppFontWeights.semibold,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          body,
+          style: textTheme.bodyMedium?.copyWith(
+            color: colors.onSurfaceVariant,
+            height: 1.5,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The part that was missing: what actually failed, in the user's hands.
+class _DiagnosticsCard extends StatelessWidget {
+  const _DiagnosticsCard({
+    required this.report,
+    required this.details,
+    required this.collecting,
+    required this.savedReport,
+    required this.expanded,
+    required this.copied,
+    required this.busy,
+    required this.onToggleExpanded,
+    required this.onCopy,
+    required this.onShare,
+  });
+
+  final StartupFailureReport report;
+  final String details;
+  final bool collecting;
+  final File? savedReport;
+  final bool expanded;
+  final bool copied;
+  final bool busy;
+  final VoidCallback onToggleExpanded;
+  final Future<void> Function() onCopy;
+  final Future<void> Function() onShare;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    if (!expanded) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          onPressed: onToggleExpanded,
+          icon: const Icon(Lucide.ChevronRight, size: 16),
+          label: Text(l10n.startupRecoveryShowDetails),
+        ),
+      );
+    }
+    final environment = report.environment;
+    final monospace = textTheme.bodySmall?.copyWith(
+      fontFamily: 'monospace',
+      fontFamilyFallback: const ['Menlo', 'Consolas', 'monospace'],
+      height: 1.45,
+      color: colors.onSurface,
+    );
+
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      padding: const EdgeInsets.all(18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Lucide.FileText, size: 16, color: colors.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Text(
+                l10n.startupRecoveryWhatFailed,
+                style: textTheme.labelLarge?.copyWith(
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SelectableText(report.summary, style: monospace),
+          const SizedBox(height: 14),
+          _FactRow(
+            label: l10n.startupRecoveryStageLabel,
+            value:
+                switch (report.stage) {
+                  StartupFailureStage.restoreGate =>
+                    l10n.startupRecoveryStageRestore,
+                  StartupFailureStage.databaseAdmission =>
+                    l10n.startupRecoveryStageDatabase,
+                } +
+                (report.step == null ? '' : ' · ${report.step}'),
+          ),
+          _FactRow(
+            label: l10n.startupRecoveryDiagnosticLabel,
+            value: report.diagnosticCode,
+            monospace: true,
+          ),
+          if (environment != null) ...[
+            _FactRow(
+              label: l10n.startupRecoverySchemaLabel,
+              value: l10n.startupRecoverySchemaValue(
+                environment.installedSchemaVersion?.toString() ??
+                    l10n.startupRecoveryUnknownValue,
+                environment.expectedSchemaVersion,
+              ),
+              highlight: environment.installedSchemaIsBehind,
+            ),
+            _FactRow(
+              label: l10n.startupRecoveryAppVersionLabel,
+              value:
+                  '${environment.appVersion ?? l10n.startupRecoveryUnknownValue}'
+                  '${environment.buildNumber == null ? '' : ' (${environment.buildNumber})'}'
+                  ' · ${environment.platform}',
+            ),
+          ] else if (collecting)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                l10n.startupRecoveryCollecting,
+                style: textTheme.bodySmall?.copyWith(
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              TextButton.icon(
+                onPressed: onToggleExpanded,
+                icon: Icon(
+                  expanded ? Lucide.ChevronDown : Lucide.ChevronRight,
+                  size: 16,
+                ),
+                label: Text(
+                  expanded
+                      ? l10n.startupRecoveryHideDetails
+                      : l10n.startupRecoveryShowDetails,
+                ),
+              ),
+            ],
+          ),
+          if (expanded) ...[
+            const SizedBox(height: 4),
+            Container(
+              width: double.infinity,
+              constraints: const BoxConstraints(maxHeight: 280),
+              decoration: BoxDecoration(
+                color: colors.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              padding: const EdgeInsets.all(12),
+              child: Scrollbar(
+                child: SingleChildScrollView(
+                  primary: false,
+                  child: SelectableText(details, style: monospace),
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              TextButton.icon(
+                onPressed: onCopy,
+                icon: Icon(copied ? Lucide.Check : Lucide.Copy, size: 16),
+                label: Text(
+                  copied
+                      ? l10n.startupRecoveryReportCopied
+                      : l10n.startupRecoveryCopyReport,
+                ),
+              ),
+              TextButton.icon(
+                onPressed: busy ? null : () => onShare(),
+                icon: const Icon(Lucide.Share2, size: 16),
+                label: Text(l10n.startupRecoveryShareReport),
+              ),
+            ],
+          ),
+          if (savedReport != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              l10n.startupRecoveryReportStored(savedReport!.path),
+              style: textTheme.bodySmall?.copyWith(
+                color: colors.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _FactRow extends StatelessWidget {
+  const _FactRow({
+    required this.label,
+    required this.value,
+    this.monospace = false,
+    this.highlight = false,
+  });
+
+  final String label;
+  final String value;
+  final bool monospace;
+  final bool highlight;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 104,
+            child: Text(
+              label,
+              style: textTheme.bodySmall?.copyWith(
+                color: colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: textTheme.bodySmall?.copyWith(
+                color: highlight ? colors.primary : colors.onSurface,
+                fontWeight: highlight ? AppFontWeights.semibold : null,
+                fontFamily: monospace ? 'monospace' : null,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Section extends StatelessWidget {
+  const _Section({
+    required this.icon,
+    required this.title,
+    required this.description,
+    required this.children,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      padding: const EdgeInsets.all(18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 16, color: colors.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: textTheme.labelLarge?.copyWith(
+                    fontWeight: AppFontWeights.semibold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            description,
+            style: textTheme.bodySmall?.copyWith(
+              color: colors.onSurfaceVariant,
+              height: 1.45,
+            ),
+          ),
+          const SizedBox(height: 14),
+          ...children,
+        ],
+      ),
+    );
+  }
+}
+
+class _ActionTile extends StatelessWidget {
+  const _ActionTile({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    this.emphasized = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return SizedBox(
+      width: double.infinity,
+      height: 44,
+      child: emphasized
+          ? FilledButton.tonalIcon(
+              onPressed: onPressed,
+              icon: Icon(icon, size: 18),
+              label: Text(label),
+            )
+          : OutlinedButton.icon(
+              onPressed: onPressed,
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(
+                  color: colors.outlineVariant.withValues(alpha: 0.8),
+                ),
+              ),
+              icon: Icon(icon, size: 18),
+              label: Text(label),
+            ),
+    );
+  }
+}
+
+class _IntegrityResultView extends StatelessWidget {
+  const _IntegrityResultView({required this.result, required this.error});
+
+  final StartupIntegrityResult? result;
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final String text;
+    final bool healthy;
+    if (error != null) {
+      text = l10n.startupRecoveryIntegrityFailed;
+      healthy = false;
+    } else if (result == null) {
+      return const SizedBox.shrink();
+    } else if (!result!.databasePresent) {
+      text = l10n.startupRecoveryIntegrityMissing;
+      healthy = false;
+    } else if (result!.isHealthy) {
+      text = l10n.startupRecoveryIntegrityHealthy;
+      healthy = true;
+    } else {
+      text = l10n.startupRecoveryIntegrityDamaged(result!.describe());
+      healthy = false;
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: SelectableText(
+        text,
+        style: textTheme.bodySmall?.copyWith(
+          color: healthy ? colors.primary : colors.error,
+          height: 1.45,
+        ),
+      ),
+    );
+  }
+}
+
+/// Reset stays reachable — a lockout must always have an exit — but it is
+/// folded away and confirmed separately so it can never be the first thing a
+/// confused user taps.
+class _DangerZone extends StatelessWidget {
+  const _DangerZone({
+    required this.expanded,
+    required this.busy,
+    required this.localCopies,
+    required this.onToggle,
+    required this.onReset,
+    this.onKeepCurrent,
+  });
+
+  final bool expanded;
+  final bool busy;
+
+  /// All existing snapshots and database copies survive an explicit reset.
+  final List<LocalCopy> localCopies;
+  final VoidCallback onToggle;
+  final Future<void> Function() onReset;
+  final Future<void> Function()? onKeepCurrent;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Align(
+          alignment: Alignment.center,
+          child: TextButton.icon(
+            onPressed: onToggle,
+            style: TextButton.styleFrom(
+              foregroundColor: colors.onSurfaceVariant,
+            ),
+            icon: Icon(
+              expanded ? Lucide.ChevronDown : Lucide.ChevronRight,
+              size: 16,
+            ),
+            label: Text(l10n.startupRecoveryDangerZone),
+          ),
+        ),
+        if (expanded) ...[
+          const SizedBox(height: 4),
+          Container(
+            decoration: BoxDecoration(
+              color: colors.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: colors.outlineVariant.withValues(alpha: 0.6),
+              ),
+            ),
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  l10n.startupRecoveryDangerBody,
+                  style: textTheme.bodySmall?.copyWith(
+                    color: colors.onSurface,
+                    height: 1.45,
+                  ),
+                ),
+                if (localCopies.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    l10n.startupRecoveryLocalCopiesAvailable(
+                      localCopies.length,
+                      _localCopyDate(localCopies.first),
+                    ),
+                    style: textTheme.bodySmall?.copyWith(
+                      color: colors.onSurface,
+                      height: 1.45,
+                      fontWeight: AppFontWeights.semibold,
+                    ),
+                  ),
+                ],
+                if (onKeepCurrent != null) ...[
+                  const SizedBox(height: 14),
+                  _ActionTile(
+                    icon: Lucide.Play,
+                    label: l10n.recoveryKeepCurrent,
+                    onPressed: busy ? null : onKeepCurrent,
+                  ),
+                ],
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  height: 44,
+                  child: OutlinedButton.icon(
+                    onPressed: busy ? null : () => onReset(),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: colors.error,
+                      side: BorderSide(
+                        color: colors.error.withValues(alpha: 0.5),
+                      ),
+                    ),
+                    icon: const Icon(Lucide.Plus, size: 18),
+                    label: Text(l10n.startupRecoveryResetButton),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+String _localCopyDate(LocalCopy copy) {
+  final at = copy.createdAt?.toLocal();
+  if (at == null) return '—';
+  String two(int value) => value.toString().padLeft(2, '0');
+  return '${at.year}-${two(at.month)}-${two(at.day)} '
+      '${two(at.hour)}:${two(at.minute)}';
+}
+
+class _ResetConfirmationDialog extends StatefulWidget {
+  const _ResetConfirmationDialog({
+    required this.l10n,
+    this.keepCurrent = false,
+  });
+
+  final AppLocalizations l10n;
+  final bool keepCurrent;
+
+  @override
+  State<_ResetConfirmationDialog> createState() =>
+      _ResetConfirmationDialogState();
+}
+
+class _ResetConfirmationDialogState extends State<_ResetConfirmationDialog> {
+  bool _acknowledged = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = widget.l10n;
+    final colors = Theme.of(context).colorScheme;
+    return AlertDialog(
+      title: Text(
+        widget.keepCurrent
+            ? l10n.recoveryKeepCurrent
+            : l10n.startupRecoveryResetDialogTitle,
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            widget.keepCurrent
+                ? l10n.recoveryKeepCurrentConfirm
+                : l10n.startupRecoveryResetDialogContent,
+          ),
+          const SizedBox(height: 8),
+          CheckboxListTile(
+            value: _acknowledged,
+            onChanged: (value) =>
+                setState(() => _acknowledged = value ?? false),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: Text(l10n.startupRecoveryResetAcknowledge),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: Text(l10n.startupRecoveryResetDialogCancel),
+        ),
+        TextButton(
+          onPressed: _acknowledged
+              ? () => Navigator.of(context).pop(true)
+              : null,
+          child: Text(
+            widget.keepCurrent
+                ? l10n.recoveryKeepCurrent
+                : l10n.startupRecoveryResetDialogConfirm,
+            style: TextStyle(
+              color: _acknowledged ? colors.error : colors.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _Notice extends StatelessWidget {
+  const _Notice({required this.text, required this.isError});
+
+  final String text;
+  final bool isError;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isError
+            ? colors.errorContainer.withValues(alpha: 0.3)
+            : colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: SelectableText(
+        text,
+        style: textTheme.bodySmall?.copyWith(
+          color: isError ? colors.error : colors.onSurfaceVariant,
+          height: 1.45,
+        ),
+      ),
+    );
+  }
+}

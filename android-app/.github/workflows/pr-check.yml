@@ -1,0 +1,87 @@
+name: PR Checks
+
+env:
+  FLUTTER_VERSION: '3.47.6'
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  checks:
+    name: Analyze / Test / L10n / Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get --enforce-lockfile
+
+      - name: Flutter pub get (markstream)
+        working-directory: dependencies/markstream
+        run: flutter pub get --enforce-lockfile
+
+      - name: Flutter pub get (localization tools)
+        working-directory: tool/l10n
+        run: flutter pub get --enforce-lockfile
+
+      - name: Dart format (changed files only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+          fi
+
+          files="$(git diff --diff-filter=ACMR --name-only "$BASE_SHA" "$HEAD_SHA" -- | grep -E '^(lib|test|integration_test|tool|dependencies/markstream/(lib|test))/.*\.dart$' || true)"
+          if [ -z "$files" ]; then
+            echo "No changed Dart files to format-check."
+            exit 0
+          fi
+
+          echo "Format-checking files:"
+          echo "$files"
+          dart format --output=none --set-exit-if-changed $files
+
+      - name: Generate l10n and ensure committed outputs
+        run: |
+          flutter gen-l10n
+          git diff --exit-code -- lib/l10n
+
+      - name: Validate translation coverage and source freshness
+        run: python3 tool/l10n/translate.py check
+
+      - name: Localization tool tests
+        run: python3 -m unittest discover -s tool/l10n -p 'test_*.py'
+
+      - name: AppImage packaging script tests
+        run: python3 -m unittest discover -s tool -p 'test_bundle_appimage_gtk.py'
+
+      - name: dart analyze (app and development tools)
+        run: dart analyze --fatal-infos lib test integration_test tool
+
+      - name: flutter test
+        run: flutter test
+
+      - name: dart analyze (markstream)
+        working-directory: dependencies/markstream
+        run: dart analyze --fatal-infos
+
+      - name: flutter test (markstream)
+        working-directory: dependencies/markstream
+        run: flutter test

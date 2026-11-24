@@ -1,0 +1,2590 @@
+import '../../../support/markdown_render_helpers.dart';
+import "../../../support/business_test_harness.dart";
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
+
+import 'package:Kelivo/core/models/chat_message.dart';
+import 'package:Kelivo/core/models/message_part.dart';
+import 'package:Kelivo/core/providers/settings_provider.dart';
+import 'package:Kelivo/core/providers/tts_provider.dart';
+import 'package:Kelivo/core/services/api/providers/openai/chat_completions_decoder.dart';
+import 'package:Kelivo/core/services/api/providers/openai/openai_tool_transcript.dart';
+import 'package:Kelivo/core/services/api/providers/openai/responses_api.dart';
+import 'package:Kelivo/core/services/api/providers/openai/responses_decoder.dart';
+import 'package:Kelivo/core/services/api/stream/sse_event.dart';
+import 'package:Kelivo/core/services/api/stream/stream_chunk.dart';
+import 'package:Kelivo/features/chat/widgets/chat_message_widget.dart';
+import 'package:Kelivo/features/chat/widgets/frosted/frosted_surface.dart';
+import 'package:Kelivo/features/home/controllers/stream_controller.dart'
+    as home_stream;
+import 'package:Kelivo/features/home/services/ask_user_interaction_service.dart';
+import 'package:Kelivo/icons/lucide_adapter.dart';
+import 'package:Kelivo/features/home/services/tool_approval_service.dart';
+import 'package:Kelivo/l10n/app_localizations.dart';
+import 'package:Kelivo/shared/widgets/custom_bottom_sheet.dart';
+import 'package:Kelivo/shared/widgets/ios_tactile.dart';
+import 'package:Kelivo/theme/chat_bubble_style.dart';
+
+Future<SettingsProvider> _createSettings(
+  ChatMessageBackgroundStyle style,
+) async {
+  final rawStyle = switch (style) {
+    ChatMessageBackgroundStyle.frosted => 'frosted',
+    ChatMessageBackgroundStyle.solid => 'solid',
+    ChatMessageBackgroundStyle.defaultStyle => 'default',
+  };
+  final harness = await createBusinessTestHarness(
+    initial: {'display_chat_message_background_style_v1': rawStyle},
+  );
+  final settings = SettingsProvider(harness.preferences);
+  await settings.loaded;
+  return settings;
+}
+
+Widget _buildHarness({
+  required SettingsProvider settings,
+  required Widget child,
+  AskUserInteractionService? askUserService,
+  ToolApprovalService? approvalService,
+  TtsProvider? ttsProvider,
+  Locale? locale,
+}) {
+  return MultiProvider(
+    providers: [
+      ChangeNotifierProvider<SettingsProvider>.value(value: settings),
+      if (ttsProvider != null)
+        ChangeNotifierProvider<TtsProvider>.value(value: ttsProvider)
+      else
+        ChangeNotifierProvider(
+          create: (_) =>
+              TtsProvider(preferences: createBusinessTestPreferences()),
+        ),
+      ChangeNotifierProvider<ToolApprovalService>.value(
+        value: approvalService ?? ToolApprovalService(),
+      ),
+      ChangeNotifierProvider<AskUserInteractionService>.value(
+        value: askUserService ?? AskUserInteractionService(),
+      ),
+    ],
+    child: MaterialApp(
+      locale: locale,
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(body: child),
+    ),
+  );
+}
+
+Color _expectedNeutralStrong() =>
+    ThemeData.light().colorScheme.onSurface.withValues(alpha: 0.78);
+
+Finder _findNetworkImage(String url) {
+  return find.byWidgetPredicate(
+    (widget) =>
+        widget is Image &&
+        widget.image is NetworkImage &&
+        (widget.image as NetworkImage).url == url,
+  );
+}
+
+class _RecordingTtsProvider extends TtsProvider {
+  _RecordingTtsProvider() : super(preferences: createBusinessTestPreferences());
+
+  final spokenTexts = <String>[];
+
+  @override
+  bool get isAvailable => true;
+
+  @override
+  Future<void> speak(
+    String text, {
+    bool flush = true,
+    bool waitForCompletion = true,
+    bool plainText = false,
+  }) async {
+    spokenTexts.add(text);
+  }
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets(
+    'identical details in separate text blocks retain independent folding',
+    (tester) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      await settings.setCollapseThinkingSteps(false);
+      await settings.setAssistantBubbleSplitParagraphs(false);
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      addTearDown(settings.dispose);
+      const details =
+          '<details>\n<summary>Details</summary>\n\nShared details body\n\n</details>';
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: SingleChildScrollView(
+            controller: controller,
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                id: 'recycled-details',
+                role: 'assistant',
+                conversationId: 'chat',
+                parts: [
+                  for (var i = 0; i < 80; i++) ...[
+                    TextPart(i < 2 ? details : 'Explanation $i'),
+                    ToolCallPart(
+                      jsonEncode({
+                        'id': 'tool-$i',
+                        'name': 'mcp_read_file',
+                        'content': 'done',
+                      }),
+                    ),
+                  ],
+                ],
+              ),
+              showModelIcon: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final surfaces = find.byKey(const ValueKey('markstream-details-surface'));
+      expect(surfaces, findsNWidgets(2));
+      await tester.tap(surfaces.first);
+      await tester.pumpAndSettle();
+      expect(
+        renderedParagraphsWith('Shared details body', exact: true),
+        hasLength(1),
+      );
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(surfaces, findsNothing);
+      controller.jumpTo(0);
+      await tester.pumpAndSettle();
+      expect(surfaces, findsNWidgets(2));
+      expect(
+        renderedParagraphsWith('Shared details body', exact: true),
+        hasLength(1),
+      );
+      expect(
+        find.descendant(
+          of: surfaces.first,
+          matching: find.byKey(const ValueKey('markstream-details-body')),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: surfaces.last,
+          matching: find.byKey(const ValueKey('markstream-details-body')),
+        ),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'local reasoning expansion survives eviction without crossing blocks',
+    (tester) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      await settings.setCollapseThinkingSteps(false);
+      await settings.setEnableReasoningMarkdown(false);
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      addTearDown(settings.dispose);
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: SingleChildScrollView(
+            controller: controller,
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                id: 'recycled-reasoning',
+                role: 'assistant',
+                conversationId: 'chat',
+                parts: [
+                  for (var i = 0; i < 80; i++) ...[
+                    ReasoningPart('Reasoning body $i'),
+                    TextPart('Explanation $i'),
+                  ],
+                ],
+              ),
+              showModelIcon: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final first = find.byWidgetPredicate(
+        (widget) =>
+            widget is StatefulWidget &&
+            widget.key == const ValueKey('reasoning-0'),
+        description: 'the first cached reasoning step',
+      );
+      expect(
+        first,
+        findsOneWidget,
+        reason: 'The first reasoning row must be mounted before expansion.',
+      );
+      expect(find.text('Reasoning body 0'), findsNothing);
+      await tester.tap(first);
+      await tester.pumpAndSettle();
+      expect(find.text('Reasoning body 0'), findsOneWidget);
+      expect(find.text('Reasoning body 1'), findsNothing);
+
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(
+        first,
+        findsNothing,
+        reason: 'Jumping to the tail must evict the first reasoning row.',
+      );
+      controller.jumpTo(0);
+      await tester.pumpAndSettle();
+      expect(
+        first,
+        findsOneWidget,
+        reason: 'Returning to the top must remount the first reasoning row.',
+      );
+      expect(
+        find.text('Reasoning body 0'),
+        findsOneWidget,
+        reason: 'The remounted row must restore its explicit expansion.',
+      );
+      expect(
+        find.text('Reasoning body 1'),
+        findsNothing,
+        reason: 'The next thinking block must keep its own collapsed state.',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'pending free-text answer survives transcript subtree recycling',
+    (tester) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      final service = AskUserInteractionService();
+      var storage = PageStorageBucket();
+      const arguments = <String, dynamic>{
+        'questions': [
+          {'id': 'draft', 'question': 'Describe the change', 'type': 'single'},
+        ],
+      };
+      final answer = service.requestAnswer(
+        toolCallId: 'ask-recycle',
+        arguments: arguments,
+      );
+      var show = true;
+      late StateSetter rebuild;
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          askUserService: service,
+          locale: const Locale('en'),
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              rebuild = setState;
+              if (!show) return const SizedBox.shrink();
+              return ChatMessageWidget(
+                timelineStorage: storage,
+                message: ChatMessage(
+                  id: 'draft-message',
+                  role: 'assistant',
+                  conversationId: 'draft-chat',
+                ),
+                showModelIcon: false,
+                toolParts: const [
+                  ToolUIPart(
+                    id: 'ask-recycle',
+                    toolName: AskUserToolNames.askUser,
+                    arguments: arguments,
+                    loading: true,
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'Keep this unsent answer');
+      rebuild(() => show = false);
+      await tester.pump();
+      // The whole message window can be evicted while its tool keeps waiting.
+      storage = PageStorageBucket();
+      rebuild(() => show = true);
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'Keep this unsent answer',
+      );
+      expect(service.isPending('ask-recycle'), isTrue);
+      service.cancelAll();
+      await answer;
+      await tester.pumpWidget(const SizedBox.shrink());
+      service.dispose();
+      settings.dispose();
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  group('ChatMessageWidget card background style', () {
+    testWidgets('search citations render source capsule with favicon stack', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          locale: const Locale('zh'),
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Answer with search citations.',
+              conversationId: 'conversation-search-capsule',
+            ),
+            showModelIcon: false,
+            toolParts: const [
+              ToolUIPart(
+                id: 'builtin-search-result',
+                toolName: 'builtin_search',
+                arguments: {},
+                content:
+                    '{"items":[{"title":"One","url":"https://one.example.com/a","text":"A"},{"title":"Two","url":"https://two.example.com/b","text":"B"},{"title":"Three","url":"https://three.example.com/c","text":"C"},{"title":"Four","url":"https://four.example.com/d","text":"D"}]}',
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('4个引用'), findsOneWidget);
+      expect(find.byIcon(Lucide.BookOpen), findsNothing);
+
+      final capsule = tester.widget<IosCardPress>(
+        find.ancestor(
+          of: find.text('4个引用'),
+          matching: find.byType(IosCardPress),
+        ),
+      );
+      expect(capsule.borderRadius, BorderRadius.circular(20));
+      expect(capsule.baseColor, Colors.transparent);
+      expect(
+        capsule.border,
+        Border.all(
+          color: ThemeData.light().colorScheme.onSurface.withValues(
+            alpha: 0.10,
+          ),
+          width: 0.8,
+        ),
+      );
+      expect(
+        capsule.padding,
+        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      );
+
+      expect(
+        _findNetworkImage('https://favicone.com/one.example.com'),
+        findsOneWidget,
+      );
+      expect(
+        _findNetworkImage('https://favicone.com/two.example.com'),
+        findsOneWidget,
+      );
+      expect(
+        _findNetworkImage('https://favicone.com/three.example.com'),
+        findsOneWidget,
+      );
+      expect(
+        _findNetworkImage('https://favicone.com/four.example.com'),
+        findsNothing,
+      );
+
+      await tester.tap(find.text('4个引用'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('搜索结果'), findsOneWidget);
+      expect(find.text('Four'), findsOneWidget);
+    });
+
+    testWidgets('search citations summarize all search results in one reply', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          locale: const Locale('zh'),
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Answer with multiple search calls.',
+              conversationId: 'conversation-search-capsule-multiple',
+            ),
+            showModelIcon: false,
+            toolParts: const [
+              ToolUIPart(
+                id: 'builtin-search-first',
+                toolName: 'builtin_search',
+                arguments: {},
+                content:
+                    '{"items":[{"title":"First source","url":"https://one.example.com/a","text":"A"},{"title":"Second source","url":"https://two.example.com/b","text":"B"}]}',
+              ),
+              ToolUIPart(
+                id: 'search-web-second',
+                toolName: 'search_web',
+                arguments: {'query': 'Kelivo release'},
+                content:
+                    '{"items":[{"title":"Third source","url":"https://three.example.com/c","text":"C"}]}',
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('3个引用'), findsOneWidget);
+
+      await tester.tap(find.text('3个引用'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('搜索结果'), findsOneWidget);
+      expect(find.text('First source'), findsOneWidget);
+      expect(find.text('Second source'), findsOneWidget);
+      expect(find.text('Third source'), findsOneWidget);
+    });
+
+    testWidgets(
+      'search citation capsule uses latest streaming result for the same id',
+      (tester) async {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        final controller = home_stream.StreamController(
+          onStateChanged: () {},
+          getSettingsProvider: () => settings,
+          getCurrentConversationId: () => 'conversation-search-same-id',
+        );
+        final message = ChatMessage(
+          id: 'assistant-search-same-id',
+          role: 'assistant',
+          content: 'Answer with incremental search citations.',
+          conversationId: 'conversation-search-same-id',
+          isStreaming: true,
+        );
+        final state = home_stream.StreamingState(
+          home_stream.GenerationContext(
+            assistantMessage: message,
+            apiMessages: const [],
+            userImagePaths: const [],
+            allowImagesApiRouting: false,
+            providerKey: 'test',
+            modelId: 'test-model',
+            assistant: null,
+            settings: settings,
+            config: ProviderConfig(
+              id: 'test',
+              enabled: true,
+              name: 'Test',
+              apiKey: '',
+              baseUrl: '',
+            ),
+            toolDefs: const [],
+            supportsReasoning: true,
+            enableReasoning: true,
+            streamOutput: true,
+          ),
+        );
+
+        Future<void> upsertToolEventInDb(
+          String messageId, {
+          required String id,
+          required String name,
+          required Map<String, dynamic> arguments,
+          String? content,
+          Map<String, dynamic>? metadata,
+        }) async {}
+
+        await controller.handleToolResultsChunk(
+          const ToolCallResult(
+            id: 'builtin_search',
+            output:
+                '{"items":[{"title":"First source","url":"https://one.example.com/a","text":"A"}]}',
+          ),
+          state,
+          upsertToolEventInDb: upsertToolEventInDb,
+        );
+        await controller.handleToolResultsChunk(
+          const ToolCallResult(
+            id: 'builtin_search',
+            output:
+                '{"items":[{"title":"First source","url":"https://one.example.com/a","text":"A"},{"title":"Second source","url":"https://two.example.com/b","text":"B"}]}',
+          ),
+          state,
+          upsertToolEventInDb: upsertToolEventInDb,
+        );
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            locale: const Locale('zh'),
+            child: ChatMessageWidget(
+              message: message,
+              showModelIcon: false,
+              toolParts: controller.toolParts[message.id],
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.text('2个引用'), findsOneWidget);
+      },
+    );
+
+    testWidgets('search citation capsule falls back when source url is invalid', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          locale: const Locale('zh'),
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Answer with one broken citation.',
+              conversationId: 'conversation-search-capsule-invalid-url',
+            ),
+            showModelIcon: false,
+            toolParts: const [
+              ToolUIPart(
+                id: 'builtin-search-invalid-url',
+                toolName: 'builtin_search',
+                arguments: {},
+                content:
+                    '{"items":[{"title":"Broken","url":"","text":"No usable source"}]}',
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('1个引用'), findsOneWidget);
+      expect(find.byIcon(Lucide.Globe), findsOneWidget);
+    });
+
+    testWidgets('thinking/tool timeline card uses blur in frosted mode', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.frosted,
+      );
+      await settings.setCollapseThinkingSteps(true);
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: '',
+              conversationId: 'conversation-1',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            reasoningSegments: const [
+              ReasoningSegment(text: '第 1 步', expanded: true, loading: false),
+              ReasoningSegment(text: '第 2 步', expanded: true, loading: false),
+              ReasoningSegment(text: '先分析问题', expanded: true, loading: false),
+            ],
+            toolParts: const [
+              ToolUIPart(
+                id: 'tool-1',
+                toolName: 'search_web',
+                arguments: {'query': 'Kelivo'},
+                content: '搜索结果',
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(FrostedSurface), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.text('Deep Thinking')).style?.color,
+        _expectedNeutralStrong(),
+      );
+      expect(
+        tester.widget<Text>(find.text('Web Search: Kelivo')).style?.color,
+        _expectedNeutralStrong(),
+      );
+      expect(
+        tester.widget<Text>(find.text('Show 2 more steps')).style?.color,
+        _expectedNeutralStrong(),
+      );
+
+      await settings.setShowAssistantBodyBubble(false);
+      await tester.pump();
+      expect(find.byType(FrostedSurface), findsOneWidget);
+    });
+
+    testWidgets('thinking/tool timeline card does not use blur in solid mode', (
+      tester,
+    ) async {
+      final settings = await _createSettings(ChatMessageBackgroundStyle.solid);
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: '',
+              conversationId: 'conversation-2',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            reasoningSegments: const [
+              ReasoningSegment(text: '先分析问题', expanded: true, loading: false),
+            ],
+            toolParts: const [
+              ToolUIPart(
+                id: 'tool-2',
+                toolName: 'search_web',
+                arguments: {'query': 'Kelivo'},
+                content: '搜索结果',
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(FrostedSurface), findsNothing);
+      expect(
+        tester.widget<Text>(find.text('Deep Thinking')).style?.color,
+        _expectedNeutralStrong(),
+      );
+      expect(
+        tester.widget<Text>(find.text('Web Search: Kelivo')).style?.color,
+        _expectedNeutralStrong(),
+      );
+    });
+
+    testWidgets('thinking and tool cards update independently of the reply', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.frosted,
+      );
+      await settings.setEnableAssistantMarkdown(false);
+      const reply = 'First paragraph\n\nSecond paragraph';
+      const replyColor = Color(0xFF224466);
+      await settings.setChatBubbleStyleOverrides(
+        ChatBubbleStyleOverrides(
+          textArgbLight: replyColor.toARGB32(),
+          cornerRadius: 6,
+        ),
+      );
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: SingleChildScrollView(
+            child: Column(
+              children: [
+                ChatMessageWidget(
+                  message: ChatMessage(
+                    role: 'assistant',
+                    content: reply,
+                    conversationId: 'independent-card-style',
+                  ),
+                  showModelIcon: false,
+                  reasoningSegments: const [
+                    ReasoningSegment(
+                      text: 'Thinking',
+                      expanded: true,
+                      loading: false,
+                    ),
+                  ],
+                  toolParts: const [
+                    ToolUIPart(
+                      id: 'tool-1',
+                      toolName: 'search_web',
+                      arguments: {'query': 'Combined'},
+                      content: 'Results',
+                    ),
+                  ],
+                ),
+                ChatMessageWidget(
+                  message: ChatMessage(
+                    role: 'tool',
+                    content: jsonEncode({
+                      'tool': 'search_web',
+                      'arguments': {'query': 'Standalone'},
+                      'result': 'Results',
+                    }),
+                    conversationId: 'independent-card-style',
+                  ),
+                  showModelIcon: false,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      FrostedSurface surfaceFor(String label) => tester.widget<FrostedSurface>(
+        find.ancestor(
+          of: find.text(label),
+          matching: find.byType(FrostedSurface),
+        ),
+      );
+      Color? textColor(String label) =>
+          tester.widget<Text>(find.text(label)).style?.color;
+      const thinking = 'Deep Thinking';
+      const combined = 'Web Search: Combined';
+      const standalone = 'Web Search: Standalone';
+      expect(surfaceFor(thinking).style.radius, 6);
+      expect(textColor(combined), replyColor.withValues(alpha: 0.78));
+
+      const cardColor = Color(0xFFAA2200);
+      await settings.setCustomizeThinkingToolCards(true);
+      await settings.setChatBubbleStyleOverridesFor(
+        ChatBubbleStyleTarget.thinkingToolCard,
+        ChatBubbleStyleOverrides(
+          cornerRadius: 24,
+          blurSigma: 3,
+          frostedOpacity: 0.4,
+          textArgbLight: cardColor.toARGB32(),
+        ),
+      );
+      await tester.pump();
+
+      for (final label in [thinking, combined, standalone]) {
+        final style = surfaceFor(label).style;
+        expect(style.radius, 24);
+        expect(style.blurSigma, 3);
+        expect(style.background.a, closeTo(0.4, 0.001));
+        expect(textColor(label), cardColor.withValues(alpha: 0.78));
+      }
+      expect(surfaceFor(reply).style.radius, 6);
+      expect(textColor(reply), replyColor);
+
+      await settings.setAssistantBubbleSplitParagraphs(true);
+      await tester.pump();
+      expect(surfaceFor(thinking).style.radius, 24);
+      for (final label in ['First paragraph', 'Second paragraph']) {
+        expect(surfaceFor(label).style.radius, 6);
+        expect(textColor(label), replyColor);
+      }
+
+      await settings.setCustomizeThinkingToolCards(false);
+      await tester.pump();
+      expect(surfaceFor(thinking).style.radius, 6);
+      expect(textColor(standalone), replyColor.withValues(alpha: 0.78));
+    });
+
+    testWidgets('tool message card uses blur in frosted mode', (tester) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.frosted,
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'tool',
+              content: jsonEncode({
+                'tool': 'search_web',
+                'arguments': {'query': 'Kelivo'},
+                'result': '搜索结果',
+              }),
+              conversationId: 'conversation-3',
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(FrostedSurface), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.text('Web Search: Kelivo')).style?.color,
+        _expectedNeutralStrong(),
+      );
+    });
+
+    testWidgets('tool message card does not use blur in solid mode', (
+      tester,
+    ) async {
+      final settings = await _createSettings(ChatMessageBackgroundStyle.solid);
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'tool',
+              content: jsonEncode({
+                'tool': 'search_web',
+                'arguments': {'query': 'Kelivo'},
+                'result': '搜索结果',
+              }),
+              conversationId: 'conversation-4',
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(FrostedSurface), findsNothing);
+      expect(
+        tester.widget<Text>(find.text('Web Search: Kelivo')).style?.color,
+        _expectedNeutralStrong(),
+      );
+    });
+
+    testWidgets(
+      'translation card uses blur and neutral header in frosted mode',
+      (tester) async {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.frosted,
+        );
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                role: 'assistant',
+                content: 'Answer',
+                translation: 'Translated answer',
+                conversationId: 'conversation-5',
+                isStreaming: true,
+              ),
+              showModelIcon: false,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.byType(FrostedSurface), findsNWidgets(2));
+        expect(
+          tester.widget<Text>(find.text('Translation')).style?.color,
+          _expectedNeutralStrong(),
+        );
+        await settings.setShowAssistantBodyBubble(false);
+        await tester.pump();
+        expect(find.byType(FrostedSurface), findsOneWidget);
+        expect(
+          find.ancestor(
+            of: find.text('Translation'),
+            matching: find.byType(FrostedSurface),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets('translation card removes blur in solid mode', (tester) async {
+      final settings = await _createSettings(ChatMessageBackgroundStyle.solid);
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Answer',
+              translation: 'Translated answer',
+              conversationId: 'conversation-6',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(FrostedSurface), findsNothing);
+      expect(
+        tester.widget<Text>(find.text('Translation')).style?.color,
+        _expectedNeutralStrong(),
+      );
+    });
+
+    testWidgets('local tool cards use local tool names and icons', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: '',
+              conversationId: 'conversation-local-tools',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            reasoningSegments: const [
+              ReasoningSegment(text: '需要本地信息', expanded: true, loading: false),
+            ],
+            toolParts: const [
+              ToolUIPart(
+                id: 'time-info',
+                toolName: 'get_time_info',
+                arguments: {},
+                content: '{"date":"2026-05-06"}',
+              ),
+              ToolUIPart(
+                id: 'clipboard-read',
+                toolName: 'clipboard_tool',
+                arguments: {'action': 'read'},
+                content: '{"text":"hello"}',
+              ),
+              ToolUIPart(
+                id: 'clipboard-write',
+                toolName: 'clipboard_tool',
+                arguments: {'action': 'write', 'text': 'hello'},
+                content: '{"success":true,"text":"hello"}',
+              ),
+              ToolUIPart(
+                id: 'tts',
+                toolName: 'text_to_speech',
+                arguments: {'text': 'Replay this line'},
+                content: '{"success":true}',
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Time Info'), findsOneWidget);
+      expect(find.text('Read Clipboard'), findsOneWidget);
+      expect(find.text('Write Clipboard'), findsOneWidget);
+      expect(find.text('Speaking:'), findsOneWidget);
+      expect(find.text('Replay this line'), findsOneWidget);
+      expect(find.byTooltip('Replay'), findsOneWidget);
+      final replayButton = tester.widget<IosIconButton>(
+        find.descendant(
+          of: find.byTooltip('Replay'),
+          matching: find.byType(IosIconButton),
+        ),
+      );
+      expect(replayButton.minSize, 30);
+      expect(replayButton.padding, const EdgeInsets.all(6));
+      expect(find.text('Clipboard'), findsNothing);
+      expect(find.text('Tool Result: get_time_info'), findsNothing);
+      expect(find.text('Tool Result: clipboard_tool'), findsNothing);
+      expect(
+        find.byWidgetPredicate(
+          (widget) => widget is Icon && widget.icon == Lucide.clock,
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byWidgetPredicate(
+          (widget) => widget is Icon && widget.icon == Lucide.ClipboardCheck,
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byWidgetPredicate(
+          (widget) => widget is Icon && widget.icon == Lucide.ClipboardPen,
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byWidgetPredicate(
+          (widget) => widget is Icon && widget.icon == Lucide.Volume2,
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('memory tool cards use friendly names instead of tool ids', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: '',
+              conversationId: 'conversation-memory-tools',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            reasoningSegments: const [
+              ReasoningSegment(
+                text: 'Updating memory',
+                expanded: true,
+                loading: false,
+              ),
+            ],
+            toolParts: const [
+              ToolUIPart(
+                id: 'memory-read',
+                toolName: 'memory_read',
+                arguments: {'type': 'identity'},
+                content: '{"entries":[]}',
+              ),
+              ToolUIPart(
+                id: 'memory-update',
+                toolName: 'memory_update',
+                arguments: {
+                  'type': 'identity',
+                  'content': 'User prefers Chinese',
+                },
+                content: '{"ok":true}',
+              ),
+              ToolUIPart(
+                id: 'memory-search',
+                toolName: 'memory_search_profile',
+                arguments: {'query': 'name'},
+                content: '{"results":[]}',
+              ),
+              ToolUIPart(
+                id: 'memory-edit',
+                toolName: 'memory_edit',
+                arguments: {'id': 'mem_a1', 'content': 'Updated'},
+                content: '{"ok":true}',
+              ),
+              ToolUIPart(
+                id: 'memory-delete',
+                toolName: 'memory_delete',
+                arguments: {'id': 'mem_a1'},
+                content: '{"ok":true}',
+              ),
+              ToolUIPart(
+                id: 'update-profile',
+                toolName: 'update_user_profile',
+                arguments: {
+                  'fields': [
+                    {'key': 'preferred_name', 'value': 'Alex'},
+                  ],
+                },
+                content: '{"ok":true}',
+              ),
+              ToolUIPart(
+                id: 'chat-search',
+                toolName: 'chat_search',
+                arguments: {'query': 'flutter'},
+                content: '{"results":[]}',
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Read Memory'), findsOneWidget);
+      expect(find.text('Update Memory'), findsOneWidget);
+      expect(find.text('Search Memory'), findsOneWidget);
+      expect(find.text('Edit Memory'), findsOneWidget);
+      expect(find.text('Delete Memory'), findsOneWidget);
+      expect(find.text('Update User Profile'), findsOneWidget);
+      expect(find.text('Search Past Chats'), findsOneWidget);
+      expect(find.text('Tool Call: memory_update'), findsNothing);
+      expect(find.text('Tool Result: memory_update'), findsNothing);
+      expect(find.text('Tool Call: memory_search_profile'), findsNothing);
+      expect(find.text('Tool Result: memory_search_profile'), findsNothing);
+    });
+
+    testWidgets('two-line tool timeline keeps connector gap around icon', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      const query =
+          'Kelivo Flutter chat message thinking tool timeline connector wraps';
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: SizedBox(
+            width: 320,
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                role: 'assistant',
+                content: '',
+                conversationId: 'conversation-tool-timeline-wrap',
+                isStreaming: true,
+              ),
+              showModelIcon: false,
+              reasoningSegments: const [
+                ReasoningSegment(
+                  text: '先确认问题',
+                  expanded: false,
+                  loading: false,
+                  toolStartIndex: 0,
+                ),
+                ReasoningSegment(
+                  text: '继续分析',
+                  expanded: false,
+                  loading: false,
+                  toolStartIndex: 1,
+                ),
+              ],
+              toolParts: const [
+                ToolUIPart(
+                  id: 'tool-wrap',
+                  toolName: 'search_web',
+                  arguments: {'query': query},
+                  content: '搜索结果',
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final label = find.text('Web Search: $query');
+      expect(label, findsOneWidget);
+      expect(tester.getSize(label).height, greaterThan(20));
+
+      final earth = find.byWidgetPredicate(
+        (widget) => widget is Icon && widget.icon == Lucide.Earth,
+      );
+      final iconRect = tester.getRect(earth);
+      final columnRect = tester.getRect(
+        find.ancestor(
+          of: earth,
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget.key is ValueKey<String> &&
+                (widget.key! as ValueKey<String>).value.startsWith(
+                  'chatMessageTimelineIconColumn',
+                ),
+          ),
+        ),
+      );
+
+      final topGap = iconRect.top - columnRect.top;
+      final bottomGap = columnRect.bottom - iconRect.bottom;
+      expect(topGap, greaterThanOrEqualTo(3));
+      expect(bottomGap, greaterThanOrEqualTo(3));
+      expect(topGap, closeTo(bottomGap, 0.1));
+    });
+
+    testWidgets('text to speech replay button speaks the tool text', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      final ttsProvider = _RecordingTtsProvider();
+      addTearDown(ttsProvider.dispose);
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          ttsProvider: ttsProvider,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: '',
+              conversationId: 'conversation-local-tts-replay',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            toolParts: const [
+              ToolUIPart(
+                id: 'tts',
+                toolName: 'text_to_speech',
+                arguments: {'text': 'Replay this line'},
+                content: '{"success":true}',
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      await tester.tap(find.byTooltip('Replay'));
+      await tester.pump();
+      await tester.tap(find.byTooltip('Replay'));
+      await tester.pump();
+
+      expect(ttsProvider.spokenTexts, ['Replay this line', 'Replay this line']);
+      expect(find.byTooltip('Replay'), findsOneWidget);
+    });
+
+    testWidgets('tool card opens custom details and shows the full result', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        final longResult = List<String>.generate(
+          100,
+          (index) => 'result-$index',
+        ).join('\n');
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                role: 'assistant',
+                content: '',
+                conversationId: 'conversation-local-tts-toggle',
+                isStreaming: true,
+              ),
+              showModelIcon: false,
+              toolParts: [
+                ToolUIPart(
+                  id: 'tts',
+                  toolName: 'text_to_speech',
+                  arguments: const {'text': 'Replay this line'},
+                  content: longResult,
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.byTooltip('Replay'), findsOneWidget);
+
+        await tester.tap(find.text('Speaking:'));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(CustomBottomSheet.panelKey), findsOneWidget);
+        expect(find.text('Arguments'), findsOneWidget);
+        expect(find.text('Replay this line'), findsWidgets);
+        expect(find.textContaining('result-99'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('bounded-large-text-toggle')),
+          findsNothing,
+        );
+        expect(find.byTooltip('Replay'), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('tool details stay mounted after the source card is removed', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        var showToolCard = true;
+        late StateSetter setHostState;
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            child: StatefulBuilder(
+              builder: (context, setState) {
+                setHostState = setState;
+                return showToolCard
+                    ? ChatMessageWidget(
+                        message: ChatMessage(
+                          role: 'assistant',
+                          content: '',
+                          conversationId: 'conversation-removed-tool-card',
+                          isStreaming: true,
+                        ),
+                        showModelIcon: false,
+                        toolParts: const [
+                          ToolUIPart(
+                            id: 'time-info',
+                            toolName: 'get_time_info',
+                            arguments: {},
+                            content: '{"date":"2026-08-08"}',
+                          ),
+                        ],
+                      )
+                    : const SizedBox.shrink();
+              },
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        await tester.tap(find.text('Time Info'));
+        await tester.pump();
+        setHostState(() => showToolCard = false);
+        await tester.pump();
+        await tester.pumpAndSettle();
+
+        expect(tester.takeException(), isNull);
+        expect(find.byKey(CustomBottomSheet.panelKey), findsOneWidget);
+        expect(find.textContaining('2026-08-08'), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('unclosed think tag remains visible as assistant content', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: '<think>literal answer',
+              conversationId: 'conversation-unclosed-think',
+            ),
+            showModelIcon: false,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        renderedParagraphsWith('literal answer', exact: false),
+        hasLength(1),
+      );
+      expect(find.text('Deep Thinking'), findsNothing);
+    });
+
+    testWidgets(
+      'structured reasoning keeps literal think block in assistant content',
+      (tester) async {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                role: 'assistant',
+                content: '正文 <think>literal</think> 继续显示',
+                conversationId: 'conversation-structured-think',
+              ),
+              showModelIcon: false,
+              reasoningSegments: const [
+                ReasoningSegment(text: '结构化思考', expanded: true, loading: false),
+              ],
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.text('Deep Thinking'), findsOneWidget);
+        expect(renderedParagraphsWith('结构化思考', exact: false), hasLength(1));
+        expect(
+          renderedParagraphsWith('正文 <think>literal</think> 继续显示'),
+          hasLength(1),
+        );
+      },
+    );
+
+    testWidgets('hiding thinking cards removes the thinking card', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      await settings.setShowThinkingCards(false);
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: '<think>legacy reasoning</think>Final answer',
+              conversationId: 'conversation-hide-thinking',
+            ),
+            showModelIcon: false,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Deep Thinking'), findsNothing);
+      expect(renderedParagraphsWith('legacy reasoning', exact: false), isEmpty);
+      expect(
+        renderedParagraphsWith('Final answer', exact: false),
+        hasLength(1),
+      );
+    });
+
+    testWidgets('hiding tool cards keeps thinking and ask-user cards', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      await settings.setShowToolCards(false);
+      final askUserService = AskUserInteractionService();
+      askUserService.requestAnswer(
+        toolCallId: 'ask-hidden-tools',
+        arguments: const {
+          'questions': [
+            {
+              'id': 'scope',
+              'question': 'Choose scope?',
+              'type': 'single',
+              'options': ['Minimal', 'Complete'],
+            },
+          ],
+        },
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          askUserService: askUserService,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Answer after tools',
+              conversationId: 'conversation-hide-tools',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            reasoningSegments: const [
+              ReasoningSegment(text: '需要本地信息', expanded: true, loading: false),
+            ],
+            toolParts: const [
+              ToolUIPart(
+                id: 'time-info',
+                toolName: 'get_time_info',
+                arguments: {},
+                content: '{"date":"2026-05-06"}',
+              ),
+              ToolUIPart(
+                id: 'ask-hidden-tools',
+                toolName: 'ask_user_input_v0',
+                arguments: {
+                  'questions': [
+                    {
+                      'id': 'scope',
+                      'question': 'Choose scope?',
+                      'type': 'single',
+                      'options': ['Minimal', 'Complete'],
+                    },
+                  ],
+                },
+                loading: true,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Deep Thinking'), findsOneWidget);
+      expect(renderedParagraphsWith('需要本地信息', exact: false), hasLength(1));
+      expect(find.text('Time Info'), findsNothing);
+      expect(find.text('Choose scope?'), findsOneWidget);
+      expect(
+        renderedParagraphsWith('Answer after tools', exact: false),
+        hasLength(1),
+      );
+    });
+
+    testWidgets(
+      'hiding tool cards keeps pending approval only in that conversation',
+      (tester) async {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        await settings.setShowToolCards(false);
+        final approval = ToolApprovalService();
+        final approvalFuture = approval.requestApproval(
+          toolCallId: 'call-a',
+          toolName: 'get_time_info',
+          arguments: const {},
+          conversationId: 'conversation-a',
+        );
+
+        ChatMessageWidget toolMessage({
+          required String conversationId,
+          required String toolCallId,
+        }) {
+          return ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Working',
+              conversationId: conversationId,
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            showToolCards: false,
+            toolParts: [
+              ToolUIPart(
+                id: toolCallId,
+                toolName: 'get_time_info',
+                arguments: const {},
+                loading: true,
+              ),
+            ],
+          );
+        }
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            approvalService: approval,
+            locale: const Locale('en'),
+            child: toolMessage(
+              conversationId: 'conversation-b',
+              toolCallId: 'call-b',
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.text('Time Info'), findsNothing);
+        expect(find.bySemanticsLabel('Allow'), findsNothing);
+        expect(approval.isPending('call-a'), isTrue);
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            approvalService: approval,
+            locale: const Locale('en'),
+            child: toolMessage(
+              conversationId: 'conversation-a',
+              toolCallId: 'call-a',
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.text('Time Info'), findsOneWidget);
+        expect(find.bySemanticsLabel('Allow'), findsOneWidget);
+
+        await tester.tap(find.bySemanticsLabel('Allow'));
+        await tester.pump();
+        final result = await approvalFuture;
+        expect(result.approved, isTrue);
+      },
+    );
+
+    testWidgets(
+      'late provider id keeps UI card and approval on the first-seen id',
+      (tester) async {
+        final decoder = ChatCompletionsStreamDecoder(sourceId: 'round-0');
+        final first = decoder.accept(
+          SseEvent(
+            data: jsonEncode({
+              'choices': [
+                {
+                  'delta': {
+                    'tool_calls': [
+                      {
+                        'index': 0,
+                        'function': {'name': 'lookup', 'arguments': '{'},
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+          ),
+        );
+        decoder.accept(
+          SseEvent(
+            data: jsonEncode({
+              'choices': [
+                {
+                  'delta': {
+                    'tool_calls': [
+                      {
+                        'index': 0,
+                        'id': 'call_late',
+                        'function': {'arguments': '}'},
+                      },
+                    ],
+                  },
+                  'finish_reason': 'tool_calls',
+                },
+              ],
+            }),
+          ),
+        );
+        final uiId = first.chunks.whereType<ToolCallStart>().single.id;
+        final emitCall = clientToolCallsFromChatAcc(decoder.toolCalls).single;
+        expect(uiId, 'round-0:tool-1');
+        expect(emitCall.id, uiId);
+        expect(emitCall.providerCallId, 'call_late');
+
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        await settings.setShowToolCards(false);
+        final approval = ToolApprovalService();
+        final approvalFuture = approval.requestApproval(
+          toolCallId: emitCall.id,
+          toolName: 'lookup',
+          arguments: emitCall.arguments,
+          conversationId: 'conversation-late-id',
+        );
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            approvalService: approval,
+            locale: const Locale('en'),
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                role: 'assistant',
+                content: 'Working',
+                conversationId: 'conversation-late-id',
+                isStreaming: true,
+              ),
+              showModelIcon: false,
+              showToolCards: false,
+              toolParts: [
+                ToolUIPart(
+                  id: uiId,
+                  toolName: 'lookup',
+                  arguments: emitCall.arguments,
+                  loading: true,
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.textContaining('lookup'), findsOneWidget);
+        expect(find.bySemanticsLabel('Allow'), findsOneWidget);
+
+        await tester.tap(find.bySemanticsLabel('Allow'));
+        await tester.pump();
+        final result = await approvalFuture;
+        expect(result.approved, isTrue);
+        expect(approval.isPending(uiId), isFalse);
+      },
+    );
+
+    testWidgets(
+      'Responses late call_id keeps UI card and approval on the first-seen id',
+      (tester) async {
+        final decoder = ResponsesStreamDecoder(sourceId: 'round-0');
+        final first = decoder.accept(
+          SseEvent(
+            data: jsonEncode({
+              'type': 'response.output_item.added',
+              'output_index': 0,
+              'item': {'type': 'function_call', 'id': 'fc_1', 'name': 'lookup'},
+            }),
+          ),
+        );
+        decoder.accept(
+          SseEvent(
+            data: jsonEncode({
+              'type': 'response.output_item.done',
+              'output_index': 0,
+              'item': {
+                'type': 'function_call',
+                'id': 'fc_1',
+                'call_id': 'call_late',
+                'name': 'lookup',
+                'arguments': '{"q":"kelivo"}',
+              },
+            }),
+          ),
+        );
+        final uiId = first.chunks.whereType<ToolCallStart>().single.id;
+        final decoded = decoder.takeFunctionCalls().single;
+        final emitCall = responsesCallsFromIndexMap({
+          decoded.index: decoded.toIndexFields(),
+        }).single;
+        expect(uiId, 'fc_1');
+        expect(emitCall.id, uiId);
+        expect(emitCall.providerCallId, 'call_late');
+
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        await settings.setShowToolCards(false);
+        final approval = ToolApprovalService();
+        final approvalFuture = approval.requestApproval(
+          toolCallId: emitCall.id,
+          toolName: 'lookup',
+          arguments: emitCall.arguments,
+          conversationId: 'conversation-responses-late-id',
+        );
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            approvalService: approval,
+            locale: const Locale('en'),
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                role: 'assistant',
+                content: 'Working',
+                conversationId: 'conversation-responses-late-id',
+                isStreaming: true,
+              ),
+              showModelIcon: false,
+              showToolCards: false,
+              toolParts: [
+                ToolUIPart(
+                  id: uiId,
+                  toolName: 'lookup',
+                  arguments: emitCall.arguments,
+                  loading: true,
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.textContaining('lookup'), findsOneWidget);
+        expect(find.bySemanticsLabel('Allow'), findsOneWidget);
+
+        await tester.tap(find.bySemanticsLabel('Allow'));
+        await tester.pump();
+        final result = await approvalFuture;
+        expect(result.approved, isTrue);
+        expect(
+          approval.isPending(
+            uiId,
+            conversationId: 'conversation-responses-late-id',
+          ),
+          isFalse,
+        );
+      },
+    );
+
+    testWidgets(
+      'approving one chat does not complete a sibling with the same placeholder id',
+      (tester) async {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        final approval = ToolApprovalService();
+        final futureA = approval.requestApproval(
+          toolCallId: 'round-0:tool-1',
+          toolName: 'get_time_info',
+          arguments: const {},
+          conversationId: 'conversation-a',
+        );
+        final futureB = approval.requestApproval(
+          toolCallId: 'round-0:tool-1',
+          toolName: 'get_time_info',
+          arguments: const {},
+          conversationId: 'conversation-b',
+        );
+
+        ChatMessageWidget toolMessage(String conversationId) {
+          return ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Working',
+              conversationId: conversationId,
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            toolParts: const [
+              ToolUIPart(
+                id: 'round-0:tool-1',
+                toolName: 'get_time_info',
+                arguments: {},
+                loading: true,
+              ),
+            ],
+          );
+        }
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            approvalService: approval,
+            locale: const Locale('en'),
+            child: toolMessage('conversation-a'),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.bySemanticsLabel('Allow'), findsOneWidget);
+        await tester.tap(find.bySemanticsLabel('Allow'));
+        await tester.pump();
+        expect((await futureA).approved, isTrue);
+        expect(
+          approval.isPending(
+            'round-0:tool-1',
+            conversationId: 'conversation-b',
+          ),
+          isTrue,
+        );
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            approvalService: approval,
+            locale: const Locale('en'),
+            child: toolMessage('conversation-b'),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.bySemanticsLabel('Allow'), findsOneWidget);
+        await tester.tap(find.bySemanticsLabel('Allow'));
+        await tester.pump();
+        expect((await futureB).approved, isTrue);
+      },
+    );
+
+    testWidgets('same-name approval actions stay scoped to the conversation', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      final approval = ToolApprovalService();
+      approval.requestApproval(
+        toolCallId: 'call-a',
+        toolName: 'get_time_info',
+        arguments: const {},
+        conversationId: 'conversation-a',
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          approvalService: approval,
+          locale: const Locale('en'),
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Working',
+              conversationId: 'conversation-b',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            toolParts: const [
+              ToolUIPart(
+                id: 'call-b',
+                toolName: 'get_time_info',
+                arguments: {},
+                loading: true,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Time Info'), findsOneWidget);
+      expect(find.bySemanticsLabel('Allow'), findsNothing);
+      expect(approval.isPending('call-a'), isTrue);
+    });
+
+    testWidgets(
+      'same-name sibling in one conversation does not share approval UI',
+      (tester) async {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        await settings.setShowToolResultSummary(true);
+        final approval = ToolApprovalService();
+        final approvalFuture = approval.requestApproval(
+          toolCallId: 'call-1',
+          toolName: 'get_time_info',
+          arguments: const {'query': 'seattle-pending'},
+          conversationId: 'conversation-same-name',
+        );
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            approvalService: approval,
+            locale: const Locale('en'),
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                role: 'assistant',
+                content: 'Working',
+                conversationId: 'conversation-same-name',
+                isStreaming: true,
+              ),
+              showModelIcon: false,
+              toolParts: const [
+                ToolUIPart(
+                  id: 'call-1',
+                  toolName: 'get_time_info',
+                  arguments: {'query': 'seattle-pending'},
+                  loading: true,
+                ),
+                ToolUIPart(
+                  id: 'call-2',
+                  toolName: 'get_time_info',
+                  arguments: {'query': 'tokyo-sibling'},
+                  loading: true,
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.text('Time Info'), findsNWidgets(2));
+        expect(find.bySemanticsLabel('Allow'), findsOneWidget);
+        expect(find.textContaining('seattle-pending'), findsOneWidget);
+        expect(find.textContaining('query: tokyo-sibling'), findsNothing);
+
+        await tester.tap(find.bySemanticsLabel('Allow'));
+        await tester.pump();
+        final result = await approvalFuture;
+        expect(result.approved, isTrue);
+        expect(approval.isPending('call-1'), isFalse);
+        expect(approval.isPending('call-2'), isFalse);
+      },
+    );
+
+    testWidgets(
+      'hiding tool cards keeps only the pending same-name approval card',
+      (tester) async {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        await settings.setShowToolCards(false);
+        await settings.setShowToolResultSummary(true);
+        final approval = ToolApprovalService();
+        approval.requestApproval(
+          toolCallId: 'call-1',
+          toolName: 'get_time_info',
+          arguments: const {'query': 'seattle-pending'},
+          conversationId: 'conversation-same-name-hidden',
+        );
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            approvalService: approval,
+            locale: const Locale('en'),
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                role: 'assistant',
+                content: 'Working',
+                conversationId: 'conversation-same-name-hidden',
+                isStreaming: true,
+              ),
+              showModelIcon: false,
+              showToolCards: false,
+              toolParts: const [
+                ToolUIPart(
+                  id: 'call-1',
+                  toolName: 'get_time_info',
+                  arguments: {'query': 'seattle-pending'},
+                  loading: true,
+                ),
+                ToolUIPart(
+                  id: 'call-2',
+                  toolName: 'get_time_info',
+                  arguments: {'query': 'tokyo-sibling'},
+                  loading: true,
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.text('Time Info'), findsOneWidget);
+        expect(find.bySemanticsLabel('Allow'), findsOneWidget);
+        expect(find.textContaining('seattle-pending'), findsOneWidget);
+        expect(find.textContaining('tokyo-sibling'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'unscoped approval matches any conversation by toolCallId only',
+      (tester) async {
+        final settings = await _createSettings(
+          ChatMessageBackgroundStyle.defaultStyle,
+        );
+        await settings.setShowToolResultSummary(true);
+        final approval = ToolApprovalService();
+        approval.requestApproval(
+          toolCallId: 'call-unscoped',
+          toolName: 'get_time_info',
+          arguments: const {'query': 'unscoped-args'},
+        );
+
+        await tester.pumpWidget(
+          _buildHarness(
+            settings: settings,
+            approvalService: approval,
+            locale: const Locale('en'),
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                role: 'assistant',
+                content: 'Working',
+                conversationId: 'conversation-other',
+                isStreaming: true,
+              ),
+              showModelIcon: false,
+              toolParts: const [
+                ToolUIPart(
+                  id: 'call-other',
+                  toolName: 'get_time_info',
+                  arguments: {'query': 'other-args'},
+                  loading: true,
+                ),
+                ToolUIPart(
+                  id: 'call-unscoped',
+                  toolName: 'get_time_info',
+                  arguments: {'query': 'unscoped-args'},
+                  loading: true,
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.bySemanticsLabel('Allow'), findsOneWidget);
+        expect(find.textContaining('unscoped-args'), findsOneWidget);
+        expect(find.textContaining('query: other-args'), findsNothing);
+      },
+    );
+
+    testWidgets('inline thinking with a tool renders and toggles its card', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      await settings.setAutoCollapseThinking(false);
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              parts: const [
+                TextPart('<thinking>inline reasoning</thinking>'),
+                ToolCallPart(
+                  '{"id":"t1","name":"get_time_info","arguments":{},"content":"ok"}',
+                ),
+                TextPart('Final answer'),
+              ],
+              conversationId: 'conversation-inline-tool',
+            ),
+            showModelIcon: false,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Deep Thinking'), findsOneWidget);
+      expect(
+        renderedParagraphsWith('inline reasoning', exact: false),
+        hasLength(1),
+      );
+      expect(renderedParagraphsWith('<thinking>', exact: false), isEmpty);
+      expect(
+        renderedParagraphsWith('Final answer', exact: false),
+        hasLength(1),
+      );
+      await tester.tap(find.text('Deep Thinking'));
+      await tester.pumpAndSettle();
+      expect(renderedParagraphsWith('inline reasoning', exact: false), isEmpty);
+      expect(
+        renderedParagraphsWith('Final answer', exact: false),
+        hasLength(1),
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('closed legacy think block renders as thinking card', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: '<think>legacy reasoning</think>Final answer',
+              conversationId: 'conversation-legacy-think',
+            ),
+            showModelIcon: false,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Deep Thinking'), findsOneWidget);
+      expect(
+        renderedParagraphsWith('Final answer', exact: false),
+        hasLength(1),
+      );
+      expect(
+        renderedParagraphsWith('<think>legacy reasoning</think>', exact: false),
+        isEmpty,
+      );
+    });
+
+    testWidgets('ask user card submits selected answer', (tester) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      final askUserService = AskUserInteractionService();
+      final answerFuture = askUserService.requestAnswer(
+        toolCallId: 'ask-1',
+        arguments: const {
+          'questions': [
+            {
+              'id': 'scope',
+              'question': 'Choose scope?',
+              'type': 'single',
+              'options': ['Minimal', 'Complete'],
+            },
+          ],
+        },
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          askUserService: askUserService,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Let me ask first.',
+              conversationId: 'conversation-ask-user',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            toolParts: const [
+              ToolUIPart(
+                id: 'ask-1',
+                toolName: 'ask_user_input_v0',
+                arguments: {
+                  'questions': [
+                    {
+                      'id': 'scope',
+                      'question': 'Choose scope?',
+                      'type': 'single',
+                      'options': ['Minimal', 'Complete'],
+                    },
+                  ],
+                },
+                loading: true,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Choose scope?'), findsOneWidget);
+      expect(find.text('Ask User'), findsNothing);
+      expect(find.text('Needs your answer'), findsNothing);
+      expect(find.text('Minimal'), findsOneWidget);
+      expect(find.text('Complete'), findsOneWidget);
+      expect(find.text('Type your answer'), findsOneWidget);
+      expect(find.text('Skip'), findsOneWidget);
+      final minimalOptionContainer = tester
+          .widgetList<Container>(
+            find.ancestor(
+              of: find.text('Minimal'),
+              matching: find.byType(Container),
+            ),
+          )
+          .where((container) => container.constraints?.minHeight == 40)
+          .single;
+      final minimalOptionDecoration =
+          minimalOptionContainer.decoration! as BoxDecoration;
+      expect(minimalOptionDecoration.color, Colors.transparent);
+
+      await tester.tap(find.text('Complete'));
+      await tester.pump();
+      await tester.tap(find.text('Submit answer'));
+      await tester.pump();
+
+      final result = await answerFuture;
+      final payload = jsonDecode(result.toJsonString()) as Map<String, dynamic>;
+      expect(payload['answers']['scope']['value'], 'Complete');
+      expect(payload['answers']['scope']['custom'], isFalse);
+    });
+
+    for (final kind in AskUserQuestionKind.values) {
+      for (final viewport in [
+        (width: 360.0, scale: 1.0, brightness: Brightness.light),
+        (width: 360.0, scale: 2.0, brightness: Brightness.dark),
+        (width: 1024.0, scale: 1.0, brightness: Brightness.light),
+        (width: 1024.0, scale: 2.0, brightness: Brightness.dark),
+      ]) {
+        testWidgets('ask user ${kind.name} shows and submits full long option '
+            'at width ${viewport.width} scale ${viewport.scale}', (
+          tester,
+        ) async {
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = Size(viewport.width, 800);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          addTearDown(tester.view.resetPhysicalSize);
+          final settings = await _createSettings(
+            ChatMessageBackgroundStyle.defaultStyle,
+          );
+          final service = AskUserInteractionService();
+          await settings.setShowModelTimestamp(false);
+          addTearDown(service.dispose);
+          const option =
+              '完整显示此选项的全部内容，包括最后的说明。 '
+              'Show the complete option, including all details needed to '
+              'make a decision. Wrap this long explanation onto as many '
+              'lines as needed without hiding its final qualification.\n'
+              'Keep the existing settings.\n'
+              'Include the additional explanation.\n'
+              'This final line must remain visible and selectable.';
+          final arguments = <String, dynamic>{
+            'questions': [
+              {
+                'id': 'scope',
+                'question': 'Choose scope?',
+                'type': kind.name,
+                'options': [option, 'Short option'],
+              },
+            ],
+          };
+          final answer = service.requestAnswer(
+            toolCallId: 'ask-long',
+            arguments: arguments,
+          );
+
+          await tester.pumpWidget(
+            _buildHarness(
+              settings: settings,
+              askUserService: service,
+              locale: const Locale('zh'),
+              child: Builder(
+                builder: (context) => Theme(
+                  data: ThemeData(brightness: viewport.brightness),
+                  child: MediaQuery(
+                    data: MediaQuery.of(
+                      context,
+                    ).copyWith(textScaler: TextScaler.linear(viewport.scale)),
+                    child: SingleChildScrollView(
+                      child: ChatMessageWidget(
+                        message: ChatMessage(
+                          role: 'assistant',
+                          content: '',
+                          conversationId: 'conversation-ask-long',
+                          isStreaming: true,
+                        ),
+                        showModelIcon: false,
+                        toolParts: [
+                          ToolUIPart(
+                            id: 'ask-long',
+                            toolName: AskUserToolNames.askUser,
+                            arguments: arguments,
+                            loading: true,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final label = find.text(option);
+          final paragraph = tester.renderObject<RenderParagraph>(label);
+          expect(paragraph.didExceedMaxLines, isFalse);
+          final tail = paragraph.getBoxesForSelection(
+            const TextSelection(
+              baseOffset: option.length - 1,
+              extentOffset: option.length,
+            ),
+          );
+          expect(tail, isNotEmpty);
+          expect(tail.last.bottom, lessThanOrEqualTo(paragraph.size.height));
+
+          // Scroll the final line into view and select from that line.
+          await Scrollable.ensureVisible(tester.element(label), alignment: 1);
+          await tester.pumpAndSettle();
+          await tester.tapAt(
+            paragraph.localToGlobal(tail.last.toRect().center),
+          );
+          await tester.pumpAndSettle();
+          final submit = find.text('提交回答');
+          await tester.ensureVisible(submit);
+          await tester.pumpAndSettle();
+          await tester.tap(submit);
+          await tester.pump();
+
+          expect(service.isPending('ask-long'), isFalse);
+          final result = await answer;
+          expect(
+            result.answers['scope']!.value,
+            kind == AskUserQuestionKind.single ? option : [option],
+          );
+          expect(tester.takeException(), isNull);
+        });
+      }
+    }
+
+    testWidgets('answered ask user card stays expanded and can collapse', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Answered.',
+              conversationId: 'conversation-ask-user-answered',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            toolParts: const [
+              ToolUIPart(
+                id: 'ask-answered',
+                toolName: 'ask_user_input_v0',
+                arguments: {
+                  'questions': [
+                    {
+                      'id': 'scope',
+                      'question': 'Choose scope?',
+                      'type': 'single',
+                      'options': ['Minimal', 'Complete'],
+                    },
+                  ],
+                },
+                content:
+                    '{"type":"ask_user_answer","answers":{"scope":{"type":"single","value":"Complete","custom":false,"skipped":false}}}',
+                loading: false,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Choose scope?'), findsOneWidget);
+      expect(find.text('Complete'), findsOneWidget);
+
+      await tester.tap(find.byIcon(Lucide.ChevronUp).last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+
+      expect(find.text('Choose scope?'), findsNothing);
+      expect(find.text('Complete'), findsNothing);
+    });
+
+    testWidgets('ask user card can submit skipped answer', (tester) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      final askUserService = AskUserInteractionService();
+      final answerFuture = askUserService.requestAnswer(
+        toolCallId: 'ask-skip',
+        arguments: const {
+          'questions': [
+            {
+              'id': 'scope',
+              'question': 'Choose scope?',
+              'type': 'single',
+              'options': ['Minimal', 'Complete'],
+            },
+          ],
+        },
+      );
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          askUserService: askUserService,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Let me ask first.',
+              conversationId: 'conversation-ask-user-skip',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            toolParts: const [
+              ToolUIPart(
+                id: 'ask-skip',
+                toolName: 'ask_user_input_v0',
+                arguments: {
+                  'questions': [
+                    {
+                      'id': 'scope',
+                      'question': 'Choose scope?',
+                      'type': 'single',
+                      'options': ['Minimal', 'Complete'],
+                    },
+                  ],
+                },
+                loading: true,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      await tester.tap(find.text('Skip'));
+      await tester.pump();
+      await tester.tap(find.text('Submit answer'));
+      await tester.pump();
+
+      final result = await answerFuture;
+      final payload = jsonDecode(result.toJsonString()) as Map<String, dynamic>;
+      expect(payload['answers']['scope']['skipped'], isTrue);
+    });
+
+    testWidgets('restored pending ask user card submits recovered answer', (
+      tester,
+    ) async {
+      final settings = await _createSettings(
+        ChatMessageBackgroundStyle.defaultStyle,
+      );
+      ToolUIPart? submittedPart;
+      AskUserResult? submittedResult;
+
+      await tester.pumpWidget(
+        _buildHarness(
+          settings: settings,
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              role: 'assistant',
+              content: 'Let me ask first.',
+              conversationId: 'conversation-ask-user-recovered',
+              isStreaming: true,
+            ),
+            showModelIcon: false,
+            onRecoveredAskUserAnswer: (part, result) async {
+              submittedPart = part;
+              submittedResult = result;
+            },
+            toolParts: const [
+              ToolUIPart(
+                id: 'ask-recovered',
+                toolName: 'ask_user_input_v0',
+                arguments: {
+                  'questions': [
+                    {
+                      'id': 'scope',
+                      'question': 'Choose scope?',
+                      'type': 'single',
+                      'options': ['Minimal', 'Complete'],
+                    },
+                  ],
+                },
+                loading: true,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.text(
+          'This question is no longer active. Regenerate or continue the conversation.',
+        ),
+        findsNothing,
+      );
+      expect(find.text('Complete'), findsOneWidget);
+
+      await tester.tap(find.text('Complete'));
+      await tester.pump();
+      await tester.tap(find.text('Submit answer'));
+      await tester.pump();
+
+      expect(submittedPart?.id, 'ask-recovered');
+      final payload =
+          jsonDecode(submittedResult!.toJsonString()) as Map<String, dynamic>;
+      expect(payload['answers']['scope']['value'], 'Complete');
+    });
+  });
+}

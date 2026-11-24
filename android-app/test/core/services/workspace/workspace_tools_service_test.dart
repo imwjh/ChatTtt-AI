@@ -1,0 +1,1895 @@
+import 'package:image/image.dart' as img;
+// ignore: depend_on_referenced_packages
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:Kelivo/utils/sandbox_path_resolver.dart';
+import '../../../support/claude_test_api.dart' show FakePathProviderPlatform;
+import 'package:Kelivo/core/models/tool_permission_mode.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+
+import 'package:Kelivo/core/models/workspace.dart';
+import 'package:Kelivo/core/models/environment_variable.dart';
+import 'package:Kelivo/core/models/workspace_binding.dart';
+import 'package:Kelivo/core/services/api/tool_call_cancellation.dart';
+import 'package:Kelivo/core/services/workspace/file_link_resolver.dart';
+import 'package:Kelivo/core/services/workspace/tool_run_registry.dart';
+import 'package:Kelivo/core/services/workspace/workspace_app_storage.dart';
+import 'package:Kelivo/core/services/workspace/workspace_paths.dart';
+import 'package:Kelivo/core/services/workspace/workspace_runtime.dart';
+import 'package:Kelivo/core/services/workspace/desktop_shell.dart';
+import 'package:Kelivo/core/services/workspace/workspace_tools_service.dart';
+import 'package:Kelivo/features/home/services/tool_approval_service.dart';
+import 'package:Kelivo/utils/mcp_structured_image.dart';
+
+import '../../../support/fake_workspace_runtime.dart';
+
+class _RecordingApproval extends ToolApprovalService {
+  int calls = 0;
+  String? lastName;
+  bool allow = true;
+  String denyReason = 'nope';
+
+  @override
+  Future<ToolApprovalResult> requestApproval({
+    required String toolCallId,
+    required String toolName,
+    required Map<String, dynamic> arguments,
+    String? conversationId,
+    String? workspaceId,
+    String? assistantId,
+    String? requestedPath,
+    String? realTarget,
+  }) async {
+    calls++;
+    lastName = toolName;
+    if (allow) return ToolApprovalResult.approved();
+    return ToolApprovalResult.denied(denyReason);
+  }
+}
+
+class _SandboxedRuntime extends FakeWorkspaceRuntime {
+  @override
+  Future<RuntimeStatus> status() async {
+    return const RuntimeStatus(ready: true, engine: 'fake', sandboxed: true);
+  }
+}
+
+class _InterruptedWriter extends FakeWorkspaceRuntime {
+  _InterruptedWriter(this.throwError);
+  final bool throwError;
+  @override
+  Stream<CommandEvent> run(CommandRequest request) async* {
+    yield const CommandStarted();
+    File(p.join(request.cwd, 'partial.txt')).writeAsStringSync('saved');
+    if (throwError) throw StateError('stream interrupted');
+  }
+}
+
+class _PausedShellRuntime extends FakeWorkspaceRuntime {
+  _PausedShellRuntime({this.finishFirst});
+
+  final Future<void> Function()? finishFirst;
+  final firstStarted = Completer<void>();
+  final secondStarted = Completer<void>();
+  final releaseFirst = Completer<void>();
+
+  @override
+  Stream<CommandEvent> run(CommandRequest request) async* {
+    requests.add(request);
+    yield const CommandStarted();
+    if (request.command == 'first') {
+      firstStarted.complete();
+      await releaseFirst.future;
+      await finishFirst?.call();
+    } else {
+      secondStarted.complete();
+    }
+    await File(
+      p.join(request.cwd, '${request.command}.txt'),
+    ).writeAsString('done');
+    yield const CommandExited(
+      exitCode: 0,
+      timedOut: false,
+      cancelled: false,
+      interrupted: false,
+      duration: Duration.zero,
+    );
+  }
+}
+
+void main() {
+  final canRunReal = Platform.isMacOS || Platform.isLinux;
+
+  late Directory tmp;
+  late PathProviderPlatform originalPaths;
+  late Directory workspaceDir;
+  late Directory sessionDir;
+  late Directory skillsDir;
+  late Map<String, Map<String, dynamic>> extrasById;
+  late List<String> touched;
+  late ToolRunRegistry registry;
+
+  setUp(() async {
+    tmp = await Directory.systemTemp.createTemp('kelivo_ws_tools_');
+    originalPaths = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = FakePathProviderPlatform(tmp.path);
+    SandboxPathResolver.debugSetDirs(docsDir: tmp.path);
+    workspaceDir = Directory(p.join(tmp.path, 'ws'))..createSync();
+    sessionDir = Directory(p.join(tmp.path, 'session'))..createSync();
+    Directory(p.join(sessionDir.path, 'attachments')).createSync();
+    Directory(p.join(sessionDir.path, 'outputs')).createSync();
+    skillsDir = Directory(p.join(tmp.path, 'skills'))..createSync();
+    extrasById = <String, Map<String, dynamic>>{};
+    touched = <String>[];
+    registry = ToolRunRegistry();
+  });
+
+  tearDown(() async {
+    PathProviderPlatform.instance = originalPaths;
+    SandboxPathResolver.debugSetDirs();
+    if (await tmp.exists()) await tmp.delete(recursive: true);
+  });
+
+  Workspace workspace({bool shellNeedsApproval = false}) {
+    return Workspace(
+      id: 'ws1',
+      name: 'Test',
+      kind: WorkspaceKind.managed,
+      shellNeedsApproval: shellNeedsApproval,
+      createdAt: DateTime.utc(2026, 1, 1),
+      updatedAt: DateTime.utc(2026, 1, 1),
+    );
+  }
+
+  WorkspaceToolContext ctx({
+    bool sandboxed = false,
+    bool fullAccess = true,
+    bool toolsUsed = false,
+    bool shellNeedsApproval = false,
+    RuntimeStatus? status,
+    bool runtimeRegistered = true,
+    Set<String> disabledTools = const {},
+    List<Mount> externalMounts = const [],
+    Future<List<Mount>> Function()? loadExternalMounts,
+    Directory? workspaceOverride,
+    Directory? sessionOverride,
+    String conversationId = 'conv-1',
+  }) {
+    final root = workspaceOverride ?? workspaceDir;
+    final session = sessionOverride ?? sessionDir;
+    final paths = sandboxed
+        ? WorkspacePaths.sandboxed(
+            externalMounts: externalMounts,
+            loadExternalMounts: loadExternalMounts,
+            workspaceHostRoot: root.path,
+            sessionHostDir: session.path,
+            skillsHostDir: skillsDir.path,
+          )
+        : WorkspacePaths.native(
+            workspaceHostRoot: root.path,
+            sessionHostDir: session.path,
+            skillsHostDir: skillsDir.path,
+          );
+    return WorkspaceToolContext(
+      workspace: workspace(
+        shellNeedsApproval: shellNeedsApproval,
+      ).copyWith(disabledTools: disabledTools),
+      permissionMode: fullAccess
+          ? ToolPermissionMode.fullAccess
+          : ToolPermissionMode.requestApproval,
+      binding: WorkspaceBinding(workspaceId: 'ws1', toolsUsed: toolsUsed),
+      paths: paths,
+      sessionDir: session,
+      outputsDir: Directory(p.join(session.path, 'outputs')),
+      conversationId: conversationId,
+      runtimeStatus:
+          status ??
+          RuntimeStatus(ready: true, engine: 'fake', sandboxed: sandboxed),
+      runtimeRegistered: runtimeRegistered,
+    );
+  }
+
+  WorkspaceToolsService service({
+    WorkspaceRuntime? runtime,
+    bool registerRuntime = true,
+    Future<void> Function()? refreshSkills,
+    Future<EnvironmentExecutionConfig> Function()? loadEnvironment,
+    ToolPermissionState? Function(String)? readPermissionState,
+  }) {
+    final provider = WorkspaceRuntimeProvider();
+    if (registerRuntime && runtime != null) {
+      provider.register(runtime);
+    }
+    return WorkspaceToolsService(
+      registry: registry,
+      runtimeProvider: provider,
+      refreshSkills: refreshSkills,
+      loadEnvironment: loadEnvironment,
+      readPermissionState: readPermissionState,
+      updateConversationExtras: (id, update) async {
+        extrasById[id] = update(extrasById[id] ?? <String, dynamic>{});
+      },
+      touchLastUsed: (id) async => touched.add(id),
+    );
+  }
+
+  ClientToolResult client(Object? raw) => ClientToolResult.fromHandler(raw);
+
+  Map<String, dynamic> jsonOf(Object? raw) {
+    final decoded = jsonDecode(client(raw).content);
+    return Map<String, dynamic>.from(decoded as Map);
+  }
+
+  WorkspaceToolMetadata metaOf(Object? raw) {
+    return WorkspaceToolMetadata.fromJson(client(raw).metadata!);
+  }
+
+  test(
+    'environment injection uses raw values but shell and file results are private',
+    () async {
+      const secret = 'test-token-秘密-123';
+      var config = EnvironmentExecutionConfig(variables: {'TOKEN': secret});
+      final runtime = FakeWorkspaceRuntime(useRealProcess: true);
+      final tools = service(
+        runtime: runtime,
+        loadEnvironment: () async => config,
+      );
+      final context = ctx();
+      final raw = await tools.handle(context, 'shell', {
+        'command':
+            r'printf "%s" "$TOKEN"; printf "%s" "$TOKEN" >&2; printf "%s" "$TOKEN" > secret.txt; exit 1',
+      }, toolCallId: 'env-shell');
+      expect(runtime.requests.single.env['TOKEN'], secret);
+      expect(runtime.requests.single.env['NO_COLOR'], '1');
+      expect(client(raw).content, isNot(contains(secret)));
+      expect(jsonOf(raw)['exit_code'], 1);
+      expect(metaOf(raw).stdoutPreview, secret);
+      expect(metaOf(raw).stderrPreview, secret);
+      final read = await tools.handle(context, 'read_file', {
+        'path': 'secret.txt',
+      }, toolCallId: 'env-read');
+      expect(client(read).content, contains('[REDACTED]'));
+      expect(client(read).content, isNot(contains(secret)));
+      expect(metaOf(read).stdoutPreview, contains(secret));
+      config = EnvironmentExecutionConfig(
+        variables: {'TOKEN': secret},
+        privacyMode: false,
+      );
+      final unmasked = await tools.handle(context, 'shell', {
+        'command': r'printf "%s" "$TOKEN"',
+      }, toolCallId: 'env-off');
+      expect(client(unmasked).content, contains(secret));
+      config = EnvironmentExecutionConfig();
+      await tools.handle(context, 'shell', {
+        'command': 'true',
+      }, toolCallId: 'env-removed');
+      expect(runtime.requests.last.env.containsKey('TOKEN'), isFalse);
+    },
+    skip: !canRunReal,
+  );
+
+  test(
+    'execution and redaction share a snapshot when settings change mid-command',
+    () async {
+      var config = EnvironmentExecutionConfig(
+        variables: {'TOKEN': 'old-secret'},
+      );
+      final tools = service(
+        runtime: FakeWorkspaceRuntime(useRealProcess: true),
+        loadEnvironment: () async => config,
+        refreshSkills: () async {
+          config = EnvironmentExecutionConfig(
+            variables: {'TOKEN': 'new-secret'},
+          );
+        },
+      );
+      final output = await tools.handle(ctx(), 'shell', {
+        'command': r'printf "%s" "$TOKEN"',
+      }, toolCallId: 'snapshot');
+      expect(client(output).content, isNot(contains('old-secret')));
+      expect(metaOf(output).stdoutPreview, 'old-secret');
+    },
+    skip: !canRunReal,
+  );
+
+  test(
+    'offloaded command output is redacted when the model reads it later',
+    () async {
+      const secret = 'long-output-secret-token';
+      final stdout = List.filled(1600, '$secret\n').join();
+      final runtime = FakeWorkspaceRuntime();
+      runtime.enqueueNext([
+        CommandOutput(
+          OutputStreamKind.stdout,
+          Uint8List.fromList(utf8.encode(stdout)),
+        ),
+        const CommandExited(
+          exitCode: 0,
+          timedOut: false,
+          cancelled: false,
+          interrupted: false,
+          duration: Duration.zero,
+        ),
+      ]);
+      final tools = service(
+        runtime: runtime,
+        loadEnvironment: () async =>
+            EnvironmentExecutionConfig(variables: {'TOKEN': secret}),
+      );
+      final context = ctx();
+      final result = await tools.handle(context, 'shell', {
+        'command': 'produce-output',
+      }, toolCallId: 'private-offload');
+      final outputPath = jsonOf(result)['output_file'] as String;
+      expect(client(result).content, isNot(contains(secret)));
+      expect(await File(outputPath).readAsString(), contains(secret));
+      final read = await tools.handle(context, 'read_file', {
+        'path': outputPath,
+        'limit': 10,
+      }, toolCallId: 'read-private-offload');
+      expect(client(read).content, contains('[REDACTED]'));
+      expect(client(read).content, isNot(contains(secret)));
+      expect(metaOf(read).stdoutPreview, contains(secret));
+    },
+  );
+
+  for (final shell in [
+    const DesktopShell(
+      r'C:\Program Files\PowerShell\7\pwsh.exe',
+      DesktopShellKind.powerShell,
+      version: '7.6.9',
+    ),
+    const DesktopShell(
+      r'C:\Windows\powershell.exe',
+      DesktopShellKind.powerShell,
+      version: '5.1.19041.1',
+    ),
+    const DesktopShell(r'C:\Windows\cmd.exe', DesktopShellKind.cmd),
+    const DesktopShell('/bin/zsh', DesktopShellKind.posix),
+  ]) {
+    test(
+      'tool schema uses ${shell.name} and the prompt lists its variable references',
+      () {
+        final context = ctx(
+          status: RuntimeStatus(
+            ready: true,
+            engine: 'process',
+            sandboxed: false,
+            shell: shell,
+          ),
+        );
+        final definition = service()
+            .buildToolDefinitions(context)
+            .firstWhere((tool) => (tool['function'] as Map)['name'] == 'shell');
+        final schema = (definition['function'] as Map)['description'] as String;
+        final prompt = WorkspaceToolsService.buildPromptFragment(
+          context,
+          environmentVariableNames: ['API_KEY'],
+        );
+        expect(schema, contains(shell.name));
+        expect(schema, contains(shell.invocation));
+        expect(prompt, isNot(contains('Fresh non-interactive')));
+        expect(
+          prompt,
+          contains('Use ${shell.environmentReference} references'),
+        );
+        expect(schema, contains(shell.syntaxHint));
+        expect(schema, contains('Use non-interactive flags'));
+        expect(
+          schema,
+          contains('${context.paths.sessionHostDir}/outputs/<id>.txt'),
+        );
+        expect(schema, isNot(contains('sh -lc')));
+        if (shell.version?.startsWith('5.') == true) {
+          expect(schema, isNot(contains('Chain with &&.')));
+        }
+      },
+    );
+  }
+
+  test('tool execution carries the shell used in the model prompt', () async {
+    const shell = DesktopShell('/bin/zsh', DesktopShellKind.posix);
+    final runtime = FakeWorkspaceRuntime();
+    final context = ctx(
+      fullAccess: true,
+      status: const RuntimeStatus(
+        ready: true,
+        engine: 'process',
+        sandboxed: false,
+        shell: shell,
+      ),
+    );
+    await service(runtime: runtime).handle(context, 'shell', {
+      'command': 'print ok',
+    }, toolCallId: 'shell-snapshot');
+    expect(runtime.requests.single.shell, same(shell));
+  });
+
+  test('unavailable native shell points to shell settings', () {
+    final context = ctx(
+      status: const RuntimeStatus(
+        ready: false,
+        engine: 'process',
+        sandboxed: false,
+      ),
+    );
+    final prompt = WorkspaceToolsService.buildPromptFragment(context);
+    expect(prompt, contains('Environment > Default shell'));
+    expect(prompt, isNot(contains('Sandbox environment not installed')));
+  });
+
+  test('workspace session facts are independent of file tool selection', () {
+    String fragment(Set<String> disabled) =>
+        WorkspaceToolsService.buildPromptFragment(
+          ctx(disabledTools: disabled),
+          environmentVariableNames: ['MODEL_ENV'],
+        );
+    const prefer = 'Prefer read_file, edit_file, and write_file over cat/sed.';
+    final all = fragment({});
+    expect(all, contains('MODEL_ENV'));
+    expect(all, isNot(contains(prefer)));
+    for (final text in [
+      'Enabled tools:',
+      'shell is one-shot',
+      'Always read_file before editing.',
+      'Use non-interactive flags',
+      'long output is saved',
+    ]) {
+      expect(all, isNot(contains(text)));
+    }
+    final withoutShell = fragment({'shell'});
+    expect(withoutShell, isNot(contains('MODEL_ENV')));
+    expect(withoutShell, isNot(contains(prefer)));
+    for (final name in ['read_file', 'edit_file', 'write_file']) {
+      expect(fragment({name}), all, reason: name);
+    }
+    final edit = service()
+        .buildToolDefinitions(ctx())
+        .singleWhere((tool) => tool['function']['name'] == 'edit_file');
+    expect(
+      edit['function']['description'],
+      contains('Read the file before editing.'),
+    );
+  });
+
+  test('workspace prompt lists names without including values', () {
+    final prompt = WorkspaceToolsService.buildPromptFragment(
+      ctx(),
+      environmentVariableNames: ['API_KEY', 'BASE_URL'],
+    );
+    expect(prompt, contains('API_KEY, BASE_URL'));
+    expect(prompt, contains(r'Use $NAME references'));
+  });
+
+  test('post-command refresh runs for every execution outcome', () async {
+    final runtime = FakeWorkspaceRuntime();
+    var refreshes = 0;
+    final tools = service(
+      runtime: runtime,
+      refreshSkills: () async {
+        refreshes++;
+      },
+    );
+    for (final status in [
+      'ok',
+      'failed',
+      'cancelled',
+      'timed_out',
+      'no_exit',
+    ]) {
+      runtime.enqueueNext([
+        const CommandStarted(pid: 0),
+        if (status != 'no_exit')
+          CommandExited(
+            exitCode: status == 'ok' ? 0 : 1,
+            timedOut: status == 'timed_out',
+            cancelled: status == 'cancelled',
+            interrupted: false,
+            duration: Duration.zero,
+          ),
+      ]);
+      await tools.handle(ctx(), 'shell', {
+        'command': 'install',
+      }, toolCallId: status);
+    }
+    expect(refreshes, 5);
+    await tools.handle(ctx(), 'read_file', {
+      'path': 'missing',
+    }, toolCallId: 'read');
+    await tools.handle(ctx(), 'write_file', {
+      'path': 'workspace.txt',
+      'content': 'project file',
+    }, toolCallId: 'write-workspace');
+    await tools.handle(ctx(), 'shell', {}, toolCallId: 'invalid');
+    await tools.handle(ctx(disabledTools: {'shell'}), 'shell', {
+      'command': 'install',
+    }, toolCallId: 'disabled');
+    await tools.handle(
+      ctx(fullAccess: false, shellNeedsApproval: true),
+      'shell',
+      {'command': 'install'},
+      toolCallId: 'denied',
+      approvalService: _RecordingApproval()..allow = false,
+    );
+    expect(refreshes, 5);
+  });
+
+  test('refresh failures do not change a successful command result', () async {
+    final tools = service(
+      runtime: FakeWorkspaceRuntime(),
+      refreshSkills: () async {
+        throw const FileSystemException('unavailable');
+      },
+    );
+    final result = await tools.handle(ctx(), 'shell', {
+      'command': 'echo done',
+    }, toolCallId: 'refresh-fails');
+    expect(metaOf(result).status, 'ok');
+    expect(jsonOf(result)['exit_code'], 0);
+  });
+
+  test(
+    'disabled tools are omitted and rejected before any side effects',
+    () async {
+      final tools = service(
+        runtime: FakeWorkspaceRuntime(useRealProcess: true),
+      );
+      final context = ctx(disabledTools: WorkspaceToolsService.toolNames);
+      expect(tools.buildToolDefinitions(context), isEmpty);
+      final approval = _RecordingApproval();
+      final target = File(p.join(workspaceDir.path, 'untouched.txt'));
+      await target.writeAsString('original');
+      for (final name in WorkspaceToolsService.toolNames) {
+        final result = await tools.handle(
+          context,
+          name,
+          {
+            'path': target.path,
+            'command': 'exit 0',
+            'content': 'changed',
+            'old_string': 'original',
+            'new_string': 'changed',
+            'pattern': '*',
+          },
+          toolCallId: 'disabled-$name',
+          approvalService: approval,
+        );
+        expect(jsonOf(result)['error'], 'tool_disabled', reason: name);
+      }
+      expect(await target.readAsString(), 'original');
+      expect(approval.calls, 0);
+      expect(extrasById, isEmpty);
+      expect(touched, isEmpty);
+      expect(
+        WorkspaceToolsService.buildPromptFragment(context),
+        isNot(contains('shell is one-shot')),
+      );
+    },
+  );
+
+  test(
+    'execution rechecks current switches after definitions were built',
+    () async {
+      var enabled = true;
+      final tools = WorkspaceToolsService(isToolEnabled: (_, _) => enabled);
+      final context = ctx();
+      expect(tools.buildToolDefinitions(context), hasLength(8));
+      enabled = false;
+      expect(
+        jsonOf(
+          await tools.handle(
+            context,
+            'list_dir',
+            {},
+            toolCallId: 'disabled-later',
+          ),
+        )['error'],
+        'tool_disabled',
+      );
+      enabled = true;
+      expect(
+        metaOf(
+          await tools.handle(
+            context,
+            'list_dir',
+            {},
+            toolCallId: 'enabled-again',
+          ),
+        ).status,
+        'ok',
+      );
+    },
+  );
+
+  group('shell', () {
+    test(
+      'normalizes progress before output limits and shares the result',
+      () async {
+        final runtime = FakeWorkspaceRuntime();
+        runtime.enqueueNext([
+          CommandOutput(
+            OutputStreamKind.stdout,
+            utf8.encode('header\r\n${'\rdownloading 1234567890' * 10000}'),
+          ),
+          CommandOutput(OutputStreamKind.stderr, utf8.encode('10%\r')),
+          CommandOutput(
+            OutputStreamKind.stdout,
+            utf8.encode('\r\x1b[32m完成 😀'),
+          ),
+          CommandOutput(OutputStreamKind.stderr, utf8.encode('100%\r')),
+          CommandOutput(OutputStreamKind.stdout, utf8.encode('\x1b[0m\r')),
+          CommandOutput(OutputStreamKind.stderr, utf8.encode('\n')),
+          const CommandExited(
+            exitCode: 0,
+            timedOut: false,
+            cancelled: false,
+            interrupted: false,
+            duration: Duration.zero,
+          ),
+        ]);
+        final tools = service(runtime: runtime);
+        final result = await tools.handle(ctx(), 'shell', {
+          'command': 'download',
+        }, toolCallId: 'progress');
+        final payload = jsonOf(result);
+        final meta = metaOf(result);
+        final run = registry.of('progress', conversationId: 'conv-1')!;
+        expect(payload['stdout'], 'header\n完成 😀');
+        expect(payload['stderr'], '100%\n');
+        expect(payload['truncated'], isNot(true));
+        expect(payload['output_file'], isNull);
+        expect(meta.stdoutPreview, payload['stdout']);
+        expect(meta.stderrPreview, payload['stderr']);
+        expect(run.stdoutSoFar, payload['stdout']);
+        expect(run.stderrSoFar, payload['stderr']);
+        expect(run.tailLines, ['header', '完成 😀', '100%']);
+        expect(run.totalBytes, greaterThan(128 * 1024));
+        expect(run.stdoutTruncated, isFalse);
+      },
+    );
+
+    test(
+      'offloaded shell text is normalized while file contents stay intact',
+      () async {
+        final log = '${'log line\n' * 5000}10%\r100%';
+        final runtime = FakeWorkspaceRuntime();
+        runtime.enqueueNext([
+          CommandOutput(OutputStreamKind.stdout, utf8.encode(log)),
+          CommandOutput(
+            OutputStreamKind.stderr,
+            utf8.encode('\x1b[31merror\x1b[0m\r\n'),
+          ),
+          const CommandExited(
+            exitCode: 1,
+            timedOut: false,
+            cancelled: false,
+            interrupted: false,
+            duration: Duration.zero,
+          ),
+        ]);
+        final tools = service(runtime: runtime);
+        final context = ctx();
+        final result = await tools.handle(context, 'shell', {
+          'command': 'download',
+        }, toolCallId: 'progress-log');
+        final stored = await File(
+          jsonOf(result)['output_file'] as String,
+        ).readAsString();
+        expect(stored, contains('${'log line\n' * 5000}100%'));
+        expect(stored, contains('error\n'));
+        expect(stored, isNot(contains('\r')));
+        expect(stored, isNot(contains('\x1b')));
+        expect(metaOf(result).stdoutPreview, endsWith('100%'));
+        expect(metaOf(result).stderrPreview, 'error\n');
+
+        const rawFile = '10%\r50%\r100%';
+        await File(p.join(workspaceDir.path, 'raw.txt')).writeAsString(rawFile);
+        final read = await tools.handle(context, 'read_file', {
+          'path': 'raw.txt',
+        }, toolCallId: 'read-raw');
+        expect(
+          await File(p.join(workspaceDir.path, 'raw.txt')).readAsString(),
+          rawFile,
+        );
+        for (final frame in ['10%', '50%', '100%']) {
+          expect(client(read).content, contains(frame));
+        }
+      },
+    );
+
+    test(
+      'happy path prints stdout and exit 0',
+      skip: canRunReal ? false : 'needs /bin/sh',
+      () async {
+        final tools = service(
+          runtime: FakeWorkspaceRuntime(useRealProcess: true),
+        );
+        final result = await tools.handle(ctx(), 'shell', {
+          'command': r"printf 'a\nb'",
+        }, toolCallId: 'run-printf');
+        final payload = jsonOf(result);
+        expect(payload['stdout'], contains('a'));
+        expect(payload['stdout'], contains('b'));
+        expect(payload['exit_code'], 0);
+        expect(payload['timed_out'], isFalse);
+        expect(metaOf(result).status, 'ok');
+      },
+    );
+
+    test(
+      'non-zero exit code is reported',
+      skip: canRunReal ? false : 'needs /bin/sh',
+      () async {
+        final tools = service(
+          runtime: FakeWorkspaceRuntime(useRealProcess: true),
+        );
+        final payload = jsonOf(
+          await tools.handle(ctx(), 'shell', {
+            'command': 'exit 7',
+          }, toolCallId: 'run-exit'),
+        );
+        expect(payload['exit_code'], 7);
+      },
+    );
+
+    test(
+      'timeout_seconds: 1 kills sleep 5',
+      skip: canRunReal ? false : 'needs /bin/sh',
+      () async {
+        final tools = service(
+          runtime: FakeWorkspaceRuntime(useRealProcess: true),
+        );
+        final result = await tools.handle(ctx(), 'shell', {
+          'command': 'sleep 5',
+          'timeout_seconds': 1,
+        }, toolCallId: 'run-sleep');
+        expect(jsonOf(result)['timed_out'], isTrue);
+        expect(metaOf(result).status, 'timeout');
+      },
+    );
+
+    test(
+      'large output is offloaded',
+      skip: canRunReal ? false : 'needs /bin/sh',
+      () async {
+        final tools = service(
+          runtime: FakeWorkspaceRuntime(useRealProcess: true),
+        );
+        final result = await tools.handle(ctx(), 'shell', {
+          'command': 'seq 1 20000',
+        }, toolCallId: 'run-seq');
+        final payload = jsonOf(result);
+        expect(payload['truncated'], isTrue);
+        expect(payload['output_file'], isNotNull);
+        final offload = File(p.join(sessionDir.path, 'outputs', 'run-seq.txt'));
+        expect(offload.existsSync(), isTrue);
+        expect(
+          metaOf(result).files
+              .where((file) => file.role == WorkspaceFileRole.log)
+              .single
+              .link,
+          isNotNull,
+        );
+      },
+    );
+
+    test(
+      'changed_files lists the model path of a new workspace file',
+      skip: canRunReal ? false : 'needs /bin/sh',
+      () async {
+        final tools = service(
+          runtime: FakeWorkspaceRuntime(useRealProcess: true),
+        );
+        final context = ctx();
+        final result = await tools.handle(context, 'shell', {
+          'command': 'echo hi > new.txt',
+        }, toolCallId: 'run-write');
+        final payload = jsonOf(result);
+        final changed = (payload['changed_files'] as List?)?.cast<String>();
+        expect(changed, isNotNull);
+        expect(changed, anyElement(contains('new.txt')));
+        expect(File(p.join(workspaceDir.path, 'new.txt')).existsSync(), isTrue);
+      },
+    );
+
+    test('shared workspace shells attribute only their own changes', () async {
+      final secondSession = await Directory(
+        p.join(tmp.path, 'session-2'),
+      ).create();
+      final projectA = await Directory(
+        p.join(workspaceDir.path, 'project-a'),
+      ).create();
+      final projectB = await Directory(
+        p.join(workspaceDir.path, 'project-b'),
+      ).create();
+      final runtime = _PausedShellRuntime();
+      final first = service(runtime: runtime).handle(ctx(), 'shell', {
+        'command': 'first',
+        'cwd': projectA.path,
+      }, toolCallId: 'first');
+      await runtime.firstStarted.future.timeout(const Duration(seconds: 3));
+      final second = service(runtime: runtime).handle(
+        ctx(sessionOverride: secondSession, conversationId: 'conv-2'),
+        'shell',
+        {'command': 'second', 'cwd': projectB.path},
+        toolCallId: 'second',
+      );
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(runtime.secondStarted.isCompleted, isFalse);
+      } finally {
+        runtime.releaseFirst.complete();
+        await Future.wait([first, second]);
+      }
+      for (final pair in [
+        (await first, 'first.txt'),
+        (await second, 'second.txt'),
+      ]) {
+        final files = metaOf(pair.$1).files;
+        expect(files.map((file) => p.basename(file.path)), [pair.$2]);
+        expect(
+          jsonOf(pair.$1)['changed_files'],
+          files.map((file) => file.path).toList(),
+        );
+      }
+    });
+
+    for (final tool in ['write_file', 'edit_file']) {
+      test(
+        '$tool changes cannot become another conversation shell output',
+        () async {
+          final other = File(p.join(workspaceDir.path, 'other.txt'));
+          if (tool == 'edit_file') {
+            await other.writeAsString('original');
+            await other.setLastModified(DateTime.utc(2000));
+          }
+          final runtime = _PausedShellRuntime();
+          final tools = service(runtime: runtime);
+          final first = tools.handle(ctx(), 'shell', {
+            'command': 'first',
+          }, toolCallId: 'first');
+          await runtime.firstStarted.future.timeout(const Duration(seconds: 3));
+          final write = tools.handle(ctx(conversationId: 'conv-2'), tool, {
+            'path': other.path,
+            if (tool == 'write_file') 'content': 'updated',
+            if (tool == 'edit_file') ...{
+              'old_string': 'original',
+              'new_string': 'updated',
+            },
+          }, toolCallId: 'write');
+          try {
+            await Future<void>.delayed(const Duration(milliseconds: 30));
+            expect(
+              await other.exists() ? await other.readAsString() : null,
+              tool == 'edit_file' ? 'original' : null,
+            );
+          } finally {
+            runtime.releaseFirst.complete();
+            await Future.wait([first, write]);
+          }
+          expect(
+            metaOf(await first).files.map((file) => p.basename(file.path)),
+            ['first.txt'],
+          );
+          expect(
+            metaOf(await write).files.map((file) => p.basename(file.path)),
+            ['other.txt'],
+          );
+          expect(await other.readAsString(), 'updated');
+        },
+      );
+    }
+
+    test('skill edits wait for shell changes to the shared library', () async {
+      final entrypoint = File(p.join(skillsDir.path, 'demo', 'SKILL.md'));
+      await entrypoint.parent.create();
+      await entrypoint.writeAsString('original\n');
+      final runtime = _PausedShellRuntime(
+        finishFirst: () => entrypoint.writeAsString('original\nshell note\n'),
+      );
+      final tools = service(runtime: runtime);
+      final first = tools.handle(ctx(), 'shell', {
+        'command': 'first',
+      }, toolCallId: 'first');
+      await runtime.firstStarted.future.timeout(const Duration(seconds: 3));
+      final edit = tools.handle(ctx(conversationId: 'conv-2'), 'edit_file', {
+        'path': entrypoint.path,
+        'old_string': 'original',
+        'new_string': 'edited',
+      }, toolCallId: 'edit-skill');
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(await entrypoint.readAsString(), 'original\n');
+      } finally {
+        runtime.releaseFirst.complete();
+        await Future.wait([first, edit]);
+      }
+      expect(metaOf(await edit).status, 'ok');
+      expect(await entrypoint.readAsString(), 'edited\nshell note\n');
+    });
+
+    test('shell snapshot waits for in-flight web app storage writes', () async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final storage = WorkspaceAppStorage(
+        root: await workspaceDir.resolveSymbolicLinks(),
+        directory: 'notes.app.html.data',
+        authorize: (_, write) async {
+          if (write && !entered.isCompleted) {
+            entered.complete();
+            await release.future;
+          }
+        },
+      );
+      final write = storage.write('state.txt', 'web app data', null);
+      await entered.future.timeout(const Duration(seconds: 3));
+      final runtime = _PausedShellRuntime()..releaseFirst.complete();
+      final shell = service(
+        runtime: runtime,
+      ).handle(ctx(), 'shell', {'command': 'first'}, toolCallId: 'shell');
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(runtime.firstStarted.isCompleted, isFalse);
+      } finally {
+        release.complete();
+        await Future.wait<Object?>([write, shell]);
+      }
+      expect(metaOf(await shell).files.map((file) => p.basename(file.path)), [
+        'first.txt',
+      ]);
+      expect((await storage.read('state.txt'))['content'], 'web app data');
+    });
+
+    test(
+      'cancelling a queued shell does not release the active shell',
+      () async {
+        final runtime = _PausedShellRuntime();
+        final tools = service(runtime: runtime);
+        final first = tools.handle(ctx(), 'shell', {
+          'command': 'first',
+        }, toolCallId: 'first');
+        await runtime.firstStarted.future.timeout(const Duration(seconds: 3));
+        final cancelled = Completer<void>();
+        final cancellation = ToolCallCancellation(
+          isCancelled: () => cancelled.isCompleted,
+          cancelled: cancelled.future,
+        );
+        final second = cancellation.run(
+          () => tools.handle(ctx(), 'shell', {
+            'command': 'cancelled',
+          }, toolCallId: 'cancelled'),
+        );
+        try {
+          await Future.doWhile(() async {
+            await Future<void>.delayed(const Duration(milliseconds: 1));
+            return cancellation.listenerCount == 0;
+          }).timeout(const Duration(seconds: 3));
+          cancelled.complete();
+          final result = await second.timeout(const Duration(seconds: 3));
+          expect(jsonOf(result)['message'], contains('tool_call_cancelled'));
+          expect(cancellation.listenerCount, 0);
+          final third = tools.handle(ctx(), 'shell', {
+            'command': 'third',
+          }, toolCallId: 'third');
+          try {
+            await Future<void>.delayed(const Duration(milliseconds: 30));
+            expect(runtime.secondStarted.isCompleted, isFalse);
+          } finally {
+            runtime.releaseFirst.complete();
+            await Future.wait([first, third]);
+          }
+          expect(
+            metaOf(await third).files.map((file) => p.basename(file.path)),
+            ['third.txt'],
+          );
+          expect(runtime.requests.map((request) => request.command), [
+            'first',
+            'third',
+          ]);
+        } finally {
+          if (!runtime.releaseFirst.isCompleted) {
+            runtime.releaseFirst.complete();
+          }
+          if (!cancelled.isCompleted) cancelled.complete();
+          await Future.wait([first, second]);
+        }
+      },
+    );
+
+    test('independent workspace shells still run concurrently', () async {
+      final otherWorkspace = await Directory(
+        p.join(tmp.path, 'workspace-2'),
+      ).create();
+      final otherSession = await Directory(
+        p.join(tmp.path, 'session-2'),
+      ).create();
+      final runtime = _PausedShellRuntime();
+      final tools = service(runtime: runtime);
+      final first = tools.handle(ctx(), 'shell', {
+        'command': 'first',
+      }, toolCallId: 'first');
+      await runtime.firstStarted.future.timeout(const Duration(seconds: 3));
+      final second = tools.handle(
+        ctx(
+          workspaceOverride: otherWorkspace,
+          sessionOverride: otherSession,
+          conversationId: 'conv-2',
+        ),
+        'shell',
+        {'command': 'second'},
+        toolCallId: 'second',
+      );
+      try {
+        final result = await second.timeout(const Duration(seconds: 3));
+        expect(metaOf(result).files.map((file) => p.basename(file.path)), [
+          'second.txt',
+        ]);
+        expect(runtime.releaseFirst.isCompleted, isFalse);
+      } finally {
+        runtime.releaseFirst.complete();
+        await Future.wait([first, second]);
+      }
+    });
+
+    test(
+      'native cwd in another workspace shares its snapshot exclusion',
+      () async {
+        final otherWorkspace = await Directory(
+          p.join(tmp.path, 'workspace-2'),
+        ).create();
+        final otherSession = await Directory(
+          p.join(tmp.path, 'session-2'),
+        ).create();
+        final runtime = _PausedShellRuntime();
+        final tools = service(runtime: runtime);
+        final first = tools.handle(ctx(), 'shell', {
+          'command': 'first',
+          'cwd': otherWorkspace.path,
+        }, toolCallId: 'first');
+        await runtime.firstStarted.future.timeout(const Duration(seconds: 3));
+        final second = tools.handle(
+          ctx(
+            workspaceOverride: otherWorkspace,
+            sessionOverride: otherSession,
+            conversationId: 'conv-2',
+          ),
+          'shell',
+          {'command': 'second'},
+          toolCallId: 'second',
+        );
+        try {
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          expect(runtime.secondStarted.isCompleted, isFalse);
+        } finally {
+          runtime.releaseFirst.complete();
+          await Future.wait([first, second]);
+        }
+        expect(
+          metaOf(await second).files.map((file) => p.basename(file.path)),
+          ['second.txt'],
+        );
+        expect(
+          await File(p.join(otherWorkspace.path, 'first.txt')).readAsString(),
+          'done',
+        );
+      },
+    );
+
+    test('environment_not_ready when runtime is null', () async {
+      final tools = service(registerRuntime: false);
+      final result = await tools.handle(
+        ctx(runtimeRegistered: false, status: null),
+        'shell',
+        {'command': 'echo hi'},
+        toolCallId: 'run-none',
+      );
+      final payload = jsonOf(result);
+      expect(payload['error'], 'environment_not_ready');
+      expect(payload['instruction'], contains('Settings → Workspace'));
+      expect(metaOf(result).status, 'error');
+      expect(metaOf(result).code, 'environment_not_ready');
+    });
+  });
+
+  group('file tools', () {
+    test(
+      'external mounts appear in prompt and readonly beats allow-all',
+      () async {
+        final dir = Directory(p.join(tmp.path, 'external'))..createSync();
+        final file = File(p.join(dir.path, 'note.txt'))
+          ..writeAsStringSync('original');
+        const guest = '/mounts/Notes';
+        final context = ctx(
+          sandboxed: true,
+          externalMounts: [Mount(host: dir.path, guest: guest, readOnly: true)],
+        );
+        final prompt = WorkspaceToolsService.buildPromptFragment(context);
+        expect(prompt, contains('/mounts/<name>/'));
+        expect(
+          prompt,
+          contains('File tools reject writes to read-only mounts'),
+        );
+        expect(prompt, isNot(contains('<external_mounts>')));
+        expect(prompt, contains('Read-only: $guest.'));
+        expect(prompt, contains('respect this in Shell too'));
+        final approval = _RecordingApproval();
+        final result = await service().handle(
+          context,
+          'write_file',
+          {'path': '$guest/note.txt', 'content': 'bad'},
+          toolCallId: 'mount-write',
+          approvalService: approval,
+        );
+        expect(metaOf(result).code, 'mount_readonly');
+        expect(approval.calls, 0);
+        expect(file.readAsStringSync(), 'original');
+      },
+    );
+
+    test(
+      'mount permission is rechecked before the actual file write',
+      () async {
+        final dir = Directory(p.join(tmp.path, 'external'))..createSync();
+        final file = File(p.join(dir.path, 'note.txt'))
+          ..writeAsStringSync('original');
+        const guest = '/mounts/Notes';
+        var resolves = 0;
+        List<Mount> current() => [
+          Mount(host: dir.path, guest: guest, readOnly: resolves > 1),
+        ];
+        final context = ctx(
+          sandboxed: true,
+          externalMounts: current(),
+          loadExternalMounts: () async {
+            resolves++;
+            return current();
+          },
+        );
+        final approval = _RecordingApproval();
+        final result = await service().handle(
+          context,
+          'write_file',
+          {'path': '$guest/note.txt', 'content': 'bad'},
+          toolCallId: 'mount-write',
+          approvalService: approval,
+        );
+        expect(approval.calls, 0);
+        expect(metaOf(result).status, 'denied');
+        expect(file.readAsStringSync(), 'original');
+      },
+    );
+
+    test('read_file numbers text and reports next offset', () async {
+      File(p.join(workspaceDir.path, 'n.txt')).writeAsStringSync('a\nb\nc\n');
+      final tools = service();
+      final result = await tools.handle(ctx(), 'read_file', {
+        'path': p.join(workspaceDir.path, 'n.txt'),
+        'offset': 2,
+        'limit': 1,
+      }, toolCallId: 'read-1');
+      final text = client(result).content;
+      expect(text, contains('     2|b'));
+      expect(text, contains('(more lines: use offset=3)'));
+    });
+
+    test('read_file binary returns hex preview', () async {
+      File(
+        p.join(workspaceDir.path, 'blob.bin'),
+      ).writeAsBytesSync(Uint8List.fromList([0x00, 0x01, 0xFF]));
+      final payload = jsonOf(
+        await service().handle(ctx(), 'read_file', {
+          'path': p.join(workspaceDir.path, 'blob.bin'),
+        }, toolCallId: 'read-bin'),
+      );
+      expect(payload['binary'], isTrue);
+      expect(payload['hex_preview'], contains('00'));
+    });
+
+    test('read_file image returns a structured image result', () async {
+      File(
+        p.join(workspaceDir.path, 'pic.png'),
+      ).writeAsBytesSync(img.encodePng(img.Image(width: 2, height: 2)));
+      final result = client(
+        await service().handle(ctx(), 'read_file', {
+          'path': p.join(workspaceDir.path, 'pic.png'),
+        }, toolCallId: 'read-img'),
+      );
+      expect(result.content, contains('![]('));
+      expect(result.metadata, contains(kMcpResultMetadataKey));
+    });
+
+    test('write_file and edit_file content shapes', () async {
+      final tools = service();
+      final native = ctx();
+      final target = p.join(workspaceDir.path, 'note.txt');
+      final written = jsonOf(
+        await tools.handle(native, 'write_file', {
+          'path': target,
+          'content': 'hello world',
+        }, toolCallId: 'write-1'),
+      );
+      expect(written['ok'], isTrue);
+      expect(written['bytes'], greaterThan(0));
+      expect(written['created'], isTrue);
+      expect(written['path'], endsWith('note.txt'));
+      expect(written.containsKey('diff'), isFalse);
+
+      final edited = await tools.handle(native, 'edit_file', {
+        'path': target,
+        'old_string': 'hello',
+        'new_string': 'howdy',
+      }, toolCallId: 'edit-1');
+      final body = jsonOf(edited);
+      expect(body['ok'], isTrue);
+      expect(body['replacements'], 1);
+      expect(body['strategy'], isNotEmpty);
+      expect(body.containsKey('diff'), isFalse);
+      expect(body['added'], isNotNull);
+      expect(body['removed'], isNotNull);
+      expect(metaOf(edited).diff, isNotNull);
+      expect(File(target).readAsStringSync(), contains('howdy'));
+    });
+
+    test('edit failure message is passed through', () async {
+      File(p.join(workspaceDir.path, 'x.txt')).writeAsStringSync('abc');
+      final result = await service().handle(ctx(), 'edit_file', {
+        'path': p.join(workspaceDir.path, 'x.txt'),
+        'old_string': 'zzz',
+        'new_string': 'yyy',
+      }, toolCallId: 'edit-fail');
+      final body = jsonOf(result);
+      expect(body['error'], 'edit_failed');
+      expect(body['message'], contains('old_string'));
+    });
+
+    test('list_dir / glob / grep listings', () async {
+      Directory(p.join(workspaceDir.path, 'sub')).createSync();
+      File(
+        p.join(workspaceDir.path, 'sub', 'a.txt'),
+      ).writeAsStringSync('needle');
+      File(p.join(workspaceDir.path, 'b.md')).writeAsStringSync('hi');
+      final tools = service();
+      final native = ctx();
+
+      final listing = client(
+        await tools.handle(native, 'list_dir', {
+          'path': workspaceDir.path,
+        }, toolCallId: 'list-1'),
+      ).content;
+      expect(listing, contains('sub/'));
+      expect(listing, contains('b.md'));
+
+      final glob = client(
+        await tools.handle(native, 'glob', {
+          'pattern': '**/*.txt',
+          'path': workspaceDir.path,
+        }, toolCallId: 'glob-1'),
+      ).content;
+      expect(glob, contains('a.txt'));
+
+      final grep = client(
+        await tools.handle(native, 'grep', {
+          'pattern': 'needle',
+          'path': workspaceDir.path,
+        }, toolCallId: 'grep-1'),
+      ).content;
+      expect(grep, contains('needle'));
+    });
+
+    test('skills writes cannot follow a link outside the sandbox', () async {
+      final outside = File(p.join(tmp.path, 'outside.txt'))
+        ..writeAsStringSync('old');
+      Link(p.join(skillsDir.path, 'link.txt')).createSync(outside.path);
+      final result = await service().handle(
+        ctx(sandboxed: true, fullAccess: true),
+        'write_file',
+        {'path': '/skills/link.txt', 'content': 'new'},
+        toolCallId: 'skill-write',
+      );
+      expect(jsonOf(result)['error'], 'path_outside');
+      expect(metaOf(result).status, 'denied');
+      expect(outside.readAsStringSync(), 'old');
+    });
+
+    test('skill writes protect bundle receipts and staging paths', () async {
+      final receipt = File(p.join(skillsDir.path, '.bundled-skill-creator'))
+        ..writeAsStringSync('1\n');
+      Link(p.join(skillsDir.path, 'receipt.txt')).createSync(receipt.path);
+      final tools = service();
+      for (final path in [
+        '/skills/.bundled-skill-creator',
+        '/skills/receipt.txt',
+        '/skills/.bundled-visualize/SKILL.md',
+      ]) {
+        final result = await tools.handle(ctx(sandboxed: true), 'write_file', {
+          'path': path,
+          'content': 'overwritten',
+        }, toolCallId: 'metadata-write');
+        expect(metaOf(result).status, 'denied');
+        expect(jsonOf(result)['message'], contains('skill library metadata'));
+      }
+      expect(receipt.readAsStringSync(), '1\n');
+      expect(
+        Directory(p.join(skillsDir.path, '.bundled-visualize')).existsSync(),
+        isFalse,
+      );
+    });
+
+    test('only skill entrypoint writes rescan the library', () async {
+      var refreshes = 0;
+      final tools = service(
+        refreshSkills: () async {
+          refreshes++;
+        },
+      );
+      final context = ctx(sandboxed: true);
+      const resource = '/skills/demo/references/example.md';
+      final writeResource = await tools.handle(context, 'write_file', {
+        'path': resource,
+        'content': 'example',
+      }, toolCallId: 'resource');
+      expect(metaOf(writeResource).status, 'ok');
+      expect(refreshes, 0);
+
+      final writeEntrypoint = await tools.handle(context, 'write_file', {
+        'path': '/skills/demo/SKILL.md',
+        'content': 'original',
+      }, toolCallId: 'entrypoint');
+      expect(metaOf(writeEntrypoint).status, 'ok');
+      expect(refreshes, 1);
+
+      final editResource = await tools.handle(context, 'edit_file', {
+        'path': resource,
+        'old_string': 'example',
+        'new_string': 'changed',
+      }, toolCallId: 'edit-resource');
+      expect(metaOf(editResource).status, 'ok');
+      expect(refreshes, 1);
+
+      Link(
+        p.join(workspaceDir.path, 'skill-alias.md'),
+      ).createSync(p.join(skillsDir.path, 'demo', 'SKILL.md'));
+      final editEntrypoint = await tools.handle(context, 'edit_file', {
+        'path': '/workspace/skill-alias.md',
+        'old_string': 'original',
+        'new_string': 'changed',
+      }, toolCallId: 'edit-entrypoint');
+      expect(metaOf(editEntrypoint).status, 'ok');
+      expect(refreshes, 2);
+    });
+  });
+
+  group('approval', () {
+    test(
+      'shell reads grants and revocations during the same generation',
+      () async {
+        var binding = const ToolPermissionState(workspaceId: 'ws1');
+        final approval = _RecordingApproval();
+        final tools = service(
+          runtime: FakeWorkspaceRuntime(),
+          readPermissionState: (id) {
+            expect(id, 'conv-1');
+            return binding;
+          },
+        );
+        final context = ctx(fullAccess: false);
+        Future<void> run(String id) async {
+          final result = await tools.handle(
+            context,
+            'shell',
+            {'command': 'printf ok'},
+            toolCallId: id,
+            approvalService: approval,
+          );
+          expect(jsonOf(result)['exit_code'], 0);
+        }
+
+        await run('before-grant');
+        expect(approval.calls, 1);
+        binding = const ToolPermissionState(
+          workspaceId: 'ws1',
+          mode: ToolPermissionMode.fullAccess,
+        );
+        await run('after-grant');
+        await run('next-command');
+        expect(approval.calls, 1);
+        binding = const ToolPermissionState(workspaceId: 'ws1');
+        await run('after-revoke');
+        expect(approval.calls, 2);
+      },
+    );
+
+    test(
+      'shell never reuses a stale grant after revocation or rebinding',
+      () async {
+        for (final binding in <ToolPermissionState?>[
+          null,
+          const ToolPermissionState(),
+          const ToolPermissionState(workspaceId: 'ws1'),
+          const ToolPermissionState(
+            workspaceId: 'other',
+            mode: ToolPermissionMode.fullAccess,
+          ),
+        ]) {
+          final approval = _RecordingApproval();
+          final tools = service(
+            runtime: FakeWorkspaceRuntime(),
+            readPermissionState: (_) => binding,
+          );
+          await tools.handle(
+            ctx(fullAccess: true),
+            'shell',
+            {'command': 'printf ok'},
+            toolCallId: 'stale-grant',
+            approvalService: approval,
+          );
+          expect(approval.calls, binding?.workspaceId == 'ws1' ? 1 : 0);
+        }
+      },
+    );
+
+    test('pending shell carries its workspace for session approval', () async {
+      final approval = ToolApprovalService();
+      addTearDown(approval.dispose);
+      final pending = Completer<void>();
+      approval.addListener(() {
+        if (approval.hasPending && !pending.isCompleted) pending.complete();
+      });
+      var state = const ToolPermissionState(workspaceId: 'ws1');
+      final result =
+          service(
+            runtime: FakeWorkspaceRuntime(),
+            readPermissionState: (_) => state,
+          ).handle(
+            ctx(fullAccess: false),
+            'shell',
+            {'command': 'printf ok'},
+            toolCallId: 'pending-shell',
+            approvalService: approval,
+          );
+      await pending.future;
+      expect(approval.pendingRequests.single.workspaceId, 'ws1');
+      state = const ToolPermissionState(
+        workspaceId: 'ws1',
+        mode: ToolPermissionMode.fullAccess,
+      );
+      approval.approveConversationTools(
+        conversationId: 'conv-1',
+        workspaceId: 'ws1',
+      );
+      expect(jsonOf(await result)['exit_code'], 0);
+    });
+
+    test('shell asks when shellNeedsApproval', () async {
+      final approval = _RecordingApproval();
+      final runtime = _SandboxedRuntime();
+      final tools = service(runtime: runtime);
+      await tools.handle(
+        ctx(sandboxed: true, fullAccess: false, shellNeedsApproval: true),
+        'shell',
+        {'command': 'printf ok'},
+        toolCallId: 'appr-1',
+        approvalService: approval,
+      );
+      expect(approval.calls, 1);
+      expect(approval.lastName, 'shell');
+    });
+
+    test('shell skips approval when fullAccess', () async {
+      final approval = _RecordingApproval();
+      final runtime = _SandboxedRuntime();
+      final tools = service(runtime: runtime);
+      await tools.handle(
+        ctx(sandboxed: true, fullAccess: true, shellNeedsApproval: true),
+        'shell',
+        {'command': 'printf ok'},
+        toolCallId: 'appr-2',
+        approvalService: approval,
+      );
+      expect(approval.calls, 0);
+    });
+
+    test(
+      'native shell forces approval even without shellNeedsApproval',
+      () async {
+        final approval = _RecordingApproval();
+        final tools = service(
+          runtime: FakeWorkspaceRuntime(useRealProcess: canRunReal),
+        );
+        await tools.handle(
+          ctx(sandboxed: false, fullAccess: false, shellNeedsApproval: false),
+          'shell',
+          {'command': 'printf ok'},
+          toolCallId: 'appr-3',
+          approvalService: approval,
+        );
+        expect(approval.calls, 1);
+      },
+    );
+
+    test('native outside write requests approval in default mode', () async {
+      final approval = _RecordingApproval()..allow = false;
+      final outside = p.join(
+        Directory.current.path,
+        'kelivo_ws_outside_test.txt',
+      );
+      addTearDown(() {
+        final file = File(outside);
+        if (file.existsSync()) file.deleteSync();
+      });
+      final result = await service().handle(
+        ctx(fullAccess: false),
+        'write_file',
+        {'path': outside, 'content': 'nope'},
+        toolCallId: 'appr-out',
+        approvalService: approval,
+      );
+      expect(approval.calls, 1);
+      expect(jsonOf(result)['error'], 'approval_denied');
+      expect(jsonOf(result)['message'], 'nope');
+      expect(File(outside).existsSync(), isFalse);
+    });
+  });
+
+  test(
+    'file tools return the same reference and only mutations are produced',
+    () async {
+      final tools = service();
+      final context = ctx(sandboxed: true);
+      final fileName = Platform.isWindows ? 'report 报告.txt' : 'report:报告.txt';
+      final path = '/workspace/$fileName';
+      final write = metaOf(
+        await tools.handle(context, 'write_file', {
+          'path': path,
+          'content': 'needle\nneedle',
+        }, toolCallId: 'w'),
+      );
+      final read = metaOf(
+        await tools.handle(context, 'read_file', {
+          'path': path,
+        }, toolCallId: 'r'),
+      );
+      final glob = metaOf(
+        await tools.handle(context, 'glob', {
+          'pattern': '*.txt',
+        }, toolCallId: 'g'),
+      );
+      final grep = metaOf(
+        await tools.handle(context, 'grep', {
+          'pattern': 'needle',
+        }, toolCallId: 's'),
+      );
+      final edit = metaOf(
+        await tools.handle(context, 'edit_file', {
+          'path': path,
+          'old_string': 'needle',
+          'new_string': 'updated',
+          'replace_all': true,
+        }, toolCallId: 'e'),
+      );
+      expect(
+        write.files.single.link,
+        Platform.isWindows
+            ? 'kelivo://workspace/report%20%E6%8A%A5%E5%91%8A.txt'
+            : 'kelivo://workspace/report%3A%E6%8A%A5%E5%91%8A.txt',
+      );
+      expect(
+        KelivoLink.tryParse(write.files.single.link!)?.relativePath,
+        fileName,
+      );
+      for (final result in [read, glob, grep, edit]) {
+        expect(result.files.single.link, write.files.single.link);
+        expect(result.files.single.path, path);
+      }
+      expect(grep.count, 2);
+      expect(
+        [
+          read,
+          glob,
+          grep,
+        ].expand((meta) => meta.files).any((f) => f.isProduced),
+        isFalse,
+      );
+      expect(write.files.single.role, WorkspaceFileRole.created);
+      expect(edit.files.single.role, WorkspaceFileRole.modified);
+      final noop = metaOf(
+        await tools.handle(context, 'edit_file', {
+          'path': path,
+          'old_string': 'updated',
+          'new_string': 'updated',
+          'replace_all': true,
+        }, toolCallId: 'noop'),
+      );
+      expect(noop.files.single.isProduced, isFalse);
+      final missing = metaOf(
+        await tools.handle(context, 'read_file', {
+          'path': '/workspace/missing',
+        }, toolCallId: 'missing'),
+      );
+      expect(missing.files, isEmpty);
+    },
+  );
+
+  test(
+    'directory, session and external results carry usable identities',
+    () async {
+      final external = Directory(p.join(tmp.path, 'external'))..createSync();
+      final context = ctx(
+        sandboxed: true,
+        externalMounts: [
+          Mount(
+            host: external.path,
+            guest: '/mounts/Data',
+            externalId: 'mount-1',
+          ),
+        ],
+      );
+      final tools = service();
+      for (final path in ['/mounts/Data/a.txt', '/chat/note.txt']) {
+        final result = metaOf(
+          await tools.handle(context, 'write_file', {
+            'path': path,
+            'content': 'ok',
+          }, toolCallId: path),
+        );
+        expect(result.files.single.isProduced, isTrue);
+        expect(
+          result.files.single.link,
+          path.startsWith('/mounts')
+              ? 'kelivo://mounts/mount-1/a.txt'
+              : 'kelivo://session/note.txt',
+        );
+      }
+      final listing = metaOf(
+        await tools.handle(context, 'list_dir', {
+          'path': '/mounts/Data',
+        }, toolCallId: 'list'),
+      );
+      expect(listing.files.first.isDirectory, isTrue);
+      expect(listing.files.first.link, 'kelivo://mounts/mount-1');
+      expect(listing.files.last.link, 'kelivo://mounts/mount-1/a.txt');
+      final glob = metaOf(
+        await tools.handle(context, 'glob', {
+          'path': '/mounts/Data',
+          'pattern': '*.txt',
+        }, toolCallId: 'glob'),
+      );
+      expect(glob.files.single.link, listing.files.last.link);
+    },
+  );
+
+  test(
+    'shell retains changes after failure and scans only workspace and session',
+    skip: canRunReal ? false : 'needs /bin/sh',
+    () async {
+      final existing = File(p.join(workspaceDir.path, 'existing.txt'))
+        ..writeAsStringSync('old');
+      existing.setLastModifiedSync(DateTime.utc(2000));
+      final tools = service(
+        runtime: FakeWorkspaceRuntime(useRealProcess: true),
+      );
+      final result = metaOf(
+        await tools.handle(ctx(), 'shell', {
+          'command':
+              'printf new > existing.txt; printf new > result.csv; printf session > ../session/note.txt; printf outside > ../outside.txt; exit 1',
+        }, toolCallId: 'failed-with-output'),
+      );
+      expect(result.exitCode, 1);
+      expect(result.files.map((f) => p.basename(f.path)).toSet(), {
+        'existing.txt',
+        'result.csv',
+        'note.txt',
+      });
+      expect(result.files.every((f) => f.link != null && f.isProduced), isTrue);
+      expect(
+        result.files
+            .firstWhere((f) => p.basename(f.path) == 'existing.txt')
+            .role,
+        WorkspaceFileRole.modified,
+      );
+      expect(
+        result.files.firstWhere((f) => p.basename(f.path) == 'note.txt').link,
+        'kelivo://session/note.txt',
+      );
+      final noChanges = metaOf(
+        await tools.handle(ctx(), 'shell', {
+          'command': 'cat result.csv',
+        }, toolCallId: 'read-only-shell'),
+      );
+      expect(noChanges.files, isEmpty);
+    },
+  );
+
+  test('newline-only edits remain produced files', () async {
+    final tools = service();
+    final context = ctx(sandboxed: true);
+    for (final pair in [('hello', 'hello\n'), ('hello\r\n', 'hello\n')]) {
+      final file = File(p.join(workspaceDir.path, 'newlines.txt'));
+      await file.writeAsString(pair.$1);
+      final result = metaOf(
+        await tools.handle(context, 'edit_file', {
+          'path': '/workspace/newlines.txt',
+          'old_string': pair.$1,
+          'new_string': pair.$2,
+        }, toolCallId: 'newline'),
+      );
+      expect(result.status, 'ok');
+      expect(result.added, 0);
+      expect(result.removed, 0);
+      expect(await file.readAsString(), pair.$2);
+      expect(result.files.single.isProduced, isTrue);
+    }
+  });
+
+  for (final sandboxed in [false, true]) {
+    for (final filename in ['SKILL.md', 'skill.md', 'Skill.MD', 'notes.md']) {
+      test('skill reads recognize $filename (sandboxed=$sandboxed)', () async {
+        final skillFile = File(p.join(skillsDir.path, 'skill-id', filename));
+        await skillFile.parent.create();
+        await skillFile.writeAsString('Skill instructions');
+        final readIds = <String>[];
+        final tools = WorkspaceToolsService(
+          onSkillRead: (id) async {
+            readIds.add(id);
+          },
+        );
+        for (var i = 0; i < 2; i++) {
+          final result = metaOf(
+            await tools.handle(ctx(sandboxed: sandboxed), 'read_file', {
+              'path': sandboxed ? '/skills/skill-id/$filename' : skillFile.path,
+            }, toolCallId: 'read-skill-$i'),
+          );
+          expect(result.status, 'ok');
+        }
+        expect(
+          readIds,
+          filename == 'notes.md' ? isEmpty : ['skill-id', 'skill-id'],
+        );
+      });
+    }
+    test(
+      'failed and non-skill reads are not counted (sandboxed=$sandboxed)',
+      () async {
+        final workspaceFile = File(p.join(workspaceDir.path, 'SKILL.md'));
+        await workspaceFile.writeAsString('Workspace documentation');
+        final readIds = <String>[];
+        final tools = WorkspaceToolsService(
+          onSkillRead: (id) async => readIds.add(id),
+        );
+        final context = ctx(sandboxed: sandboxed);
+        final outside = metaOf(
+          await tools.handle(context, 'read_file', {
+            'path': sandboxed ? '/workspace/SKILL.md' : workspaceFile.path,
+          }, toolCallId: 'outside-skill'),
+        );
+        expect(outside.status, 'ok');
+        final missing = metaOf(
+          await tools.handle(context, 'read_file', {
+            'path': sandboxed
+                ? '/skills/missing/skill.md'
+                : p.join(skillsDir.path, 'missing', 'skill.md'),
+          }, toolCallId: 'missing-skill'),
+        );
+        expect(missing.status, 'error');
+        expect(readIds, isEmpty);
+      },
+    );
+  }
+
+  test('runtime failures still report files already written', () async {
+    for (final throwError in [true, false]) {
+      final result = metaOf(
+        await service(runtime: _InterruptedWriter(throwError)).handle(
+          ctx(),
+          'shell',
+          {'command': 'write'},
+          toolCallId: 'partial-$throwError',
+        ),
+      );
+      expect(result.status, 'error');
+      expect(result.files.single.link, 'kelivo://workspace/partial.txt');
+      expect(result.files.single.isProduced, isTrue);
+      File(p.join(workspaceDir.path, 'partial.txt')).deleteSync();
+    }
+  });
+
+  group('metadata', () {
+    test('fromJson(toJson) round trip', () {
+      final original = WorkspaceToolMetadata(
+        tool: 'shell',
+        status: 'ok',
+        code: 'x',
+        path: '/workspace/a.txt',
+        command: 'echo hi',
+        exitCode: 0,
+        durationMs: 12,
+        timedOut: false,
+        cancelled: false,
+        interrupted: false,
+        stdoutPreview: 'out',
+        stderrPreview: 'err',
+        files: const [
+          WorkspaceToolFile(
+            path: '/workspace/a.txt',
+            link: 'kelivo://workspace/a.txt',
+            role: WorkspaceFileRole.modified,
+          ),
+          WorkspaceToolFile(
+            path: '/chat/outputs/t.txt',
+            link: 'kelivo://chat/outputs/t.txt',
+            role: WorkspaceFileRole.log,
+          ),
+        ],
+        filesTruncated: true,
+        diff: '@@',
+        added: 1,
+        removed: 2,
+        diffTruncated: false,
+        strategy: 'exact',
+        created: true,
+        bytes: 4,
+        count: 3,
+        truncated: false,
+      );
+      final round = WorkspaceToolMetadata.fromJson(original.toJson());
+      expect(round.toJson(), original.toJson());
+    });
+
+    test('preview fields are capped at 4 KB and keep the tail', () {
+      final long = 'H' * 100 + 'T' * 5000;
+      final meta = WorkspaceToolMetadata(
+        tool: 'shell',
+        status: 'ok',
+        stdoutPreview: long,
+        stderrPreview: long,
+      );
+      final json = meta.toJson();
+      final workspace = json['workspace'] as Map<String, dynamic>;
+      final stdout = workspace['stdoutPreview'] as String;
+      final stderr = workspace['stderrPreview'] as String;
+      expect(stdout.length, lessThanOrEqualTo(4096));
+      expect(stderr.length, lessThanOrEqualTo(4096));
+      expect(stdout.endsWith('T' * 20), isTrue);
+      final round = WorkspaceToolMetadata.fromJson(json);
+      expect(round.stdoutPreview!.length, lessThanOrEqualTo(4096));
+    });
+  });
+
+  group('mark tools used on first success', () {
+    test('writes toolsUsed: true through the extras updater', () async {
+      File(p.join(workspaceDir.path, 'a.txt')).writeAsStringSync('hi');
+      extrasById['conv-1'] = WorkspaceBinding(
+        workspaceId: 'ws1',
+        toolsUsed: false,
+      ).applyTo(<String, dynamic>{});
+      await service().handle(
+        ctx(toolsUsed: false, fullAccess: true),
+        'read_file',
+        {'path': p.join(workspaceDir.path, 'a.txt')},
+        toolCallId: 'lock-1',
+        conversationId: 'conv-1',
+      );
+      final binding = WorkspaceBinding.fromExtras(extrasById['conv-1']!);
+      expect(binding.toolsUsed, isTrue);
+      expect(touched, ['ws1']);
+    });
+
+    test('does not mark tools used on denial', () async {
+      final result = await service().handle(
+        ctx(fullAccess: false, toolsUsed: false),
+        'write_file',
+        {'path': p.join(tmp.path, 'outside.txt'), 'content': 'no'},
+        toolCallId: 'lock-deny',
+        conversationId: 'conv-1',
+      );
+      expect(metaOf(result).status, 'denied');
+      expect(extrasById, isEmpty);
+      expect(touched, isEmpty);
+    });
+  });
+}

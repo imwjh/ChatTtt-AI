@@ -1,0 +1,8462 @@
+import '../services/conversation_find_service.dart';
+import 'conversation_find_highlights.dart';
+import 'package:Kelivo/desktop/desktop_overlay_backdrop.dart';
+import '../utils/message_reasoning_source.dart';
+import '../../intelligent_ui/host/ui_copy_actions.dart';
+import '../../intelligent_ui/host/ui_user_message_content.dart';
+import 'package:Kelivo/features/intelligent_ui/host/ui_runtime_registry.dart';
+import 'package:Kelivo/features/intelligent_ui/host/ui_source_map.dart';
+import 'package:Kelivo/features/intelligent_ui/host/ui_host_scope.dart';
+import 'package:Kelivo/features/intelligent_ui/host/ui_generation_state.dart';
+import 'package:markstream/markstream_core.dart' show SourceSpan;
+import 'package:markstream/markstream.dart' show SelectableSpanAdapter;
+import 'tool_permission_widgets.dart';
+import '../../provider/widgets/oauth_message_recovery.dart';
+import 'response_truncation_notice.dart';
+import 'dart:async';
+import 'dart:collection';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/foundation.dart'
+    show
+        defaultTargetPlatform,
+        TargetPlatform,
+        visibleForTesting,
+        mapEquals,
+        ValueListenable;
+import 'dart:math' as math;
+import 'package:flutter/services.dart';
+import '../../../core/services/haptics.dart';
+import '../../../shared/widgets/optional_shader_mask.dart';
+import 'package:provider/provider.dart';
+import 'dart:io';
+import 'package:open_filex/open_filex.dart';
+// import 'package:easy_image_viewer/easy_image_viewer.dart';
+import 'dart:convert';
+import 'package:crypto/crypto.dart' show sha256;
+import '../../home/widgets/file_processing_indicator.dart';
+import '../pages/image_viewer_page.dart';
+import '../../browser/browser_navigation.dart';
+import '../../browser/widgets/browser_page_card.dart';
+import '../../browser/widgets/browser_favicon.dart';
+import '../../../core/services/browser/browser_service.dart';
+import '../../browser/models/browser_tool_presentation.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+import '../../../core/models/chat_message.dart';
+import '../../../core/models/message_part.dart';
+import '../../../icons/lucide_adapter.dart';
+import '../../../icons/reasoning_icons.dart';
+// import '../../../theme/design_tokens.dart';
+import '../../../core/providers/user_provider.dart';
+import '../../../core/services/chat/chat_service.dart';
+import '../../../core/providers/assistant_provider.dart';
+import '../../../utils/sandbox_path_resolver.dart';
+import '../../../utils/safe_resize_image.dart';
+import '../../../utils/utf16_safe_cut.dart';
+import '../../../shared/widgets/avatar_image.dart';
+import '../../../shared/widgets/default_user_avatar.dart';
+import '../../../shared/widgets/chatttt_mark.dart';
+import '../../../utils/unicode_sanitizer.dart';
+import '../../../utils/assistant_regex.dart';
+import '../../../utils/protected_text.dart';
+import '../../../utils/source_text_map.dart';
+import '../../../core/models/assistant.dart';
+import '../../../core/providers/tts_provider.dart';
+import '../../../shared/markdown/markdown_with_code_highlight.dart';
+import '../../../shared/markdown/quote_syntax.dart';
+import '../controllers/quote_editing_controller.dart' show buildQuoteTextSpan;
+import 'quote_chip.dart';
+import 'quote_source_highlight.dart';
+import 'plain_message_text.dart';
+import 'quote_source_anchor.dart';
+import 'quote_interaction_scope.dart';
+import 'package:Kelivo/shared/widgets/app_selection_area.dart';
+import 'package:Kelivo/shared/markdown/markdown_surface_scope.dart';
+import '../../../shared/widgets/snackbar.dart';
+import '../../../shared/widgets/scroll_layout_anchor.dart';
+import '../../../shared/widgets/voice_message_capsule.dart';
+import '../../../core/utils/multimodal_input_utils.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../../l10n/app_localizations.dart';
+import '../../../core/providers/settings_provider.dart';
+import '../../../theme/chat_bubble_style.dart';
+import 'package:Kelivo/theme/app_semantic_colors.dart';
+import '../../../core/models/assistant_regex.dart';
+import '../../../shared/widgets/custom_bottom_sheet.dart';
+import '../../../shared/widgets/ios_checkbox.dart';
+import '../../../shared/widgets/ios_tactile.dart';
+import '../../../shared/widgets/thinking_sheen.dart';
+import '../../../shared/animations/status_animation.dart';
+import '../../../desktop/desktop_context_menu.dart';
+import '../../../desktop/menu_anchor.dart';
+import '../../../shared/widgets/emoji_text.dart';
+import '../../../utils/platform_utils.dart';
+import '../../home/services/ask_user_interaction_service.dart';
+import '../../home/services/local_tools_service.dart';
+import '../../home/services/tool_approval_service.dart';
+import '../utils/assistant_paragraph_splitter.dart';
+import '../utils/thinking_tag_parser.dart';
+import 'timeline_projection.dart';
+import 'incremental_timeline_projection.dart';
+import 'viewport_block_list.dart';
+import '../../../core/models/message_part_snapshot.dart';
+import 'select_copy_sheet.dart';
+import 'timeline_visibility.dart';
+import 'citation_sources_sheet.dart';
+import '../../../shared/markdown/citation_syntax.dart';
+import 'chat_surface.dart';
+import 'collapsible_user_text.dart';
+import 'chat_suggestion_bubbles.dart';
+import 'screen_time_tool_ui.dart';
+import 'weather_tool_ui.dart';
+import 'tool_detail_text_section.dart';
+import 'produced_files_row.dart';
+import 'workspace_tool_detail.dart';
+import 'workspace_tool_ui.dart';
+import '../../../theme/app_font_weights.dart';
+import '../../home/controllers/streaming_content_notifier.dart';
+
+final RegExp _urlSchemeRe = RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*:');
+
+@visibleForTesting
+bool shouldInlineImagePart(ImagePart part) =>
+    !part.unavailable && part.uri.trim().isNotEmpty;
+
+Uri? _tryNormalizeExternalUri(String raw) {
+  var u = raw.trim();
+  if (u.isEmpty) return null;
+
+  // Handle JSON-ish values like `"example.com"` defensively.
+  if ((u.startsWith('"') && u.endsWith('"')) ||
+      (u.startsWith("'") && u.endsWith("'"))) {
+    u = u.substring(1, u.length - 1).trim();
+    if (u.isEmpty) return null;
+  }
+
+  if (u.startsWith('//')) {
+    u = 'https:$u';
+  } else if (!_urlSchemeRe.hasMatch(u)) {
+    u = 'https://$u';
+  }
+
+  final uri = Uri.tryParse(u);
+  if (uri == null) return null;
+  if ((uri.scheme == 'http' || uri.scheme == 'https') && uri.host.isEmpty) {
+    return null;
+  }
+  return uri;
+}
+
+@visibleForTesting
+(String, List<String>) parseMcpImagePathsForTesting(
+  String? content, {
+  Map<String, dynamic>? metadata,
+}) => parseToolResultImages(content, metadata: metadata);
+
+@visibleForTesting
+const double kToolImageTimelineHeight = timelineToolImageHeight;
+@visibleForTesting
+const double kToolImageTimelineMaxWidth = timelineToolImageMaxWidth;
+const double kBrowserStepImageHeight = 64;
+const double kBrowserStepImageMaxWidth = 120;
+const int _browserStepsFoldThreshold = 6;
+const int _browserStepsTail = 5;
+@visibleForTesting
+const double kToolImageCardHeight = 180;
+@visibleForTesting
+const double kToolImageCardMaxWidth = 320;
+@visibleForTesting
+const double kToolImageDetailHeight = 220;
+@visibleForTesting
+const double kToolImageDetailMaxWidth = 420;
+
+@visibleForTesting
+const int kToolImageMaxDecodePixels = 2097152; // 8 MiB of RGBA
+@visibleForTesting
+const int kToolImageMaxDecodeEdge = 2048;
+
+@visibleForTesting
+({int width, int height}) toolImageDecodePixels({
+  required double logicalWidth,
+  required double logicalHeight,
+  required double devicePixelRatio,
+}) {
+  final dpr = devicePixelRatio <= 0 ? 1.0 : devicePixelRatio;
+  return clampDecodedPixelSize(
+    width: math.max(1.0, logicalWidth * dpr),
+    height: math.max(1.0, logicalHeight * dpr),
+    maxEdge: kToolImageMaxDecodeEdge,
+    maxPixels: kToolImageMaxDecodePixels,
+  );
+}
+
+/// Incremented when a memoized tool-step builder actually runs.
+@visibleForTesting
+int debugTimelineToolStepBuilds = 0;
+
+String _resolveAttachmentImageUri(String uri) {
+  final path = uri.trim();
+  if (path.isEmpty) return path;
+  if (path.startsWith('http://') ||
+      path.startsWith('https://') ||
+      path.startsWith('data:')) {
+    return path;
+  }
+  return SandboxPathResolver.fix(path);
+}
+
+/// Decoded `data:` image bytes, keyed by the full data URI.
+///
+/// Reusing the same [Uint8List] keeps [MemoryImage] cache keys stable across
+/// rebuilds, so the image is decoded once instead of on every frame. Entries
+/// are evicted least-recently-used first, bounded by both entry count and
+/// total decoded bytes so a few large images cannot pin unbounded memory.
+final Map<String, Uint8List?> _dataUriBytesCache = <String, Uint8List?>{};
+const int _dataUriBytesCacheLimit = 24;
+const int _dataUriBytesCacheMaxBytes = 16 << 20;
+int _dataUriBytesCacheBytes = 0;
+
+Uint8List? _decodeDataUriBytes(String path) {
+  if (_dataUriBytesCache.containsKey(path)) {
+    // Re-insert to mark as most recently used (LinkedHashMap keeps order).
+    final cached = _dataUriBytesCache.remove(path);
+    _dataUriBytesCache[path] = cached;
+    return cached;
+  }
+
+  Uint8List? bytes;
+  try {
+    const marker = 'base64,';
+    final idx = path.indexOf(marker);
+    if (idx != -1) bytes = base64Decode(path.substring(idx + marker.length));
+  } catch (_) {
+    bytes = null;
+  }
+
+  _dataUriBytesCache[path] = bytes;
+  _dataUriBytesCacheBytes += bytes?.length ?? 0;
+  // Evict oldest entries first. The entry just added is always kept (even if
+  // it alone exceeds the byte budget) so its MemoryImage key stays stable.
+  while (_dataUriBytesCache.length > 1 &&
+      (_dataUriBytesCache.length > _dataUriBytesCacheLimit ||
+          _dataUriBytesCacheBytes > _dataUriBytesCacheMaxBytes)) {
+    final evicted = _dataUriBytesCache.remove(_dataUriBytesCache.keys.first);
+    _dataUriBytesCacheBytes -= evicted?.length ?? 0;
+  }
+  return bytes;
+}
+
+/// Builds a tool thumbnail without decoding large tool outputs at full resolution.
+Widget _buildResolvedImage(
+  BuildContext context,
+  String rawPath, {
+  double? width,
+  double? height,
+  double? maxLogicalWidth,
+  BoxFit fit = BoxFit.contain,
+}) {
+  final logicalHeight = height ?? width ?? kToolImageCardHeight;
+  final logicalWidth =
+      maxLogicalWidth ??
+      width ??
+      (height != null ? height * 2 : kToolImageTimelineMaxWidth);
+  final provider = _previewImageProvider(
+    rawPath,
+    logicalWidth: logicalWidth,
+    logicalHeight: logicalHeight,
+    devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
+    fit: fit,
+  );
+  final image = _buildPreviewImage(
+    context,
+    provider,
+    width: width,
+    height: height,
+    fit: fit,
+  );
+  if (maxLogicalWidth == null || provider == null) return image;
+  return ConstrainedBox(
+    constraints: BoxConstraints(maxWidth: maxLogicalWidth),
+    child: image,
+  );
+}
+
+Widget _buildPreviewImage(
+  BuildContext context,
+  ImageProvider? provider, {
+  required double? width,
+  required double? height,
+  BoxFit fit = BoxFit.contain,
+}) {
+  final cs = Theme.of(context).colorScheme;
+  Widget errorWidget() => Container(
+    width: width ?? (height != null ? height * 0.67 : 120),
+    height: height ?? 180,
+    color: cs.surfaceContainerHighest,
+    alignment: Alignment.center,
+    child: Icon(
+      Lucide.ImageOff,
+      size: 24,
+      color: cs.onSurface.withValues(alpha: 0.5),
+    ),
+  );
+
+  if (provider == null) return errorWidget();
+  return Image(
+    image: provider,
+    width: width,
+    height: height,
+    fit: fit,
+    gaplessPlayback: true,
+    errorBuilder: (_, __, ___) => errorWidget(),
+  );
+}
+
+ImageProvider? _previewImageProvider(
+  String path, {
+  required double logicalWidth,
+  required double logicalHeight,
+  required double devicePixelRatio,
+  required BoxFit fit,
+}) {
+  final source = path.trim();
+  if (source.isEmpty) return null;
+  final base = _toolImageProvider(source);
+  if (base == null) return null;
+  final decode = toolImageDecodePixels(
+    logicalWidth: logicalWidth,
+    logicalHeight: logicalHeight,
+    devicePixelRatio: devicePixelRatio,
+  );
+  return SafeResizeImage.display(
+    base,
+    width: decode.width,
+    height: decode.height,
+    fit: fit == BoxFit.cover ? SafeResizeFit.cover : SafeResizeFit.contain,
+    allowUpscaling: false,
+    maxEdge: kToolImageMaxDecodeEdge,
+    maxPixels: kToolImageMaxDecodePixels,
+  );
+}
+
+Size? _cachedPreviewSize(BuildContext context, ImageProvider provider) {
+  // Only read the thumbnail's already-decoded frame. A pending or broken
+  // thumbnail can still open immediately with the ordinary viewer fade.
+  final stream = provider.resolve(createLocalImageConfiguration(context));
+  Size? size;
+  final listener = ImageStreamListener((info, _) {
+    size = Size(info.image.width.toDouble(), info.image.height.toDouble());
+    info.dispose();
+  }, onError: (_, _) {});
+  stream.addListener(listener);
+  stream.removeListener(listener);
+  return size;
+}
+
+ImageProvider<Object>? _toolImageProvider(String path) {
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    return NetworkImage(path);
+  }
+  if (path.startsWith('data:')) {
+    final bytes = _decodeDataUriBytes(path);
+    if (bytes == null) return null;
+    return MemoryImage(bytes);
+  }
+  return FileImage(File(SandboxPathResolver.fix(path)));
+}
+
+ImageProvider? _assistantInlineImageProvider(String src) {
+  if (src.startsWith('http://') || src.startsWith('https://')) {
+    return NetworkImage(src);
+  }
+  if (src.startsWith('data:')) {
+    final bytes = _decodeDataUriBytes(src);
+    if (bytes == null) return null;
+    return MemoryImage(bytes);
+  }
+  final fixed = SandboxPathResolver.fix(src);
+  if (File(fixed).existsSync()) return FileImage(File(fixed));
+  return null;
+}
+
+class _AssistantInlineImage extends StatefulWidget {
+  const _AssistantInlineImage({
+    required this.uri,
+    required this.imageKey,
+    required this.group,
+    required this.initialIndex,
+    this.onAspectResolved,
+  });
+
+  final String uri;
+  final String imageKey;
+  final List<String> group;
+  final int initialIndex;
+  final void Function(String imageKey, double aspectRatio)? onAspectResolved;
+
+  @override
+  State<_AssistantInlineImage> createState() => _AssistantInlineImageState();
+}
+
+class _AssistantInlineImageState extends State<_AssistantInlineImage> {
+  late ImageProvider? _provider = _assistantInlineImageProvider(widget.uri);
+  late String _sourceId = sha256.convert(utf8.encode(widget.uri)).toString();
+  PageStorageBucket? _storage;
+  double? _aspect;
+  ImageStream? _stream;
+  ImageStreamListener? _listener;
+  ImageProvider? _listenedProvider;
+
+  Object get _aspectId => ('assistant-inline-image-aspect', _sourceId);
+
+  void _syncAspect({bool sourceChanged = false}) {
+    final storage = PageStorage.maybeOf(context);
+    if (!sourceChanged && identical(storage, _storage)) return;
+    _stopListening();
+    _listenedProvider = null;
+    _storage = storage;
+    _aspect = storage?.readState(context, identifier: _aspectId) as double?;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncAspect();
+  }
+
+  @override
+  void didUpdateWidget(_AssistantInlineImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final changed = oldWidget.uri != widget.uri;
+    if (changed) {
+      _provider = _assistantInlineImageProvider(widget.uri);
+      _sourceId = sha256.convert(utf8.encode(widget.uri)).toString();
+    }
+    _syncAspect(sourceChanged: changed);
+  }
+
+  @override
+  void dispose() {
+    _stopListening();
+    super.dispose();
+  }
+
+  void _stopListening() {
+    if (_stream != null && _listener != null) {
+      _stream!.removeListener(_listener!);
+    }
+    _stream = null;
+    _listener = null;
+  }
+
+  void _listenForAspect(ImageProvider provider) {
+    if (_listenedProvider == provider) return;
+    _stopListening();
+    _listenedProvider = provider;
+    _stream = provider.resolve(createLocalImageConfiguration(context));
+    _listener = ImageStreamListener((info, synchronous) {
+      final aspect = info.image.width / info.image.height;
+      info.dispose();
+      _stopListening();
+      if (!mounted || !aspect.isFinite || aspect <= 0) return;
+      _storage?.writeState(context, aspect, identifier: _aspectId);
+      if (_aspect != aspect) {
+        if (synchronous) {
+          _aspect = aspect;
+        } else {
+          preserveScrollLayoutAnchor(context);
+          setState(() => _aspect = aspect);
+        }
+      }
+      widget.onAspectResolved?.call(widget.imageKey, aspect);
+    }, onError: (Object error, StackTrace? stack) => _stopListening());
+    _stream!.addListener(_listener!);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = _provider ??= _assistantInlineImageProvider(widget.uri);
+    return GestureDetector(
+      key: ValueKey('assistant-inline-image:${widget.imageKey}'),
+      onTap: widget.group.isEmpty
+          ? null
+          : () => ImageViewerPage(
+              images: widget.group,
+              initialIndex: widget.initialIndex.clamp(
+                0,
+                widget.group.length - 1,
+              ),
+            ).open(context),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final displayWidth = constraints.maxWidth;
+          final dpr = MediaQuery.devicePixelRatioOf(context);
+          final cacheWidth = displayWidth.isFinite
+              ? math.max(1, (displayWidth * dpr).ceil())
+              : null;
+          final resized = provider == null
+              ? null
+              : ResizeImage.resizeIfNeeded(cacheWidth, null, provider);
+          // Share Image's decoded stream; measuring must neither decode a
+          // second full-size copy nor keep animated images playing offscreen.
+          if (resized != null) _listenForAspect(resized);
+          final height = displayWidth.isFinite && _aspect != null
+              ? displayWidth / _aspect!
+              : 36.0;
+          final image = provider == null
+              ? const Icon(Lucide.ImageOff)
+              : Image(
+                  image: resized!,
+                  width: displayWidth.isFinite ? displayWidth : null,
+                  height: height,
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => const Icon(Lucide.ImageOff),
+                );
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: SizedBox(height: height, child: image),
+          );
+        },
+      ),
+    );
+  }
+}
+
+IconData _toolIconFor(String name, [Map<String, dynamic> args = const {}]) {
+  final localIcon = _localToolIconFor(name, args);
+  if (localIcon != null) return localIcon;
+  if (isWorkspaceToolName(name)) {
+    return workspaceToolIcon(name);
+  }
+  switch (name) {
+    case 'memory_read':
+    case 'memory_update':
+    case 'memory_search_profile':
+    case 'memory_edit':
+    case 'update_user_profile':
+    case 'create_memory':
+    case 'edit_memory':
+      return Lucide.bookHeart;
+    case 'memory_delete':
+    case 'delete_memory':
+      return Lucide.bookDashed;
+    case 'chat_search':
+      return Lucide.Search;
+    case 'search_web':
+      return Lucide.Earth;
+    case 'fetch_url':
+      return Lucide.Link;
+    case 'builtin_search':
+      return Lucide.Search;
+    // Provider built-in server tools. These are the names the decoders emit,
+    // not the BuiltInToolNames settings keys, so they stay literals here.
+    case 'web_fetch':
+      return Lucide.Link;
+    case 'code_execution':
+    case 'code_interpreter':
+    case 'text_editor_code_execution':
+      return Lucide.Code;
+    case 'bash_code_execution':
+      return Lucide.Terminal;
+    default:
+      return Lucide.Wrench;
+  }
+}
+
+IconData? _localToolIconFor(String name, Map<String, dynamic> args) {
+  if (name == LocalToolNames.askUser) {
+    return Lucide.MessageCircleQuestionMark;
+  }
+  return switch (name) {
+    LocalToolNames.timeInfo => Lucide.clock,
+    LocalToolNames.clipboard => switch ((args['action'] ?? '').toString()) {
+      'read' => Lucide.ClipboardCheck,
+      'write' => Lucide.ClipboardPen,
+      _ => Lucide.Clipboard,
+    },
+    LocalToolNames.textToSpeech => Lucide.Volume2,
+    LocalToolNames.calculate => Lucide.Calculator,
+    LocalToolNames.screenTime => Lucide.Smartphone,
+    LocalToolNames.calendarQuery => Lucide.Calendar,
+    LocalToolNames.calendarCreate => Lucide.CalendarPlus,
+    LocalToolNames.currentLocation => Lucide.MapPin,
+    LocalToolNames.phoneControl => Lucide.Smartphone,
+    LocalToolNames.browser => LucideIcons.appWindow,
+    LocalToolNames.weather => Lucide.CloudSun,
+    LocalToolNames.healthSummary => Lucide.HeartPulse,
+    LocalToolNames.remindersQuery => Lucide.ListTodo,
+    LocalToolNames.remindersCreate => Lucide.ListPlus,
+    LocalToolNames.remindersComplete => Lucide.CheckCircle,
+    _ => null,
+  };
+}
+
+String? _localToolTitleFor(
+  AppLocalizations l10n,
+  String name,
+  Map<String, dynamic> args,
+) {
+  if (name == LocalToolNames.askUser) {
+    return _askUserToolTitleFor(l10n, args);
+  }
+  return switch (name) {
+    LocalToolNames.timeInfo => l10n.assistantEditLocalToolTimeInfoTitle,
+    LocalToolNames.clipboard => switch ((args['action'] ?? '').toString()) {
+      'read' => l10n.chatMessageWidgetReadClipboard,
+      'write' => l10n.chatMessageWidgetWriteClipboard,
+      _ => l10n.assistantEditLocalToolClipboardTitle,
+    },
+    LocalToolNames.textToSpeech => l10n.chatMessageWidgetSpeakingTitle,
+    LocalToolNames.calculate => l10n.assistantEditLocalToolCalculateTitle,
+    LocalToolNames.screenTime => l10n.assistantEditLocalToolScreenTimeTitle,
+    LocalToolNames.calendarQuery =>
+      l10n.assistantEditLocalToolCalendarQueryTitle,
+    LocalToolNames.calendarCreate =>
+      l10n.assistantEditLocalToolCalendarCreateTitle,
+    LocalToolNames.currentLocation => l10n.assistantEditLocalToolLocationTitle,
+    LocalToolNames.phoneControl => l10n.phoneControlTitle,
+    LocalToolNames.browser => browserActionLabel(
+      l10n,
+      args['action']?.toString() ?? '',
+    ),
+    LocalToolNames.weather => l10n.assistantEditLocalToolWeatherTitle,
+    LocalToolNames.healthSummary => l10n.assistantEditLocalToolHealthTitle,
+    LocalToolNames.remindersQuery =>
+      l10n.assistantEditLocalToolRemindersQueryTitle,
+    LocalToolNames.remindersCreate =>
+      l10n.assistantEditLocalToolRemindersCreateTitle,
+    LocalToolNames.remindersComplete =>
+      l10n.assistantEditLocalToolRemindersCompleteTitle,
+    _ => null,
+  };
+}
+
+String _textToSpeechToolText(Map<String, dynamic> args) {
+  return (args['text'] ?? '').toString().trim();
+}
+
+void _replayTextToSpeech(BuildContext context, String text) {
+  final content = text.trim();
+  if (content.isEmpty) return;
+
+  final tts = context.read<TtsProvider>();
+  if (!tts.isAvailable) {
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: StateError('Text-to-speech is unavailable.'),
+        library: 'Kelivo chat message tools',
+        context: ErrorDescription('while replaying text-to-speech'),
+      ),
+    );
+    return;
+  }
+
+  unawaited(
+    tts.speak(content).catchError((Object error, StackTrace stack) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'Kelivo chat message tools',
+          context: ErrorDescription('while replaying text-to-speech'),
+        ),
+      );
+    }),
+  );
+}
+
+Widget _buildTextToSpeechReplayRow(
+  BuildContext context, {
+  required String text,
+  required Color textColor,
+  required Color buttonColor,
+  double fontSize = 12,
+  int maxLines = 2,
+}) {
+  final l10n = AppLocalizations.of(context)!;
+  return Row(
+    crossAxisAlignment: CrossAxisAlignment.center,
+    children: [
+      Expanded(
+        child: Text(
+          UnicodeSanitizer.sanitize(text),
+          maxLines: maxLines,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: fontSize, height: 1.4, color: textColor),
+        ),
+      ),
+      const SizedBox(width: 8),
+      Tooltip(
+        message: l10n.ttsFloatingReplayTooltip,
+        child: IosIconButton(
+          size: 14,
+          minSize: 30,
+          padding: const EdgeInsets.all(6),
+          color: buttonColor,
+          semanticLabel: l10n.ttsFloatingReplayTooltip,
+          builder: (color) => Icon(Lucide.RefreshCw, size: 14, color: color),
+          onTap: () => _replayTextToSpeech(context, text),
+        ),
+      ),
+    ],
+  );
+}
+
+String _askUserToolTitleFor(AppLocalizations l10n, Map<String, dynamic> args) {
+  final questions = AskUserInteractionService.normalizeQuestions(args);
+  if (questions.isNotEmpty) {
+    return l10n.askUserCardQuestionCount(questions.length);
+  }
+  return l10n.assistantEditLocalToolAskUserTitle;
+}
+
+String _toolTitleFor(
+  BuildContext context,
+  String name,
+  Map<String, dynamic> args, {
+  required bool isResult,
+}) {
+  final l10n = AppLocalizations.of(context)!;
+  if (name == LocalToolNames.askUser) {
+    return UnicodeSanitizer.sanitize(_askUserToolTitleFor(l10n, args));
+  }
+  final localToolTitle = _localToolTitleFor(l10n, name, args);
+  if (localToolTitle != null) return UnicodeSanitizer.sanitize(localToolTitle);
+  if (isWorkspaceToolName(name)) {
+    return workspaceToolTitle(l10n, name);
+  }
+  switch (name) {
+    case 'memory_read':
+      return l10n.chatMessageWidgetMemoryRead;
+    case 'memory_update':
+      return l10n.chatMessageWidgetMemoryUpdate;
+    case 'memory_search_profile':
+      return l10n.chatMessageWidgetMemorySearchProfile;
+    case 'memory_edit':
+    case 'edit_memory':
+      return l10n.chatMessageWidgetMemoryEdit;
+    case 'memory_delete':
+    case 'delete_memory':
+      return l10n.chatMessageWidgetMemoryDelete;
+    case 'update_user_profile':
+      return l10n.chatMessageWidgetUpdateUserProfile;
+    case 'chat_search':
+      return l10n.chatMessageWidgetChatSearch;
+    case 'create_memory':
+      return l10n.chatMessageWidgetCreateMemory;
+    case 'search_web':
+      final q = UnicodeSanitizer.sanitize((args['query'] ?? '').toString());
+      return l10n.chatMessageWidgetWebSearch(q);
+    case 'builtin_search':
+      return l10n.chatMessageWidgetBuiltinSearch;
+    case 'fetch_url':
+      final url = UnicodeSanitizer.sanitize(
+        (args['url'] ?? '').toString().trim(),
+      );
+      final host = Uri.tryParse(url)?.host ?? '';
+      return l10n.chatMessageWidgetWebFetch(host.isEmpty ? url : host);
+    default:
+      return isResult
+          ? l10n.chatMessageWidgetToolResult(UnicodeSanitizer.sanitize(name))
+          : l10n.chatMessageWidgetToolCall(UnicodeSanitizer.sanitize(name));
+  }
+}
+
+String _prettyToolJson(String raw) {
+  try {
+    final obj = jsonDecode(raw);
+    return const JsonEncoder.withIndent('  ').convert(obj);
+  } catch (_) {
+    return raw;
+  }
+}
+
+Widget _buildToolImageFromPath(
+  BuildContext context,
+  String path, {
+  double? height,
+  double? maxLogicalWidth,
+  BoxFit fit = BoxFit.contain,
+}) {
+  return _buildResolvedImage(
+    context,
+    path,
+    height: height,
+    maxLogicalWidth: maxLogicalWidth,
+    fit: fit,
+  );
+}
+
+void _showToolFullImage(BuildContext context, String path) =>
+    unawaited(ImageViewerPage(images: [path]).open(context));
+
+void _showBrowserStepDetail(
+  BuildContext context,
+  ToolUIPart part, {
+  required String conversationId,
+}) {
+  final action = BrowserToolAction(
+    id: part.id,
+    arguments: part.arguments,
+    content: part.content,
+    metadata: part.metadata,
+    loading: part.loading,
+  );
+  // The detail route may outlive the source row as streaming/collapse or
+  // list virtualization removes it. Navigate through the route's stable host.
+  final navigator = Navigator.of(context, rootNavigator: true);
+  _showToolDetail(
+    context,
+    part,
+    header: _BrowserStepDetailHeader(
+      action: action,
+      onOpen: () {
+        if (!navigator.mounted) return;
+        unawaited(
+          openBrowserPage(
+            navigator.context,
+            conversationId: conversationId,
+            tabId: action.tabId,
+          ),
+        );
+      },
+    ),
+  );
+}
+
+class _BrowserStepDetailHeader extends StatelessWidget {
+  const _BrowserStepDetailHeader({required this.action, required this.onOpen});
+  final BrowserToolAction action;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final l = AppLocalizations.of(context)!;
+    // List/close-tab results also carry a page object, but no page identity.
+    final hasPage =
+        action.page['url'] is String || action.page['title'] is String;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (action.failed)
+          Container(
+            key: const ValueKey('browser-step-detail-error'),
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            decoration: BoxDecoration(
+              color: cs.error.withValues(
+                alpha: theme.brightness == Brightness.dark ? .10 : .07,
+              ),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(LucideIcons.circleAlert, size: 16, color: cs.error),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        browserErrorSummary(l, action.error),
+                        style: TextStyle(fontSize: 12.5, color: cs.error),
+                      ),
+                      if (action.error.isNotEmpty)
+                        Text(
+                          action.error,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: cs.error.withValues(alpha: .75),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (hasPage) ...[
+          if (action.failed) const SizedBox(height: 8),
+          Container(
+            key: const ValueKey('browser-step-detail-page'),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: context.appColors.surfaceFill,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: cs.outlineVariant.withValues(alpha: .2),
+              ),
+            ),
+            child: Row(
+              children: [
+                BrowserFavicon(url: action.url, size: 16),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        action.title.isNotEmpty
+                            ? action.title
+                            : action.url == 'about:blank'
+                            ? l.browserCardBlankPage
+                            : browserUrlLabel(action.url),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: AppFontWeights.semibold,
+                          color: cs.onSurface,
+                        ),
+                      ),
+                      Text(
+                        action.url,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: cs.onSurface.withValues(alpha: .6),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Flexible(
+                  fit: FlexFit.tight,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: ListenableBuilder(
+                      listenable: BrowserService.instance,
+                      builder: (context, _) {
+                        final exists = BrowserService.instance.tabs.any(
+                          (tab) => tab.id == action.tabId,
+                        );
+                        return TextButton.icon(
+                          key: const ValueKey('browser-step-detail-open'),
+                          icon: const Icon(Lucide.AppWindow, size: 15),
+                          label: Text(
+                            exists
+                                ? l.browserOpenThisPage
+                                : l.browserErrTabClosed,
+                          ),
+                          onPressed: !exists
+                              ? null
+                              : () async {
+                                  final closed = await Navigator.of(
+                                    context,
+                                  ).maybePop();
+                                  if (closed) onOpen();
+                                },
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+void _showToolDetail(BuildContext context, ToolUIPart part, {Widget? header}) {
+  final l10n = AppLocalizations.of(context)!;
+  final argsPretty = const JsonEncoder.withIndent('  ').convert(part.arguments);
+  final (cleanText, images) = parseToolResultImages(
+    part.content,
+    metadata: part.metadata,
+  );
+  final resultText = cleanText.isNotEmpty
+      ? _prettyToolJson(cleanText)
+      : l10n.chatMessageWidgetNoResultYet;
+  final title = _toolTitleFor(
+    context,
+    part.toolName,
+    part.arguments,
+    isResult: !part.loading,
+  );
+  final closeSemanticLabel = l10n.mcpPageClose;
+  final screenTime = part.toolName == LocalToolNames.screenTime
+      ? ScreenTimeResult.tryParse(cleanText)
+      : null;
+  final useScreenTimeDetail = screenTime != null && screenTime.hasApps;
+  final weather = part.toolName == LocalToolNames.weather
+      ? WeatherToolResult.tryParse(cleanText)
+      : null;
+  final weatherAttribution = weather != null && !weather.isError
+      ? weather.attribution
+      : null;
+
+  if (PlatformUtils.isDesktopTarget) {
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        builder: (dialogContext) => _ToolDetailDesktopDialog(
+          title: title,
+          closeSemanticLabel: closeSemanticLabel,
+          argsPretty: argsPretty,
+          resultText: resultText,
+          images: images,
+          argumentsLabel: l10n.chatMessageWidgetArguments,
+          resultLabel: l10n.chatMessageWidgetResult,
+          imagesLabel: l10n.chatMessageWidgetImages,
+          screenTimeResult: useScreenTimeDetail ? screenTime : null,
+          weatherAttribution: weatherAttribution,
+          header: header,
+        ),
+      ),
+    );
+    return;
+  }
+
+  unawaited(
+    showCustomBottomSheet<void>(
+      context: context,
+      title: title,
+      closeSemanticLabel: closeSemanticLabel,
+      builder: (sheetContext, scrollController) {
+        if (useScreenTimeDetail) {
+          return ScreenTimeToolDetailBody(
+            result: screenTime,
+            scrollController: scrollController,
+          );
+        }
+        return _ToolDetailBody(
+          scrollController: scrollController,
+          argsPretty: argsPretty,
+          resultText: resultText,
+          images: images,
+          argumentsLabel: l10n.chatMessageWidgetArguments,
+          resultLabel: l10n.chatMessageWidgetResult,
+          imagesLabel: l10n.chatMessageWidgetImages,
+          weatherAttribution: weatherAttribution,
+          header: header,
+        );
+      },
+    ),
+  );
+}
+
+class _ToolDetailDesktopDialog extends StatefulWidget {
+  const _ToolDetailDesktopDialog({
+    required this.title,
+    required this.closeSemanticLabel,
+    required this.argsPretty,
+    required this.resultText,
+    required this.images,
+    required this.argumentsLabel,
+    required this.resultLabel,
+    required this.imagesLabel,
+    this.screenTimeResult,
+    this.weatherAttribution,
+    this.header,
+  });
+
+  static const dialogKey = ValueKey('tool_detail_desktop_dialog');
+  static const closeButtonKey = ValueKey('tool_detail_desktop_dialog_close');
+
+  final String title;
+  final String closeSemanticLabel;
+  final String argsPretty;
+  final String resultText;
+  final List<String> images;
+  final String argumentsLabel;
+  final String resultLabel;
+  final String imagesLabel;
+  final ScreenTimeResult? screenTimeResult;
+  final WeatherAttribution? weatherAttribution;
+  final Widget? header;
+
+  @override
+  State<_ToolDetailDesktopDialog> createState() =>
+      _ToolDetailDesktopDialogState();
+}
+
+class _ToolDetailDesktopDialogState extends State<_ToolDetailDesktopDialog> {
+  late final ScrollController _scrollController;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController = ScrollController();
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Dialog(
+      key: _ToolDetailDesktopDialog.dialogKey,
+      elevation: 12,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          minWidth: 420,
+          maxWidth: 640,
+          maxHeight: 680,
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: Material(
+            color: context.overlaySurface,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 14, 12, 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          widget.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: cs.onSurface,
+                            fontSize: 16,
+                            fontWeight: AppFontWeights.emphasis,
+                            height: 1.2,
+                          ),
+                        ),
+                      ),
+                      SizedBox(
+                        key: _ToolDetailDesktopDialog.closeButtonKey,
+                        width: 28,
+                        height: 28,
+                        child: IosIconButton(
+                          icon: Lucide.X,
+                          size: 20,
+                          padding: EdgeInsets.zero,
+                          color: cs.onSurface.withValues(alpha: 0.62),
+                          semanticLabel: widget.closeSemanticLabel,
+                          onTap: () => Navigator.of(context).maybePop(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Scrollbar(
+                    controller: _scrollController,
+                    child: widget.screenTimeResult != null
+                        ? ScreenTimeToolDetailBody(
+                            result: widget.screenTimeResult!,
+                            scrollController: _scrollController,
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                          )
+                        : _ToolDetailBody(
+                            scrollController: _scrollController,
+                            argsPretty: widget.argsPretty,
+                            resultText: widget.resultText,
+                            images: widget.images,
+                            argumentsLabel: widget.argumentsLabel,
+                            resultLabel: widget.resultLabel,
+                            imagesLabel: widget.imagesLabel,
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                            weatherAttribution: widget.weatherAttribution,
+                            header: widget.header,
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ToolDetailBody extends StatelessWidget {
+  const _ToolDetailBody({
+    required this.scrollController,
+    required this.argsPretty,
+    required this.resultText,
+    required this.images,
+    required this.argumentsLabel,
+    required this.resultLabel,
+    required this.imagesLabel,
+    this.padding = const EdgeInsets.fromLTRB(16, 8, 16, 24),
+    this.weatherAttribution,
+    this.header,
+  });
+
+  final ScrollController scrollController;
+  final String argsPretty;
+  final String resultText;
+  final List<String> images;
+  final String argumentsLabel;
+  final String resultLabel;
+  final String imagesLabel;
+  final EdgeInsets padding;
+  final WeatherAttribution? weatherAttribution;
+  final Widget? header;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return AppSelectionArea(
+      child: CustomScrollView(
+        controller: scrollController,
+        slivers: [
+          SliverPadding(
+            padding: padding,
+            sliver: SliverMainAxisGroup(
+              slivers: [
+                if (header != null)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: header,
+                    ),
+                  ),
+                ToolDetailTextSection(label: argumentsLabel, text: argsPretty),
+                const SliverToBoxAdapter(child: SizedBox(height: 12)),
+                ToolDetailTextSection(label: resultLabel, text: resultText),
+                if (images.isNotEmpty) ...[
+                  const SliverToBoxAdapter(child: SizedBox(height: 12)),
+                  SliverToBoxAdapter(
+                    child: Text(
+                      imagesLabel,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: cs.onSurface.withValues(alpha: 0.6),
+                      ),
+                    ),
+                  ),
+                  const SliverToBoxAdapter(child: SizedBox(height: 6)),
+                  SliverToBoxAdapter(
+                    child: SizedBox(
+                      height: kToolImageDetailHeight,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: images.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 8),
+                        itemBuilder: (context, index) {
+                          final path = images[index];
+                          return GestureDetector(
+                            onTap: () => _showToolFullImage(context, path),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: _buildToolImageFromPath(
+                                context,
+                                path,
+                                height: kToolImageDetailHeight,
+                                maxLogicalWidth: kToolImageDetailMaxWidth,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ],
+                if (weatherAttribution != null) ...[
+                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                  SliverToBoxAdapter(
+                    child: WeatherAttributionLabel(
+                      attribution: weatherAttribution!,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ChatMessageWidget extends StatefulWidget {
+  final PageStorageBucket? timelineStorage;
+  final ChatMessage message;
+  final Widget? modelIcon;
+  final bool showModelIcon;
+  // Assistant identity override
+  final bool useAssistantAvatar;
+  final bool useAssistantName;
+  final String? assistantName;
+  final String? assistantAvatar; // path/url/emoji; null => use initial
+  final bool showUserAvatar;
+  final bool showTokenStats;
+  final VoidCallback? onRegenerate;
+  final VoidCallback? onRetryWithoutImages;
+  final VoidCallback? onResend;
+  final VoidCallback? onCopy;
+  final VoidCallback? onTranslate;
+  final VoidCallback? onSpeak;
+  final VoidCallback? onMore;
+  final VoidCallback? onEdit; // user: edit
+  final VoidCallback? onDelete; // user: delete
+  // Optional version switcher (branch) UI controls
+  final int? versionIndex; // zero-based display ordinal, not a version number
+  final int? versionCount;
+  final VoidCallback? onPrevVersion;
+  final VoidCallback? onNextVersion;
+  // Optional reasoning UI props (for reasoning-capable models)
+  final String? reasoningText;
+  final bool reasoningExpanded;
+  final bool reasoningLoading;
+  final DateTime? reasoningStartAt;
+  final DateTime? reasoningFinishedAt;
+  final VoidCallback? onToggleReasoning;
+  // For multiple reasoning segments
+  final List<ReasoningSegment>? reasoningSegments;
+
+  /// Presentation overlays extracted from inline thinking are not independent
+  /// provider reasoning. Keep removing their original spans from the body.
+  final bool reasoningSegmentsFromInlineThinking;
+  // Optional translation UI props
+  final bool translationExpanded;
+  final VoidCallback? onToggleTranslation;
+  // MCP tool calls/results mixed-in cards
+  final List<ToolUIPart>? toolParts;
+  final List<int>? contentSplitOffsets;
+  final List<int>? reasoningCountAtSplit;
+  final List<int>? toolCountAtSplit;
+  // Hide streaming dots when pinned globally
+  final bool hideStreamingIndicator;
+  // Whether files are currently being processed
+  final bool isProcessingFiles;
+  final RetryStatus? retryStatus;
+  final bool enableStreamingTextMotion;
+  final List<String> suggestions;
+  final ValueChanged<String>? onSuggestionTap;
+  final Future<void> Function(ToolUIPart part, AskUserResult result)?
+  onRecoveredAskUserAnswer;
+
+  /// When null, follows [SettingsProvider.showThinkingCards].
+  final bool? showThinkingCards;
+
+  /// When null, follows [SettingsProvider.showToolCards].
+  final bool? showToolCards;
+
+  /// When null, follows [SettingsProvider.collapseThinkingSteps].
+  /// A false override also expands browser tool groups in the export.
+  final bool? collapseThinkingSteps;
+  final void Function(String imageKey, double aspectRatio)? onInlineImageAspect;
+
+  /// Off for exports, which must render the whole user message.
+  final bool collapseLongUserText;
+
+  const ChatMessageWidget({
+    this.timelineStorage,
+    super.key,
+    required this.message,
+    this.modelIcon,
+    this.showModelIcon = true,
+    this.useAssistantAvatar = false,
+    this.useAssistantName = false,
+    this.assistantName,
+    this.assistantAvatar,
+    this.showUserAvatar = true,
+    this.showTokenStats = true,
+    this.onRegenerate,
+    this.onRetryWithoutImages,
+    this.onResend,
+    this.onCopy,
+    this.onTranslate,
+    this.onSpeak,
+    this.onMore,
+    this.onEdit,
+    this.onDelete,
+    this.versionIndex,
+    this.versionCount,
+    this.onPrevVersion,
+    this.onNextVersion,
+    this.reasoningText,
+    this.reasoningExpanded = false,
+    this.reasoningLoading = false,
+    this.reasoningStartAt,
+    this.reasoningFinishedAt,
+    this.onToggleReasoning,
+    this.reasoningSegments,
+    this.reasoningSegmentsFromInlineThinking = false,
+    this.translationExpanded = true,
+    this.onToggleTranslation,
+    this.toolParts,
+    this.contentSplitOffsets,
+    this.reasoningCountAtSplit,
+    this.toolCountAtSplit,
+    this.hideStreamingIndicator = false,
+    this.isProcessingFiles = false,
+    this.retryStatus,
+    this.enableStreamingTextMotion = true,
+    this.suggestions = const <String>[],
+    this.onSuggestionTap,
+    this.onRecoveredAskUserAnswer,
+    this.showThinkingCards,
+    this.showToolCards,
+    this.collapseThinkingSteps,
+    this.onInlineImageAspect,
+    this.collapseLongUserText = true,
+  });
+
+  @override
+  State<ChatMessageWidget> createState() => _ChatMessageWidgetState();
+}
+
+class _ChatMessageWidgetState extends State<ChatMessageWidget> {
+  final ScrollController _reasoningScroll = ScrollController();
+  bool _tickActive = false;
+  // Local expand state for inline <think> card (defaults to expanded)
+  bool? _inlineThinkExpanded;
+  bool _inlineThinkManuallyToggled = false;
+  // User message context menu state
+  final GlobalKey _userBubbleKey = GlobalKey();
+  OverlayEntry? _userMenuOverlay;
+  // Desktop anchored menus for bottom action buttons
+  final GlobalKey _moreBtnKey1 = GlobalKey();
+  // ValueNotifier for reasoning animation tick - avoids full widget rebuild
+  final ValueNotifier<int> _reasoningTick = ValueNotifier<int>(0);
+  Timer? _reasoningTimer;
+  // Memoized think-tag parse, keyed by source string equality. The parser is
+  // a pure function of message content, so a single slot is enough.
+  String? _inlineThinkMemoSource;
+  UiMessageSource? _inlineThinkMemoUiSource;
+  ThinkingTagParseResult? _inlineThinkMemoResult;
+  // Memoized assistant visual-regex results, keyed by scope + input string.
+  // Cleared when the rule signature changes; skipped while streaming because
+  // the content changes every frame anyway.
+  final Map<String, String> _visualRegexMemo = <String, String>{};
+  String _visualRegexMemoSignature = '';
+  // Search-result extraction is keyed by tool-part list identity.
+  List<ToolUIPart>? _searchItemsParts;
+  List<Map<String, dynamic>>? _searchItemsCache;
+  Map<String, String> _citationIndexLookup = const {};
+  String? Function(String) _citationIndexResolver = (_) => null;
+  final _localTimelineStorage = PageStorageBucket();
+  final _thinkingWidgets = Expando<(Object, Widget)>();
+  List<ReasoningSegment>? _currentReasoningSegments;
+  Future<void> _submitRecoveredAnswer(
+    ToolUIPart part,
+    AskUserResult result,
+  ) async {
+    await widget.onRecoveredAskUserAnswer?.call(part, result);
+  }
+
+  IncrementalTimelineProjection? _incrementalTimeline;
+  final _timelineVisibility = TimelineVisibilityCache();
+  List<ToolUIPart>? _timelineToolSource;
+  List<TimelineToolRef> _timelineTools = const [];
+  final _timelineToolRefs = Expando<TimelineToolRef>();
+
+  @override
+  void initState() {
+    super.initState();
+    _syncTicker();
+
+    // Determine initial state for inline <think> card BEFORE first paint to avoid
+    // post-frame size changes that can cause list scroll jitter/snapping.
+    try {
+      final parsed = _legacyInlineThinkingFor(widget);
+      final extracted = parsed.thinkingTexts.join('\n\n');
+      final usingInlineThink =
+          (widget.reasoningText == null || widget.reasoningText!.isEmpty) &&
+          extracted.isNotEmpty;
+      if (usingInlineThink && _inlineThinkExpanded == null) {
+        final autoCollapse = context
+            .read<SettingsProvider>()
+            .autoCollapseThinking;
+        _inlineThinkExpanded = !autoCollapse ? true : false;
+      }
+    } catch (_) {
+      // If anything fails here, fall back to later update logic.
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatMessageWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _reconcileUiOwner();
+    _syncTicker();
+    // Auto-collapse when inline <think> transitions from loading -> finished
+    _applyAutoCollapseInlineThinkIfFinished(oldWidget: oldWidget);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _reconcileUiOwner();
+  }
+
+  void _reconcileUiOwner() => UiRuntimeScope.maybeOf(context)?.reconcile(
+    widget.message,
+    hasProviderReasoning:
+        (widget.reasoningText?.isNotEmpty ?? false) ||
+        widget.reasoningLoading ||
+        (!widget.reasoningSegmentsFromInlineThinking &&
+            (widget.reasoningSegments?.isNotEmpty ?? false)),
+  );
+
+  void _applyAutoCollapseInlineThinkIfFinished({ChatMessageWidget? oldWidget}) {
+    if (!mounted) return;
+    bool usingInlineThinkOld = false;
+    if (oldWidget != null) {
+      final oldExtracted = _legacyInlineThinkingFor(
+        oldWidget,
+      ).thinkingTexts.join('\n\n');
+      usingInlineThinkOld =
+          (oldWidget.reasoningText == null ||
+              oldWidget.reasoningText!.isEmpty) &&
+          oldExtracted.isNotEmpty;
+    }
+
+    // Read the old memo before parsing the new source so the build can reuse
+    // the new result instead of alternating the single-slot cache.
+    final newExtracted = _legacyInlineThinkingFor(
+      widget,
+    ).thinkingTexts.join('\n\n');
+    final usingInlineThinkNew =
+        (widget.reasoningText == null || widget.reasoningText!.isEmpty) &&
+        newExtracted.isNotEmpty;
+
+    final autoCollapse = context.read<SettingsProvider>().autoCollapseThinking;
+
+    // If finished now (not loading), inline think is used, and auto-collapse is on
+    // Only collapse when user hasn't manually toggled; also if we don't yet have a chosen state.
+    final finishedNow = usingInlineThinkNew;
+    final justFinished = oldWidget != null
+        ? (!usingInlineThinkOld && finishedNow)
+        : finishedNow;
+
+    if (autoCollapse && finishedNow && justFinished) {
+      if (!_inlineThinkManuallyToggled || _inlineThinkExpanded == null) {
+        if (mounted) setState(() => _inlineThinkExpanded = false);
+        return;
+      }
+    }
+
+    // On first mount where already finished and no user choice yet, honor autoCollapse
+    if (oldWidget == null &&
+        usingInlineThinkNew &&
+        _inlineThinkExpanded == null) {
+      if (autoCollapse) {
+        if (mounted) setState(() => _inlineThinkExpanded = false);
+      } else {
+        if (mounted) setState(() => _inlineThinkExpanded = true);
+      }
+    }
+  }
+
+  void _syncTicker() {
+    final loading =
+        widget.reasoningLoading &&
+        widget.reasoningStartAt != null &&
+        widget.reasoningFinishedAt == null;
+    _tickActive = loading;
+    if (loading) {
+      _reasoningTimer ??= Timer.periodic(const Duration(milliseconds: 100), (
+        _,
+      ) {
+        if (mounted && _tickActive) _reasoningTick.value++;
+      });
+    } else {
+      _reasoningTimer?.cancel();
+      _reasoningTimer = null;
+    }
+  }
+
+  ThinkingTagParseResult _legacyInlineThinkingFor(ChatMessageWidget widget) {
+    if (messageHasProviderReasoning(widget.message) ||
+        (widget.reasoningText?.isNotEmpty ?? false) ||
+        widget.reasoningLoading ||
+        (!widget.reasoningSegmentsFromInlineThinking &&
+            (widget.reasoningSegments?.isNotEmpty ?? false))) {
+      return ThinkingTagParseResult(
+        visibleContent: widget.message.content,
+        thinkingTexts: const <String>[],
+      );
+    }
+    final source = widget.message.content;
+    final memo = _inlineThinkMemoResult;
+    final uiSource = UiMessageSource.of(widget.message.parts);
+    if (memo != null &&
+        _inlineThinkMemoSource == source &&
+        identical(uiSource, _inlineThinkMemoUiSource)) {
+      return memo;
+    }
+    final parsed = ThinkingTagParser.parseLegacyInlineBlocks(
+      source,
+      protectedRanges: uiSource.protectedJoinedRanges,
+      includeUnclosed: uiSource.hasFences,
+    );
+    _inlineThinkMemoUiSource = uiSource;
+    _inlineThinkMemoSource = source;
+    _inlineThinkMemoResult = parsed;
+    return parsed;
+  }
+
+  String _visualRegexSignature(Assistant assistant) {
+    // String signature (not a hash) so rule edits can never collide into a
+    // stale memo hit.
+    return assistant.regexRules
+        .map(
+          (rule) =>
+              '${rule.enabled}|${rule.pattern}|${rule.replacement}|'
+              '${rule.visualOnly}|${rule.replaceOnly}|'
+              '${rule.scopes.map((scope) => scope.index).join(',')}',
+        )
+        .join(';');
+  }
+
+  String _applyVisualAssistantRegexes(
+    String input, {
+    required Assistant? assistant,
+    required AssistantRegexScope scope,
+  }) {
+    if (input.isEmpty ||
+        assistant == null ||
+        assistant.regexRules.isEmpty ||
+        widget.message.isStreaming) {
+      return applyAssistantRegexes(
+        input,
+        assistant: assistant,
+        scope: scope,
+        target: AssistantRegexTransformTarget.visual,
+      );
+    }
+    final signature = _visualRegexSignature(assistant);
+    if (signature != _visualRegexMemoSignature) {
+      _visualRegexMemo.clear();
+      _visualRegexMemoSignature = signature;
+    }
+    if (_visualRegexMemo.length >= 8) _visualRegexMemo.clear();
+    return _visualRegexMemo.putIfAbsent(
+      '${scope.index}\u0000$input',
+      () => applyAssistantRegexes(
+        input,
+        assistant: assistant,
+        scope: scope,
+        target: AssistantRegexTransformTarget.visual,
+      ),
+    );
+  }
+
+  Assistant? _assistantForMessage() {
+    try {
+      final chat = context.read<ChatService>();
+      final convo = chat.getConversation(widget.message.conversationId);
+      final aId = convo?.assistantId;
+      if (aId == null || aId.isEmpty) return null;
+      final ap = context.watch<AssistantProvider>();
+      return ap.getById(aId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _confirmRegeneration(VoidCallback action) async {
+    final settings = context.read<SettingsProvider>();
+    if (!settings.showRegenerateConfirmDialog) {
+      action();
+      return;
+    }
+
+    final l10n = AppLocalizations.of(context)!;
+    final content = settings.regenerateDeleteTrailingMessages
+        ? l10n.chatMessageWidgetRegenerateConfirmDeleteTrailingContent
+        : l10n.chatMessageWidgetRegenerateConfirmContent;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        backgroundColor: dctx.overlaySurface,
+        title: Text(l10n.chatMessageWidgetRegenerateConfirmTitle),
+        content: Text('$content\n\n${l10n.branchInheritNote}'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dctx).pop(false),
+            child: Text(l10n.chatMessageWidgetRegenerateConfirmCancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dctx).pop(true),
+            child: Text(l10n.chatMessageWidgetRegenerateConfirmOk),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && mounted) action();
+  }
+
+  @override
+  void dispose() {
+    try {
+      _userMenuOverlay?.remove();
+    } catch (_) {}
+    _userMenuOverlay = null;
+    _reasoningTimer?.cancel();
+    _reasoningTimer = null;
+    _reasoningTick.dispose();
+    _reasoningScroll.dispose();
+    super.dispose();
+  }
+
+  void _showUserContextMenu() {
+    // Haptic feedback (optional)
+    try {
+      Haptics.light();
+    } catch (_) {}
+
+    final box = _userBubbleKey.currentContext?.findRenderObject() as RenderBox?;
+    final overlay = Overlay.of(context);
+    final overlayBox = overlay.context.findRenderObject() as RenderBox?;
+    if (box == null || overlayBox == null) return;
+
+    final bubbleTopLeft = box.localToGlobal(Offset.zero, ancestor: overlayBox);
+    final bubbleSize = box.size;
+    final screenSize = overlayBox.size;
+    final insets = MediaQuery.paddingOf(context); // status bar / gesture insets
+    final safeLeft = insets.left + 12;
+    final safeRight = insets.right + 12;
+    final safeTop = insets.top + 12;
+    final safeBottom = insets.bottom + 12;
+
+    const double menuWidth = 220; // compact width
+    final double estMenuHeight = widget.onEdit == null ? 140 : 184;
+    const double gap = 10; // space between bubble and menu
+
+    // Horizontal placement: align menu's right edge to bubble's right edge,
+    // and clamp into safe area for better reachability on long messages.
+    final double bubbleRight = bubbleTopLeft.dx + bubbleSize.width;
+    double x = bubbleRight - menuWidth;
+    final double minX = safeLeft;
+    final double maxX = screenSize.width - safeRight - menuWidth;
+    if (x < minX) x = minX;
+    if (x > maxX) x = maxX;
+
+    // Decide above vs below using safe area
+    final availableAbove = bubbleTopLeft.dy - gap - safeTop;
+    final availableBelow =
+        (screenSize.height - safeBottom) -
+        (bubbleTopLeft.dy + bubbleSize.height + gap);
+    final bool canPlaceAbove = availableAbove >= estMenuHeight;
+    final bool canPlaceBelow = availableBelow >= estMenuHeight;
+
+    bool placeAbove;
+    if (canPlaceAbove) {
+      placeAbove = true;
+    } else if (canPlaceBelow) {
+      placeAbove = false;
+    } else {
+      // Fallback: choose the side with more space
+      placeAbove = availableAbove > availableBelow;
+    }
+
+    double y = placeAbove
+        ? (bubbleTopLeft.dy - estMenuHeight - gap)
+        : (bubbleTopLeft.dy + bubbleSize.height + gap);
+
+    // Clamp vertically to remain fully visible within safe area
+    final double minY = safeTop;
+    final double maxY = screenSize.height - safeBottom - estMenuHeight;
+    if (y < minY) y = minY;
+    if (y > maxY) y = maxY;
+
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final l10n = AppLocalizations.of(context)!;
+
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'context-menu',
+      barrierColor: cs.scrim.withValues(alpha: 0.08),
+      pageBuilder: (ctx, _, __) {
+        return Stack(
+          children: [
+            // Positioned popup
+            Positioned(
+              left: x,
+              top: y,
+              width: menuWidth,
+              child: _AnimatedPopup(
+                child: DecoratedBox(
+                  // Draw border outside the clipped/blurred content to avoid corner clipping
+                  decoration: ShapeDecoration(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      side: BorderSide(
+                        color: isDark
+                            ? cs.onSurface.withValues(alpha: 0.08)
+                            : cs.outlineVariant.withValues(alpha: 0.2),
+                        width: 1,
+                      ),
+                    ),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: DesktopOverlayBackdrop(
+                      sigma: 14,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: cs.surfaceContainerHigh.withValues(
+                            alpha: 0.66,
+                          ),
+                        ),
+                        child: Material(
+                          color: Colors.transparent,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _MenuItem(
+                                icon: Lucide.Copy,
+                                label: l10n.shareProviderSheetCopyButton,
+                                onTap: () async {
+                                  Navigator.of(ctx).pop();
+                                  if (widget.onCopy != null) {
+                                    widget.onCopy!.call();
+                                  } else {
+                                    await copyUiMessage(
+                                      context,
+                                      widget.message,
+                                    );
+                                  }
+                                },
+                              ),
+                              _MenuItem(
+                                icon: Lucide.TextSelect,
+                                label: l10n.messageMoreSheetSelectCopy,
+                                onTap: () {
+                                  Navigator.of(ctx).pop();
+                                  WidgetsBinding.instance.addPostFrameCallback((
+                                    _,
+                                  ) {
+                                    if (!mounted) return;
+                                    unawaited(
+                                      showSelectCopySheet(
+                                        context,
+                                        message: widget.message,
+                                      ),
+                                    );
+                                  });
+                                },
+                              ),
+                              _MenuItem(
+                                icon: Lucide.Trash2,
+                                danger: true,
+                                label: l10n.messageMoreSheetDelete,
+                                onTap: () {
+                                  Navigator.of(ctx).pop();
+                                  (widget.onDelete ?? widget.onMore)?.call();
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    ).whenComplete(() {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  Widget _buildUserAvatar(
+    String? avatarType,
+    String? avatarValue,
+    ColorScheme cs,
+  ) {
+    Widget avatarContent;
+
+    if (avatarType == 'emoji' && avatarValue != null) {
+      final bool isIOS = defaultTargetPlatform == TargetPlatform.iOS;
+      final double fs = 18;
+      final Offset? nudge = isIOS ? Offset(fs * 0.065, fs * -0.05) : null;
+      avatarContent = Center(
+        child: EmojiText(
+          avatarValue,
+          fontSize: fs,
+          optimizeEmojiAlign: true,
+          nudge: nudge,
+        ),
+      );
+    } else if (avatarType == 'url' && avatarValue != null) {
+      avatarContent = AvatarImage(
+        source: avatarValue,
+        isNetwork: true,
+        size: 32,
+        fallback: const DefaultUserAvatar(size: 32),
+      );
+    } else if (avatarType == 'file' && avatarValue != null) {
+      avatarContent = AvatarImage(
+        source: avatarValue,
+        size: 32,
+        fallback: const DefaultUserAvatar(size: 32),
+      );
+    } else {
+      avatarContent = const DefaultUserAvatar(size: 32);
+    }
+
+    return Container(
+      width: 32,
+      height: 32,
+      decoration: BoxDecoration(
+        color: cs.primary.withValues(alpha: 0.1),
+        shape: BoxShape.circle,
+      ),
+      child: avatarContent,
+    );
+  }
+
+  Widget _buildToolMessage() {
+    // Parse JSON payload embedded in tool message content
+    String toolName = 'tool';
+    Map<String, dynamic> args = const {};
+    String result = '';
+    Map<String, dynamic>? metadata;
+    try {
+      final obj = jsonDecode(widget.message.content) as Map<String, dynamic>;
+      toolName = (obj['tool'] ?? 'tool').toString();
+      final a = obj['arguments'];
+      if (a is Map<String, dynamic>) args = a;
+      result = (obj['result'] ?? '').toString();
+      if (obj['metadata'] is Map) {
+        metadata = Map<String, dynamic>.from(obj['metadata'] as Map);
+      }
+    } catch (_) {}
+
+    final part = ToolUIPart(
+      id: widget.message.id,
+      toolName: toolName,
+      arguments: args,
+      content: result,
+      metadata: metadata,
+      loading: false,
+    );
+    if (!_shouldShowToolCard(
+      context,
+      part,
+      showToolCards: widget.showToolCards,
+      conversationId: widget.message.conversationId,
+    )) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      child: _RecoveredAskUserAction(
+        conversationId: widget.message.conversationId,
+        onSubmit: widget.onRecoveredAskUserAnswer,
+        child: _ToolCallItem(
+          part: part,
+          conversationId: widget.message.conversationId,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildUserMessage() {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final userAvatarType = context.select<UserProvider, String?>(
+      (u) => u.avatarType,
+    );
+    final userAvatarValue = context.select<UserProvider, String?>(
+      (u) => u.avatarValue,
+    );
+    final userMessageSettings = context
+        .select<
+          SettingsProvider,
+          ({bool showActions, bool enableMarkdown, int collapseChars})
+        >(
+          (s) => (
+            showActions: s.showUserMessageActions,
+            enableMarkdown: s.enableUserMarkdown,
+            collapseChars: s.collapseLongUserMessages
+                ? s.collapseLongUserMessageChars
+                : 0,
+          ),
+        );
+    // Attachments come from structured parts only. Literal marker-like text
+    // inside TextPart stays plain text and is never re-parsed.
+    final assistant = _assistantForMessage();
+    final uiContent = UiUserMessageContent(widget.message);
+    final mappedUser = applyAssistantRegexesProtected(
+      ProtectedText(
+        uiContent.text,
+        const [],
+        sourceMap: SourceTextMap.identity(
+          uiContent.text.length,
+          offset: widget.message.content.length - uiContent.text.length,
+        ),
+      ),
+      assistant: assistant,
+      scope: AssistantRegexScope.user,
+      target: AssistantRegexTransformTarget.visual,
+    );
+    final visualText = mappedUser.text;
+    final showUserActions = userMessageSettings.showActions;
+    final showVersionSwitcher = (widget.versionCount ?? 1) > 1;
+    final mediaPreview = _buildAttachmentPreview(
+      context,
+      parts: widget.message.parts,
+      isDark: isDark,
+      alignEnd: true,
+    );
+    final textBubble = visualText.isNotEmpty || uiContent.hasContext
+        ? Container(
+            key: ValueKey('user-message-text-bubble:${widget.message.id}'),
+            child: _buildBubbleContainer(
+              context: context,
+              isUser: true,
+              child: uiContent.wrap(
+                _buildUserTextContent(
+                  context,
+                  visualText,
+                  mappedUser.sourceMap!,
+                  userMessageSettings.enableMarkdown,
+                  widget.collapseLongUserText
+                      ? userMessageSettings.collapseChars
+                      : 0,
+                ),
+              ),
+            ),
+          )
+        : null;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          // Header: avatar only (name and timestamp are intentionally hidden)
+          if (widget.showUserAvatar) ...[
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [_buildUserAvatar(userAvatarType, userAvatarValue, cs)],
+            ),
+            const SizedBox(height: 8),
+          ],
+          // Message content (context menu: long-press on mobile, right-click on desktop)
+          GestureDetector(
+            onLongPressStart: (_) {
+              final isDesktop =
+                  defaultTargetPlatform == TargetPlatform.macOS ||
+                  defaultTargetPlatform == TargetPlatform.windows ||
+                  defaultTargetPlatform == TargetPlatform.linux;
+              if (isDesktop) return; // Desktop uses right-click menu
+              _showUserContextMenu();
+            },
+            onSecondaryTapDown: (details) {
+              final isDesktop =
+                  defaultTargetPlatform == TargetPlatform.macOS ||
+                  defaultTargetPlatform == TargetPlatform.windows ||
+                  defaultTargetPlatform == TargetPlatform.linux;
+              if (!isDesktop) return; // Mobile keeps long-press
+              _showUserContextMenuAt(details.globalPosition);
+            },
+            behavior: HitTestBehavior.translucent,
+            child: Container(
+              key: _userBubbleKey,
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.sizeOf(context).width * 0.75,
+              ),
+              child: Column(
+                key: ValueKey('user-message-content:${widget.message.id}'),
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  if (mediaPreview != null) mediaPreview,
+                  if (mediaPreview != null && textBubble != null)
+                    const SizedBox(height: 8),
+                  if (textBubble != null) textBubble,
+                ],
+              ),
+            ),
+          ),
+          if (showUserActions || showVersionSwitcher) ...[
+            SizedBox(height: showUserActions ? 8 : 6),
+            Align(
+              alignment: Alignment.centerRight,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.sizeOf(context).width * 0.75,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    if (showUserActions) ...[
+                      SizedBox(
+                        width: 28,
+                        height: 28,
+                        child: Center(
+                          child: IosIconButton(
+                            size: 16,
+                            padding: EdgeInsets.all(4),
+                            icon: Lucide.Copy,
+                            color: cs.onSurface.withValues(alpha: 0.9),
+                            onTap:
+                                widget.onCopy ??
+                                () => copyUiMessage(context, widget.message),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        width: 28,
+                        height: 28,
+                        child: Center(
+                          child: IosIconButton(
+                            size: 16,
+                            padding: EdgeInsets.all(4),
+                            icon: Lucide.RefreshCw,
+                            color: cs.onSurface.withValues(alpha: 0.9),
+                            onTap: widget.onResend == null
+                                ? null
+                                : () => _confirmRegeneration(widget.onResend!),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      if (widget.onEdit != null) ...[
+                        SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: Center(
+                            child: IosIconButton(
+                              size: 16,
+                              padding: EdgeInsets.all(4),
+                              icon: Lucide.Pencil,
+                              color: cs.onSurface.withValues(alpha: 0.9),
+                              onTap: widget.onEdit,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      SizedBox(
+                        width: 28,
+                        height: 28,
+                        child: Center(
+                          child: GestureDetector(
+                            key: _moreBtnKey1,
+                            onTapDown: (d) {
+                              final isDesktop =
+                                  defaultTargetPlatform ==
+                                      TargetPlatform.macOS ||
+                                  defaultTargetPlatform ==
+                                      TargetPlatform.windows ||
+                                  defaultTargetPlatform == TargetPlatform.linux;
+                              if (isDesktop) {
+                                try {
+                                  DesktopMenuAnchor.setPosition(
+                                    d.globalPosition,
+                                  );
+                                } catch (_) {}
+                              }
+                            },
+                            onTap: () {
+                              final isDesktop =
+                                  defaultTargetPlatform ==
+                                      TargetPlatform.macOS ||
+                                  defaultTargetPlatform ==
+                                      TargetPlatform.windows ||
+                                  defaultTargetPlatform == TargetPlatform.linux;
+                              if (isDesktop) {
+                                _setAnchorFromKey(_moreBtnKey1);
+                              }
+                              widget.onMore?.call();
+                            },
+                            child: IosIconButton(
+                              size: 16,
+                              padding: EdgeInsets.all(4),
+                              icon: Lucide.Ellipsis,
+                              color: cs.onSurface.withValues(alpha: 0.9),
+                              onTap: null,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (showVersionSwitcher) ...[
+                      if (showUserActions) const SizedBox(width: 6),
+                      _BranchSelector(
+                        index: widget.versionIndex ?? 0,
+                        total: widget.versionCount ?? 1,
+                        onPrev: widget.onPrevVersion,
+                        onNext: widget.onNextVersion,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  void _showUserContextMenuAt(Offset globalPosition) async {
+    final l10n = AppLocalizations.of(context)!;
+    // Haptic feedback
+    try {
+      Haptics.light();
+    } catch (_) {}
+    await showDesktopContextMenuAt(
+      context,
+      globalPosition: globalPosition,
+      items: [
+        DesktopContextMenuItem(
+          icon: Lucide.Copy,
+          label: l10n.shareProviderSheetCopyButton,
+          onTap: () async {
+            if (widget.onCopy != null) {
+              widget.onCopy!.call();
+            } else {
+              await copyUiMessage(context, widget.message);
+            }
+          },
+        ),
+        DesktopContextMenuItem(
+          icon: Lucide.Trash2,
+          label: l10n.messageMoreSheetDelete,
+          danger: true,
+          onTap: () => (widget.onDelete ?? widget.onMore)?.call(),
+        ),
+      ],
+    );
+  }
+
+  void _setAnchorFromKey(GlobalKey key) {
+    final rb = key.currentContext?.findRenderObject() as RenderBox?;
+    if (rb == null) return;
+    try {
+      final center = rb.localToGlobal(
+        Offset(rb.size.width / 2, rb.size.height),
+      );
+      DesktopMenuAnchor.setPosition(center);
+    } catch (_) {}
+  }
+
+  /// Number of text lines kept visible when a long user message is collapsed.
+  static const int _collapsedUserTextLines = 9;
+
+  Widget _buildUserTextContent(
+    BuildContext context,
+    String visualText,
+    SourceTextMap sourceMap,
+    bool enableUserMarkdown,
+    int collapseChars,
+  ) {
+    final bool isDesktop =
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.linux;
+    final double baseUser = isDesktop ? 14.0 : 15.5;
+    final quoteRanges = quoteSourceHighlights(
+      context,
+      widget.message,
+      visualText,
+      sourceMap: sourceMap,
+    );
+    final find = ConversationFindHighlights.of(context);
+    final highlights = [...quoteRanges, ...?find?.ranges(FindPart.body, 0)];
+    // 气泡固定为纯黑底，高亮必须使用白色才可见。
+    const bubbleForeground = Color(0xFFFFFFFF);
+    final highlightColor = bubbleForeground.withValues(alpha: 0.28);
+
+    Widget content;
+    if (enableUserMarkdown) {
+      content = DefaultTextStyle.merge(
+        style: TextStyle(fontSize: baseUser, height: 1.45),
+        child: MarkdownWithCodeHighlight(
+          text: visualText,
+          baseStyle: TextStyle(fontSize: baseUser, height: 1.45),
+          conversationId: widget.message.conversationId,
+          highlightRanges: highlights,
+          highlightColor: highlightColor,
+        ),
+      );
+    } else {
+      final text = widget.message.quotes.isEmpty
+          ? UnicodeSanitizer.sanitize(visualText)
+          : visualText;
+      content = plainMessageText(
+        text: text,
+        buildSpan: (start, end) => widget.message.quotes.isNotEmpty
+            ? buildQuoteTextSpan(
+                text: text.substring(start, end),
+                quotes: widget.message.quotes,
+                quoteAtOffset: (offset) => quoteAtSourceOffset(
+                  widget.message.content,
+                  widget.message.quotes,
+                  sourceMap
+                      .sourceRange(start + offset, start + offset + 1)
+                      .start,
+                ),
+                highlights: [
+                  for (final range in highlights)
+                    if (range.start < end && range.end > start)
+                      TextRange(
+                        start: range.start.clamp(start, end) - start,
+                        end: range.end.clamp(start, end) - start,
+                      ),
+                ],
+                highlightColor: highlightColor,
+                token: (quote, offset) => SelectableSpanAdapter(
+                  selectedText: '\uFFFC',
+                  child: QuoteChip(
+                    quote: quote,
+                    selected: highlights.any(
+                      (range) =>
+                          range.start <= start + offset &&
+                          range.end > start + offset,
+                    ),
+                    style: TextStyle(fontSize: baseUser, height: 1.4),
+                  ),
+                ),
+              )
+            : highlightedQuoteSource(
+                text,
+                highlights,
+                highlightColor,
+                start: start,
+                end: end,
+              ),
+        style: TextStyle(
+          fontSize: baseUser,
+          height: 1.4,
+          color: chatSurfacePlainTextColor(context, isUser: true),
+        ),
+      );
+    }
+
+    content = QuoteRenderScope(
+      source: widget.message.content,
+      sourceMap: sourceMap,
+      quotes: widget.message.quotes,
+      child: DefaultTextStyle.merge(
+        textWidthBasis: TextWidthBasis.longestLine,
+        child: content,
+      ),
+    );
+    if (isDesktop) {
+      content = AppSelectionArea(
+        key: ValueKey('user_${widget.message.id}'),
+        message: widget.message,
+        sourceText: visualText,
+        sourceMap: sourceMap,
+        child: content,
+      );
+    }
+
+    if (collapseChars > 0 && visualText.length > collapseChars) {
+      final lineHeight =
+          MediaQuery.textScalerOf(context).scale(baseUser) * 1.45;
+      content = CollapsibleUserText(
+        key: ValueKey('user-collapse:${widget.message.id}'),
+        collapsedHeight: lineHeight * _collapsedUserTextLines,
+        reveal:
+            quoteRanges.isNotEmpty ||
+            find?.current?.part == FindPart.body ||
+            QuoteInteractionScope.maybeOf(
+                  context,
+                )?.navigationFor(widget.message.id) !=
+                null,
+        child: content,
+      );
+    }
+
+    return QuoteSourceAnchor(
+      message: widget.message,
+      source: visualText,
+      sourceMap: sourceMap,
+      markdown: enableUserMarkdown,
+      child: content,
+    );
+  }
+
+  /// Attachment previews in [parts] ordinal order (not images-then-files).
+  ///
+  /// [alignEnd] true for user bubbles (trailing), false for assistant (start).
+  Widget? _buildAttachmentPreview(
+    BuildContext context, {
+    required List<MessagePart> parts,
+    required bool isDark,
+    required bool alignEnd,
+  }) {
+    final attachmentEntries = <({int index, MessagePart part})>[
+      for (var i = 0; i < parts.length; i++)
+        if (parts[i] is ImagePart ||
+            parts[i] is FilePart ||
+            (parts[i] is MalformedPart &&
+                (parts[i] as MalformedPart).isAttachmentKind))
+          (index: i, part: parts[i]),
+    ];
+    if (attachmentEntries.isEmpty) return null;
+
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final roleKey = alignEnd ? 'user' : 'assistant';
+
+    Widget unavailableImagePlaceholder() => Container(
+      width: 112,
+      height: 112,
+      color: cs.onSurface.withValues(alpha: isDark ? 0.08 : 0.06),
+      alignment: Alignment.center,
+      child: Icon(Lucide.ImageOff, color: cs.onSurface.withValues(alpha: 0.45)),
+    );
+
+    final viewablePaths = <String>[];
+    final heroTags = <Object>[];
+    final items = <Widget>[];
+    for (final entry in attachmentEntries) {
+      final part = entry.part;
+      final partIndex = entry.index;
+      if (part is MalformedPart) {
+        if (part.rawKind == 'image') {
+          items.add(
+            IosCardPress(
+              key: ValueKey(
+                '$roleKey-message-attachment:${widget.message.id}:$partIndex',
+              ),
+              baseColor: Colors.transparent,
+              pressedScale: 0.985,
+              borderRadius: BorderRadius.circular(10),
+              padding: EdgeInsets.zero,
+              onTap: null,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: unavailableImagePlaceholder(),
+              ),
+            ),
+          );
+        } else {
+          items.add(
+            IosCardPress(
+              key: ValueKey(
+                '$roleKey-message-attachment:${widget.message.id}:$partIndex',
+              ),
+              baseColor: isDark
+                  ? cs.onSurface.withValues(alpha: 0.08)
+                  : cs.surface.withValues(alpha: 0.92),
+              pressedScale: 0.99,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: cs.outlineVariant.withValues(alpha: 0.18),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              onTap: null,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.insert_drive_file,
+                    size: 16,
+                    color: cs.onSurface.withValues(alpha: 0.45),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    l10n.chatMessageWidgetAttachmentUnavailable,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: cs.onSurface.withValues(alpha: 0.55),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        continue;
+      }
+      if (part is ImagePart) {
+        final path = part.uri.trim();
+        final fixed = path.isEmpty ? '' : _resolveAttachmentImageUri(path);
+        final viewIndex = viewablePaths.length;
+        final heroTag = (this, partIndex);
+        final available = !part.unavailable && fixed.isNotEmpty;
+        if (available) {
+          viewablePaths.add(fixed);
+          heroTags.add(heroTag);
+        }
+        final provider = available
+            ? _previewImageProvider(
+                fixed,
+                logicalWidth: 112,
+                logicalHeight: 112,
+                devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
+                fit: BoxFit.cover,
+              )
+            : null;
+        items.add(
+          IosCardPress(
+            key: ValueKey(
+              '$roleKey-message-attachment:${widget.message.id}:$partIndex',
+            ),
+            baseColor: Colors.transparent,
+            pressedScale: 0.985,
+            borderRadius: BorderRadius.circular(10),
+            padding: EdgeInsets.zero,
+            onTap: !available
+                ? null
+                : () {
+                    final size = provider == null
+                        ? null
+                        : _cachedPreviewSize(context, provider);
+                    ImageViewerPage(
+                      images: viewablePaths,
+                      initialIndex: viewIndex,
+                      heroTags: size == null ? null : heroTags,
+                      initialPreview: size == null
+                          ? null
+                          : (provider: provider!, size: size),
+                    ).open(context);
+                  },
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: provider == null
+                  ? unavailableImagePlaceholder()
+                  : Hero(
+                      tag: heroTag,
+                      createRectTween: ImageViewerPage.flightRect,
+                      flightShuttleBuilder: ImageViewerPage.thumbnailFlight,
+                      child: Image(
+                        image: provider,
+                        width: 112,
+                        height: 112,
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                        errorBuilder: (_, _, _) =>
+                            unavailableImagePlaceholder(),
+                      ),
+                    ),
+            ),
+          ),
+        );
+        continue;
+      }
+
+      if (part is FilePart) {
+        final d = part;
+        final uri = d.uri.trim();
+        final localAudio =
+            !d.unavailable &&
+            isAudioMime(
+              inferMediaMimeFromSource(d.name, fallbackMime: d.mime ?? ''),
+            ) &&
+            !uri.startsWith('http://') &&
+            !uri.startsWith('https://') &&
+            !uri.startsWith('data:');
+        if (localAudio) {
+          // 录音文件名里带着时长：voice_<秒>s_<时间戳>.m4a
+          final voiceSeconds = RegExp(
+            r'voice_(\d+)s_',
+          ).firstMatch(d.name)?.group(1);
+          final durationHint = voiceSeconds == null
+              ? null
+              : Duration(seconds: int.tryParse(voiceSeconds) ?? 0);
+          items.add(
+            VoiceMessageCapsule(
+              key: ValueKey(
+                '$roleKey-message-attachment:${widget.message.id}:$partIndex',
+              ),
+              path: SandboxPathResolver.fix(uri),
+              isUser: alignEnd,
+              durationHint: durationHint,
+            ),
+          );
+          continue;
+        }
+        items.add(
+          IosCardPress(
+            key: ValueKey(
+              '$roleKey-message-attachment:${widget.message.id}:$partIndex',
+            ),
+            baseColor: isDark
+                ? cs.onSurface.withValues(alpha: 0.08)
+                : cs.surface.withValues(alpha: 0.92),
+            pressedScale: 0.99,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: cs.outlineVariant.withValues(alpha: 0.18),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            onTap: d.unavailable
+                ? null
+                : () async {
+                    try {
+                      final uri = d.uri.trim();
+                      if (uri.startsWith('http://') ||
+                          uri.startsWith('https://')) {
+                        final normalized = _tryNormalizeExternalUri(uri);
+                        if (normalized == null) {
+                          if (!context.mounted) return;
+                          showAppSnackBar(
+                            context,
+                            message: l10n.chatMessageWidgetOpenLinkError,
+                            type: NotificationType.error,
+                          );
+                          return;
+                        }
+                        final ok = await launchUrl(
+                          normalized,
+                          mode: LaunchMode.externalApplication,
+                        );
+                        if (!ok) {
+                          if (!context.mounted) return;
+                          showAppSnackBar(
+                            context,
+                            message: l10n.chatMessageWidgetCannotOpenUrl(
+                              normalized.toString(),
+                            ),
+                            type: NotificationType.error,
+                          );
+                        }
+                        return;
+                      }
+                      if (uri.startsWith('data:')) {
+                        if (!context.mounted) return;
+                        showAppSnackBar(
+                          context,
+                          message: l10n.chatMessageWidgetCannotOpenFile(
+                            'unsupported data URI',
+                          ),
+                          type: NotificationType.warning,
+                        );
+                        return;
+                      }
+                      final fixed = SandboxPathResolver.fix(uri);
+                      final f = File(fixed);
+                      if (!(await f.exists())) {
+                        if (!context.mounted) return;
+                        showAppSnackBar(
+                          context,
+                          message: l10n.chatMessageWidgetFileNotFound(d.name),
+                          type: NotificationType.error,
+                        );
+                        return;
+                      }
+                      final res = await OpenFilex.open(
+                        fixed,
+                        type: d.mime ?? 'application/octet-stream',
+                      );
+                      if (res.type != ResultType.done) {
+                        if (!context.mounted) return;
+                        final openMessage = res.message;
+                        showAppSnackBar(
+                          context,
+                          message: l10n.chatMessageWidgetCannotOpenFile(
+                            openMessage.isNotEmpty
+                                ? openMessage
+                                : res.type.toString(),
+                          ),
+                          type: NotificationType.error,
+                        );
+                      }
+                    } catch (e) {
+                      if (!context.mounted) return;
+                      showAppSnackBar(
+                        context,
+                        message: l10n.chatMessageWidgetOpenFileError(
+                          e.toString(),
+                        ),
+                        type: NotificationType.error,
+                      );
+                    }
+                  },
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.insert_drive_file,
+                  size: 16,
+                  color: cs.onSurface.withValues(alpha: 0.72),
+                ),
+                const SizedBox(width: 6),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 180),
+                  child: Text(
+                    d.name,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: cs.onSurface.withValues(alpha: 0.86),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+    }
+
+    return Align(
+      key: ValueKey('$roleKey-message-attachments:${widget.message.id}'),
+      alignment: alignEnd ? Alignment.centerRight : Alignment.centerLeft,
+      child: Wrap(
+        alignment: alignEnd ? WrapAlignment.end : WrapAlignment.start,
+        spacing: 8,
+        runSpacing: 8,
+        children: items,
+      ),
+    );
+  }
+
+  Widget _buildBubbleContainer({
+    required BuildContext context,
+    required bool isUser,
+    required Widget child,
+  }) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    // ChatTtt：用户气泡固定为纯黑 + 纯白文字，不跟随调色板。
+    if (isUser) {
+      const background = Color(0xFF000000);
+      const foreground = Color(0xFFFFFFFF);
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: isDark
+                ? Colors.white.withValues(alpha: 0.12)
+                : Colors.transparent,
+            width: 0.8,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          child: Theme(
+            data: Theme.of(context).copyWith(
+              colorScheme: Theme.of(context).colorScheme.copyWith(
+                primary: foreground,
+                onPrimary: background,
+                surface: background,
+                onSurface: foreground,
+                onSurfaceVariant: foreground.withValues(alpha: 0.75),
+                outline: foreground.withValues(alpha: 0.45),
+                outlineVariant: foreground.withValues(alpha: 0.25),
+              ),
+            ),
+            child: DefaultTextStyle.merge(
+              style: TextStyle(color: foreground),
+              child: MarkdownSurfaceScope(
+                kind: MarkdownSurfaceKind.solid,
+                backgroundColor: background,
+                child: child,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    final radius = BorderRadius.circular(22);
+    final showBubble = context.select<SettingsProvider, bool>(
+      (s) => s.assistantBodyBubbleVisible,
+    );
+    return buildSharedChatSurface(
+      context,
+      borderRadius: radius,
+      padding: const EdgeInsets.all(12),
+      bare: !showBubble,
+      target: ChatBubbleStyleTarget.assistant,
+      child: child,
+    );
+  }
+
+  Widget _buildAssistantBubbleContainer({
+    required BuildContext context,
+    required Widget child,
+  }) {
+    return _buildBubbleContainer(context: context, isUser: false, child: child);
+  }
+
+  Widget _buildAssistantTextContent(
+    BuildContext context,
+    String visualContent,
+    bool enableAssistantMarkdown,
+    String? Function(String) citationIndexResolver, {
+    String contentKey = '',
+    required int findBlock,
+    SourceTextMap? findParagraph,
+    Object? detailsStateKey,
+    UiTextSlice? uiSource,
+    SourceTextMap? sourceMap,
+  }) {
+    final bool isDesktop =
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.linux;
+    final double baseAssistant = isDesktop ? 14.0 : 15.7;
+    final quoteRanges = quoteSourceHighlights(
+      context,
+      widget.message,
+      visualContent,
+      sourceMap: sourceMap,
+    );
+    final highlights = [
+      ...quoteRanges,
+      ...?ConversationFindHighlights.of(
+        context,
+      )?.ranges(FindPart.body, findBlock, paragraph: findParagraph),
+    ];
+    final highlightColor = quoteRanges.isEmpty && highlights.isNotEmpty
+        ? context.appColors.searchHighlight
+        : Theme.of(context).colorScheme.primary.withValues(alpha: .22);
+
+    Widget assistantContent;
+    if (enableAssistantMarkdown) {
+      assistantContent = MarkdownWithCodeHighlight(
+        text: visualContent,
+        detailsStateKey: detailsStateKey,
+        highlightRanges: highlights,
+        highlightColor: highlightColor,
+        uiHost: widget.message.role != 'assistant' || uiSource == null
+            ? null
+            : UiHostBinding(
+                conversationId: widget.message.conversationId,
+                revisionId: widget.message.id,
+                source: uiSource,
+                generation: uiGenerationStatus(widget.message),
+              ),
+        onCitationTap: _handleCitationTap,
+        citationIndexResolver: citationIndexResolver,
+        baseStyle: TextStyle(fontSize: baseAssistant, height: 1.5),
+        streaming: widget.message.isStreaming,
+        conversationId: widget.message.conversationId,
+      );
+    } else {
+      final text = UnicodeSanitizer.sanitize(visualContent);
+      assistantContent = plainMessageText(
+        text: text,
+        buildSpan: (start, end) => highlightedQuoteSource(
+          text,
+          highlights,
+          highlightColor,
+          start: start,
+          end: end,
+        ),
+        style: TextStyle(
+          fontSize: baseAssistant,
+          height: 1.5,
+          color: chatSurfacePlainTextColor(context),
+        ),
+      );
+    }
+
+    final media = MediaQuery.maybeOf(context);
+    final bool reduceMotion =
+        (media?.disableAnimations ?? false) ||
+        (media?.accessibleNavigation ?? false);
+    assistantContent = _StreamingAssistantMessageMotion(
+      enabled:
+          widget.message.isStreaming &&
+          widget.enableStreamingTextMotion &&
+          !reduceMotion &&
+          visualContent.isNotEmpty,
+      child: assistantContent,
+    );
+
+    return QuoteSourceAnchor(
+      message: widget.message,
+      source: visualContent,
+      sourceMap: sourceMap,
+      findBlock: findBlock,
+      findParagraph: findParagraph,
+      markdown: enableAssistantMarkdown,
+      child: RepaintBoundary(
+        child: AppSelectionArea(
+          message: widget.message,
+          sourceText: visualContent,
+          sourceMap: sourceMap,
+          key: ValueKey(
+            contentKey.isEmpty
+                ? 'assistant_${widget.message.id}'
+                : 'assistant_${widget.message.id}_$contentKey',
+          ),
+          child: DefaultTextStyle.merge(
+            style: TextStyle(fontSize: baseAssistant, height: 1.5),
+            child: assistantContent,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Assistant blocks span the row by default. With the fit-content option
+  /// on, [Align] hands the bubble loose constraints so it hugs its text;
+  /// long text still wraps at the same max width.
+  Widget _assistantBlockWidth(BuildContext context, {required Widget child}) {
+    final fitContent = context.select<SettingsProvider, bool>(
+      (s) => s.assistantBubbleFitContent,
+    );
+    if (!fitContent) return SizedBox(width: double.infinity, child: child);
+    return Align(alignment: Alignment.centerLeft, child: child);
+  }
+
+  /// The trailing streaming indicator, plus the auto-retry countdown while a
+  /// round is waiting to be retried. Rounds after the first keep their earlier
+  /// output on screen, so the countdown has to ride along with this indicator
+  /// instead of only the empty waiting bubble.
+  Widget _streamingIndicator() {
+    if (widget.hideStreamingIndicator) return const SizedBox(height: 16);
+    final retryStatus = widget.retryStatus;
+    if (retryStatus == null) return const LoadingIndicator();
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const LoadingIndicator(),
+        const SizedBox(width: 8),
+        _RetryCountdownHint(status: retryStatus),
+      ],
+    );
+  }
+
+  /// Same 8pt gap [addVisible] applies between sibling assistant bubbles.
+  List<Widget> _interleaveAssistantBubbles(List<Widget> bubbles) {
+    return <Widget>[
+      for (var i = 0; i < bubbles.length; i++) ...[
+        if (i > 0) const SizedBox(height: 8),
+        bubbles[i],
+      ],
+    ];
+  }
+
+  /// One bubble per text block, or one per paragraph when the split option is
+  /// on. [blockKey] disambiguates the selection areas of sibling bubbles.
+  List<Widget> _buildAssistantTextBubbles(
+    BuildContext context,
+    String visualContent,
+    bool enableAssistantMarkdown,
+    String? Function(String) citationIndexResolver, {
+    required String blockKey,
+    int findBlock = 0,
+    UiTextSlice? uiSource,
+    SourceTextMap? sourceMap,
+  }) {
+    final split = context.select<SettingsProvider, bool>(
+      (s) => s.assistantBubbleSplitParagraphs,
+    );
+    final parts = assistantDisplayParagraphs(
+      visualContent,
+      split: split,
+      uiSource: uiSource,
+    );
+    final detailsBlockKey = sourceMap == null
+        ? blockKey
+        : ('source', sourceMap.sourceRange(0, 0).start);
+    return <Widget>[
+      for (var i = 0; i < parts.length; i++)
+        _buildAssistantTextBlock(
+          context,
+          parts[i].text,
+          uiSource: parts[i].uiSource,
+          enableAssistantMarkdown,
+          citationIndexResolver,
+          findBlock: findBlock,
+          findParagraph: parts[i].blockMap,
+          contentKey: parts.length == 1 ? '' : '$blockKey.$i',
+          detailsStateKey: (widget.message.id, detailsBlockKey, i),
+          sourceMap: sourceMap == null
+              ? null
+              : parts[i].blockMap?.through(sourceMap) ?? sourceMap,
+        ),
+    ];
+  }
+
+  Widget _buildAssistantTextBlock(
+    BuildContext context,
+    String visualContent,
+    bool enableAssistantMarkdown,
+    String? Function(String) citationIndexResolver, {
+    String contentKey = '',
+    required int findBlock,
+    SourceTextMap? findParagraph,
+    Object? detailsStateKey,
+    UiTextSlice? uiSource,
+    SourceTextMap? sourceMap,
+  }) {
+    return _assistantBlockWidth(
+      context,
+      child: _buildAssistantBubbleContainer(
+        context: context,
+        child: _buildAssistantTextContent(
+          context,
+          visualContent,
+          enableAssistantMarkdown,
+          citationIndexResolver,
+          contentKey: contentKey,
+          findBlock: findBlock,
+          findParagraph: findParagraph,
+          detailsStateKey: detailsStateKey,
+          uiSource: uiSource,
+          sourceMap: sourceMap,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAssistantImageBlock(
+    BuildContext context,
+    String uri, {
+    required String imageKey,
+    required List<String> group,
+  }) {
+    final resolved = _resolveAttachmentImageUri(uri);
+    final index = group.indexOf(resolved);
+    return SizedBox(
+      width: double.infinity,
+      child: _buildAssistantBubbleContainer(
+        context: context,
+        child: _AssistantInlineImage(
+          uri: resolved,
+          imageKey: imageKey,
+          group: group,
+          initialIndex: index >= 0 ? index : 0,
+          onAspectResolved: widget.onInlineImageAspect,
+        ),
+      ),
+    );
+  }
+
+  TimelineProjection _projectAssistantTimeline(
+    String visualContent, {
+    List<ReasoningSegment>? reasoningSegments,
+    SourceTextMap? sourceMap,
+  }) {
+    final assistant = _assistantForMessage();
+    if (widget.toolParts is! ToolPartSnapshot ||
+        !identical(widget.toolParts, _timelineToolSource)) {
+      _timelineToolSource = widget.toolParts;
+      _timelineTools = [
+        for (var i = 0; i < (widget.toolParts?.length ?? 0); i++)
+          _timelineToolRefs[widget.toolParts![i]] ??= TimelineToolRef(
+            providerId: widget.toolParts![i].id,
+            fallbackOrdinal: i,
+            toolName: widget.toolParts![i].toolName,
+            arguments: widget.toolParts![i].arguments,
+            content: widget.toolParts![i].content,
+            metadata: widget.toolParts![i].metadata,
+            loading: widget.toolParts![i].loading,
+            memoToken: widget.toolParts![i].cacheToken,
+          ),
+      ];
+    }
+    final reasoning = <TimelineReasoningRef>[
+      for (final segment in reasoningSegments ?? const <ReasoningSegment>[])
+        TimelineReasoningRef(
+          text: segment.text,
+          expanded: segment.expanded,
+          loading: segment.loading,
+          startAt: segment.startAt,
+          finishedAt: segment.finishedAt,
+          toolStartIndex: segment.toolStartIndex,
+        ),
+    ];
+    final parts = widget.message.parts;
+    if (widget.message.isStreaming &&
+        parts is MessagePartSnapshot &&
+        parts.arrivalOrdered &&
+        (assistant?.regexRules.isEmpty ?? true) &&
+        !_legacyInlineThinkingFor(widget).hasThinking &&
+        !UiMessageSource.of(parts).hasCandidate) {
+      return (_incrementalTimeline ??= IncrementalTimelineProjection()).project(
+        parts: parts,
+        liveTools: _timelineTools,
+        reasoning: reasoning,
+      );
+    }
+    _incrementalTimeline = null;
+    return projectAssistantTimeline(
+      parts: parts,
+      liveTools: _timelineTools,
+      reasoningSegments: reasoning,
+      visualContent: visualContent,
+      visualSourceMap: sourceMap,
+      contentSplitOffsets: widget.contentSplitOffsets,
+      reasoningCountAtSplit: widget.reasoningCountAtSplit,
+      toolCountAtSplit: widget.toolCountAtSplit,
+      transformProtectedText: (text) => applyAssistantRegexesProtected(
+        text,
+        assistant: assistant,
+        scope: AssistantRegexScope.assistant,
+        target: AssistantRegexTransformTarget.visual,
+      ),
+      transformText: (text) => _applyVisualAssistantRegexes(
+        text,
+        assistant: assistant,
+        scope: AssistantRegexScope.assistant,
+      ),
+      partsArrivalOrdered: widget.message.isStreaming,
+      parseInlineThinking: _legacyInlineThinkingFor(widget).hasThinking,
+    );
+  }
+
+  VoidCallback? _projectedReasoningToggle(
+    int? overlayIndex,
+    List<ReasoningSegment>? reasoningSegments,
+  ) {
+    if (overlayIndex == null ||
+        reasoningSegments == null ||
+        overlayIndex < 0 ||
+        overlayIndex >= reasoningSegments.length) {
+      return null;
+    }
+    return reasoningSegments[overlayIndex].onToggle;
+  }
+
+  List<_TimelineStepData> _timelineStepsFromProjected(
+    List<TimelineProjectedStep> steps,
+    List<ReasoningSegment>? reasoningSegments,
+  ) {
+    return [
+      for (final step in steps)
+        if (step.isReasoning)
+          _TimelineStepData.reasoning(
+            reasoning: ReasoningSegment(
+              text: step.reasoning!.text,
+              expanded: step.reasoning!.expanded,
+              loading: step.reasoning!.loading,
+              startAt: step.reasoning!.startAt,
+              finishedAt: step.reasoning!.finishedAt,
+              onToggle: step.reasoningOverlayIndex == null
+                  ? null
+                  : () => _projectedReasoningToggle(
+                      step.reasoningOverlayIndex,
+                      _currentReasoningSegments,
+                    )?.call(),
+              toolStartIndex: step.reasoning!.toolStartIndex,
+            ),
+            reasoningCountAfter: step.reasoningCountAfter,
+            toolCountAfter: step.toolCountAfter,
+            sourceOrdinal: step.sourceOrdinal,
+          )
+        else
+          _TimelineStepData.tool(
+            tool: ToolUIPart(
+              id: step.tool!.providerId,
+              toolName: step.tool!.toolName,
+              arguments: step.tool!.arguments,
+              content: step.tool!.content,
+              metadata: step.tool!.metadata,
+              loading: step.tool!.loading,
+              memoToken: step.tool!.memoToken,
+            ),
+            reasoningCountAfter: step.reasoningCountAfter,
+            toolCountAfter: step.toolCountAfter,
+            sourceOrdinal: step.sourceOrdinal,
+          ),
+    ];
+  }
+
+  List<ReasoningSegment>? _effectiveReasoningSegments(
+    String extractedThinking,
+  ) {
+    final hasProvidedReasoning =
+        (widget.reasoningText != null && widget.reasoningText!.isNotEmpty) ||
+        widget.reasoningLoading;
+    final effectiveReasoningText =
+        (widget.reasoningText != null && widget.reasoningText!.isNotEmpty)
+        ? widget.reasoningText!
+        : extractedThinking;
+    final usingInlineThink =
+        (widget.reasoningText == null || widget.reasoningText!.isEmpty) &&
+        extractedThinking.isNotEmpty;
+    final effectiveExpanded = usingInlineThink
+        ? (_inlineThinkExpanded ?? true)
+        : widget.reasoningExpanded;
+    final effectiveLoading = timelineReasoningLoading(
+      finishedAt: widget.reasoningFinishedAt,
+      isStreaming: widget.message.isStreaming,
+      usingInlineThink: usingInlineThink,
+    );
+
+    final provided = widget.reasoningSegments;
+    if (provided != null && provided.isNotEmpty) return provided;
+    if (!hasProvidedReasoning && effectiveReasoningText.isEmpty) {
+      return provided;
+    }
+    return <ReasoningSegment>[
+      ReasoningSegment(
+        text: effectiveReasoningText,
+        expanded: effectiveExpanded,
+        loading: effectiveLoading,
+        startAt: usingInlineThink ? null : widget.reasoningStartAt,
+        finishedAt: usingInlineThink ? null : widget.reasoningFinishedAt,
+        onToggle: usingInlineThink
+            ? () => setState(() {
+                _inlineThinkExpanded = !(_inlineThinkExpanded ?? true);
+                _inlineThinkManuallyToggled = true;
+              })
+            : widget.onToggleReasoning,
+      ),
+    ];
+  }
+
+  Widget _buildAssistantMessage() {
+    final cs = Theme.of(context).colorScheme;
+    final fg = computeChatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    final enableAssistantMarkdown = context.select<SettingsProvider, bool>(
+      (s) => s.enableAssistantMarkdown,
+    );
+    final showThinkingCardsSetting = context.select<SettingsProvider, bool>(
+      (s) => s.showThinkingCards,
+    );
+    final showToolCardsSetting = context.select<SettingsProvider, bool>(
+      (s) => s.showToolCards,
+    );
+    final showProducedFiles = context.select<SettingsProvider, bool>(
+      (s) => s.showProducedFiles,
+    );
+    final assistant = _assistantForMessage();
+
+    final parsedInlineThinking = _legacyInlineThinkingFor(widget);
+    final extractedThinking = parsedInlineThinking.thinkingTexts.join('\n\n');
+    final contentWithoutThink = parsedInlineThinking.visibleContent;
+    final mappedVisual = applyAssistantRegexesProtected(
+      ProtectedText(
+        contentWithoutThink,
+        const [],
+        sourceMap:
+            parsedInlineThinking.sourceMap ??
+            SourceTextMap.identity(widget.message.content.length),
+      ),
+      assistant: assistant,
+      scope: AssistantRegexScope.assistant,
+      target: AssistantRegexTransformTarget.visual,
+    );
+    final visualContent = mappedVisual.text;
+    final visualTranslation = widget.message.translation != null
+        ? _applyVisualAssistantRegexes(
+            widget.message.translation!,
+            assistant: assistant,
+            scope: AssistantRegexScope.assistant,
+          )
+        : null;
+    final translationText = visualTranslation ?? widget.message.translation;
+    final bool hasTranslation =
+        (translationText != null && translationText.isNotEmpty);
+    final bool isTranslating =
+        translationText == l10n.chatMessageWidgetTranslating;
+    final searchItems = _allSearchItems();
+    final citationIndexResolver = _buildCitationIndexResolver(searchItems);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final effectiveReasoningSegments = _effectiveReasoningSegments(
+      extractedThinking,
+    );
+    _currentReasoningSegments = effectiveReasoningSegments;
+    final timelineProjection = _projectAssistantTimeline(
+      visualContent,
+      reasoningSegments: effectiveReasoningSegments,
+      sourceMap: mappedVisual.sourceMap,
+    );
+    final mediaPreview = _buildAttachmentPreview(
+      context,
+      parts: timelineProjection.fromParts
+          ? [
+              for (final part in widget.message.parts)
+                if (part is FilePart) part,
+            ]
+          : widget.message.parts,
+      isDark: isDark,
+      alignEnd: false,
+    );
+
+    return ChatSurfaceTheme(
+      palette: fg,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: assistantMessageHorizontalPadding,
+          vertical: 12,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header: avatar only (name and timestamp are intentionally hidden)
+            if (widget.useAssistantAvatar || widget.showModelIcon) ...[
+              Row(
+                children: [
+                  if (widget.useAssistantAvatar)
+                    _buildAssistantAvatar(cs)
+                  else
+                    widget.modelIcon ??
+                        Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            color: cs.secondary.withValues(alpha: 0.1),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            Lucide.Bot,
+                            size: 18,
+                            color: cs.secondary,
+                          ),
+                        ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+
+            if (mediaPreview != null) ...[
+              mediaPreview,
+              const SizedBox(height: 8),
+            ],
+
+            // File Processing Indicator (inserted before content)
+            if (widget.isProcessingFiles) ...[
+              const FileProcessingIndicator(),
+              const SizedBox(height: 8),
+            ],
+            ...() {
+              final find = ConversationFindHighlights.of(context);
+              final target = find?.current;
+              final showThinkingCards =
+                  target?.part == FindPart.reasoning ||
+                  (widget.showThinkingCards ?? showThinkingCardsSetting);
+              final showToolCards =
+                  widget.showToolCards ?? showToolCardsSetting;
+              ToolApprovalService? approval;
+              try {
+                approval = context.read<ToolApprovalService>();
+                context.select<ToolApprovalService, int>(
+                  (service) => Object.hashAll([
+                    for (final req in service.pendingRequests)
+                      Object.hash(req.toolCallId, req.conversationId),
+                  ]),
+                );
+              } catch (_) {}
+              bool isPending(TimelineToolRef tool) =>
+                  approval?.pendingFor(
+                    toolCallId: tool.providerId,
+                    conversationId: widget.message.conversationId,
+                  ) !=
+                  null;
+              final visibleBlocks = _timelineVisibility.project(
+                timelineProjection,
+                showThinkingCards: showThinkingCards,
+                showToolCards: showToolCards,
+                isPendingApproval: isPending,
+              );
+              if (visibleBlocks.isEmpty &&
+                  widget.message.isStreaming &&
+                  visualContent.isEmpty) {
+                return <Widget>[
+                  _assistantBlockWidth(
+                    context,
+                    child: _buildAssistantBubbleContainer(
+                      context: context,
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        // widthFactor keeps the waiting bubble from filling a
+                        // loose row under the fit-content option; with tight
+                        // constraints (option off) Align ignores it.
+                        widthFactor: 1,
+                        child: Semantics(
+                          label: widget.retryStatus == null
+                              ? l10n.chatMessageWidgetThinking
+                              : l10n.autoRetryCountdown(
+                                  _retrySecondsLeft(widget.retryStatus!),
+                                  widget.retryStatus!.attempt,
+                                  widget.retryStatus!.maxRetries,
+                                ),
+                          child: _streamingIndicator(),
+                        ),
+                      ),
+                    ),
+                  ),
+                ];
+              }
+              // Projector omits trim-empty visualContent. Newline-only history
+              // still has to occupy body height so a short scroll from the
+              // bottom does not evict the last streaming bubble.
+              if (visibleBlocks.isEmpty && visualContent.isNotEmpty) {
+                return <Widget>[
+                  ..._interleaveAssistantBubbles(
+                    _buildAssistantTextBubbles(
+                      context,
+                      visualContent,
+                      enableAssistantMarkdown,
+                      citationIndexResolver,
+                      blockKey: 'body',
+                    ),
+                  ),
+                  if (widget.message.isStreaming && visualContent.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 4, top: 4),
+                      child: _streamingIndicator(),
+                    ),
+                ];
+              }
+
+              final imageGroup = <String>[
+                for (final block in visibleBlocks)
+                  if (block.isImage)
+                    _resolveAttachmentImageUri(block.imageUri!),
+              ];
+              final findBodyIndices = <int, int>{};
+              if (target != null || find?.hits.isNotEmpty == true) {
+                for (var i = 0; i < visibleBlocks.length; i++) {
+                  if (visibleBlocks[i].isText) {
+                    findBodyIndices[i] = findBodyIndices.length;
+                  }
+                }
+              }
+              Object blockKey(int index) {
+                final block = visibleBlocks[index];
+                return (
+                  widget.message.id,
+                  index,
+                  block.isText
+                      ? 'text'
+                      : block.isImage
+                      ? block.imageKey
+                      : block.thinkingSteps.first.sourceOrdinal,
+                );
+              }
+
+              final widgets = <Widget>[
+                ViewportBlockList(
+                  storageId: 'body',
+                  itemCount: visibleBlocks.length,
+                  revealIndex: () {
+                    final quote = QuoteInteractionScope.maybeOf(
+                      context,
+                    )?.navigationFor(widget.message.id);
+                    if (quote == null) {
+                      if (target == null) return null;
+                      if (target.part == FindPart.reasoning) {
+                        return visibleBlocks.indexWhere(
+                          (b) => b.thinkingSteps.any(
+                            (s) =>
+                                s.isReasoning &&
+                                s.sourceOrdinal == target.block,
+                          ),
+                        );
+                      }
+                      return findBodyIndices.entries
+                          .where((e) => e.value == target.block)
+                          .firstOrNull
+                          ?.key;
+                    }
+                    return visibleBlocks.indexWhere(
+                      (block) =>
+                          block.isText &&
+                          (block.sourceMap
+                                  ?.displayRanges(
+                                    SourceSpan(quote.start, quote.end),
+                                  )
+                                  .isNotEmpty ??
+                              false),
+                    );
+                  }(),
+                  spacing: 8,
+                  structureToken: (
+                    widget.message.id,
+                    visibleBlocks.length,
+                    showThinkingCards,
+                    showToolCards,
+                  ),
+                  itemKey: blockKey,
+                  keepAlive: (index) => visibleBlocks[index].thinkingSteps.any(
+                    (step) =>
+                        step.tool?.toolName == LocalToolNames.askUser &&
+                        (step.tool!.loading ||
+                            (step.tool!.content?.isEmpty ?? true)),
+                  ),
+                  estimateExtent: (index, width) {
+                    final block = visibleBlocks[index];
+                    if (block.isImage) {
+                      return estimateTimelineImageHeight(
+                        maxWidth: width,
+                        aspectRatio: block.aspectRatio,
+                      );
+                    }
+                    if (block.isText) {
+                      return 32.0 +
+                          24 *
+                              (block.text!.length / math.max(20, width / 8))
+                                  .ceil();
+                    }
+                    return 8 + 36.0 * block.thinkingSteps.length;
+                  },
+                  itemBuilder: (context, index) {
+                    final block = visibleBlocks[index];
+                    if (block.isImage) {
+                      return _buildAssistantImageBlock(
+                        context,
+                        block.imageUri!,
+                        imageKey:
+                            block.imageKey ??
+                            timelineImageBlockKey(sourceOrdinal: index),
+                        group: imageGroup,
+                      );
+                    }
+                    if (block.isText) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: _interleaveAssistantBubbles(
+                          _buildAssistantTextBubbles(
+                            context,
+                            block.text!,
+                            enableAssistantMarkdown,
+                            citationIndexResolver,
+                            blockKey: 'text$index',
+                            findBlock: findBodyIndices[index] ?? 0,
+                            uiSource: block.uiSource,
+                            sourceMap: block.sourceMap,
+                          ),
+                        ),
+                      );
+                    }
+                    final streaming =
+                        widget.message.isStreaming &&
+                        index == visibleBlocks.length - 1;
+                    final signature = (
+                      streaming,
+                      showThinkingCards,
+                      showToolCards,
+                      widget.collapseThinkingSteps,
+                      blockKey(index),
+                      widget.message.modelId,
+                      widget.message.timestamp,
+                      widget.onRecoveredAskUserAnswer != null,
+                    );
+                    final cached = _thinkingWidgets[block];
+                    if (cached != null && cached.$1 == signature) {
+                      return cached.$2;
+                    }
+                    final card = _ChainOfThoughtCard(
+                      key: ValueKey(blockKey(index)),
+                      message: widget.message,
+                      steps: _timelineStepsFromProjected(
+                        block.thinkingSteps,
+                        effectiveReasoningSegments,
+                      ),
+                      showThinkingCards: showThinkingCards,
+                      showToolCards: showToolCards,
+                      collapseThinkingSteps: widget.collapseThinkingSteps,
+                      streaming: streaming,
+                      onRecoveredAnswer: widget.onRecoveredAskUserAnswer == null
+                          ? null
+                          : _submitRecoveredAnswer,
+                    );
+                    _thinkingWidgets[block] = (signature, card);
+                    return card;
+                  },
+                ),
+              ];
+
+              // A round that only called tools leaves no visible text, but a
+              // pending retry still has to say so somewhere.
+              if (widget.message.isStreaming &&
+                  (visualContent.isNotEmpty || widget.retryStatus != null)) {
+                widgets.add(
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4, top: 4),
+                    child: _streamingIndicator(),
+                  ),
+                );
+              }
+              return widgets;
+            }(),
+            if (showProducedFiles &&
+                _producedWorkspaceParts(widget.toolParts).isNotEmpty) ...[
+              const SizedBox(height: 8),
+              ProducedFilesRow(
+                parts: _producedWorkspaceParts(widget.toolParts),
+                conversationId: widget.message.conversationId,
+              ),
+            ],
+            if (hasTranslation) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: buildSharedChatSurface(
+                  context,
+                  borderRadius: BorderRadius.circular(16),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  defaultColor: cs.primaryContainer.withValues(
+                    alpha: Theme.of(context).brightness == Brightness.dark
+                        ? 0.25
+                        : 0.30,
+                  ),
+                  child: AnimatedSize(
+                    duration: const Duration(milliseconds: 300),
+                    curve: const Cubic(0.2, 0.8, 0.2, 1),
+                    alignment: Alignment.topCenter,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        IosCardPress(
+                          onTap: widget.onToggleTranslation,
+                          borderRadius: BorderRadius.circular(12),
+                          baseColor: Colors.transparent,
+                          pressedBlendStrength: 0.12,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 8,
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Lucide.Languages,
+                                size: 16,
+                                color: fg.strong,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                l10n.chatMessageWidgetTranslation,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: AppFontWeights.emphasis,
+                                  color: fg.strong,
+                                ),
+                              ),
+                              const Spacer(),
+                              Icon(
+                                widget.translationExpanded
+                                    ? Lucide.ChevronDown
+                                    : Lucide.ChevronRight,
+                                size: 18,
+                                color: fg.strong,
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (widget.translationExpanded) ...[
+                          const SizedBox(height: 8),
+                          if (isTranslating)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+                              child: Row(
+                                children: [
+                                  const LoadingIndicator(),
+                                  const SizedBox(width: 8),
+                                  Builder(
+                                    builder: (context) {
+                                      final bool isDesktop =
+                                          defaultTargetPlatform ==
+                                              TargetPlatform.macOS ||
+                                          defaultTargetPlatform ==
+                                              TargetPlatform.windows ||
+                                          defaultTargetPlatform ==
+                                              TargetPlatform.linux;
+                                      return Text(
+                                        l10n.chatMessageWidgetTranslating,
+                                        style: TextStyle(
+                                          fontSize: isDesktop ? 14.0 : 15.5,
+                                          color: fg.muted,
+                                          fontStyle: FontStyle.italic,
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ),
+                            )
+                          else
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+                              child: RepaintBoundary(
+                                child: QuoteSourceAnchor(
+                                  message: widget.message,
+                                  source: translationText,
+                                  markdown: enableAssistantMarkdown,
+                                  findPart: FindPart.translation,
+                                  child: Builder(
+                                    builder: (context) {
+                                      final bool isDesktop =
+                                          defaultTargetPlatform ==
+                                              TargetPlatform.macOS ||
+                                          defaultTargetPlatform ==
+                                              TargetPlatform.windows ||
+                                          defaultTargetPlatform ==
+                                              TargetPlatform.linux;
+                                      final double baseTranslation = isDesktop
+                                          ? 14.0
+                                          : 15.5;
+                                      final ranges =
+                                          ConversationFindHighlights.of(
+                                            context,
+                                          )?.ranges(FindPart.translation, 0) ??
+                                          const <SourceSpan>[];
+                                      Widget translationContent;
+                                      if (enableAssistantMarkdown) {
+                                        translationContent =
+                                            MarkdownWithCodeHighlight(
+                                              text: translationText,
+                                              highlightRanges: ranges,
+                                              highlightColor: context
+                                                  .appColors
+                                                  .searchHighlight,
+                                              onCitationTap: _handleCitationTap,
+                                              citationIndexResolver:
+                                                  citationIndexResolver,
+                                              baseStyle: TextStyle(
+                                                fontSize: baseTranslation,
+                                                height: 1.4,
+                                              ),
+                                              conversationId:
+                                                  widget.message.conversationId,
+                                            );
+                                      } else {
+                                        translationContent = plainMessageText(
+                                          text: UnicodeSanitizer.sanitize(
+                                            translationText,
+                                          ),
+                                          buildSpan: ranges.isEmpty
+                                              ? null
+                                              : (start, end) =>
+                                                    highlightedQuoteSource(
+                                                      UnicodeSanitizer.sanitize(
+                                                        translationText,
+                                                      ),
+                                                      ranges,
+                                                      context
+                                                          .appColors
+                                                          .searchHighlight,
+                                                      start: start,
+                                                      end: end,
+                                                    ),
+                                          style: TextStyle(
+                                            fontSize: baseTranslation,
+                                            height: 1.4,
+                                            color: chatSurfacePlainTextColor(
+                                              context,
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                      return DefaultTextStyle.merge(
+                                        style: TextStyle(
+                                          fontSize: baseTranslation,
+                                          height: 1.4,
+                                        ),
+                                        child: AppSelectionArea(
+                                          key: ValueKey(
+                                            'translation_${widget.message.id}',
+                                          ),
+                                          child: translationContent,
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            // Sources summary card (tap to open full citations)
+            if (searchItems.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _SourcesSummaryCard(
+                count: searchItems.length,
+                items: searchItems,
+                onTap: () => _showCitationsSheet(searchItems),
+              ),
+            ],
+            for (final error
+                in widget.message.parts.whereType<ProviderAuthErrorPart>())
+              OAuthMessageRecovery(error: error),
+            for (final truncation
+                in widget.message.parts.whereType<ResponseTruncationPart>())
+              ResponseTruncationNotice(
+                truncation: truncation,
+                onRetryWithoutImages: widget.message.isStreaming
+                    ? null
+                    : widget.onRetryWithoutImages,
+              ),
+            // Action buttons (hidden while generating)
+            // ChatTtt：助手消息下方的操作栏（复制 / 重新回答 / TTS / 翻译 / 更多）已移除。
+            const SizedBox.shrink(),
+            if (!widget.message.isStreaming &&
+                widget.suggestions.isNotEmpty &&
+                widget.onSuggestionTap != null) ...[
+              const SizedBox(height: 8),
+              ChatSuggestionBubbles(
+                suggestions: widget.suggestions,
+                onTap: widget.onSuggestionTap!,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Keep callbacks stable while only the streamed text changes. A new lookup
+  // changes the resolver identity so cached citation widgets refresh their labels.
+  String? Function(String) _buildCitationIndexResolver(
+    List<Map<String, dynamic>> items,
+  ) {
+    final lookup = citationIndexLookup(items);
+    if (!mapEquals(lookup, _citationIndexLookup)) {
+      _citationIndexLookup = lookup;
+      _citationIndexResolver = (id) => resolveCitationIndex(lookup, id);
+    }
+    return _citationIndexResolver;
+  }
+
+  // Try resolve citation id -> url from the latest search_web tool results of this assistant message
+  void _handleCitationTap(String id) async {
+    final l10n = AppLocalizations.of(context)!;
+    final items = _allSearchItems();
+    Map<String, dynamic>? match = items
+        .cast<Map<String, dynamic>?>()
+        .firstWhere(
+          (e) => (e?['id']?.toString() ?? '') == id,
+          orElse: () => null,
+        );
+
+    // Fallbacks for models that don't strictly follow "index:id":
+    // 1) If id is actually an index number, match by item.index.
+    // 2) If id itself looks like a URL, open it directly.
+    String? url = match?['url']?.toString();
+    if (url == null || url.isEmpty) {
+      final idx = int.tryParse(id.trim());
+      if (idx != null) {
+        match = items.cast<Map<String, dynamic>?>().firstWhere(
+          (e) => (e?['index']?.toString() ?? '') == idx.toString(),
+          orElse: () => null,
+        );
+        url = match?['url']?.toString();
+      }
+    }
+    if ((url == null || url.isEmpty) &&
+        (id.contains('/') || id.contains('.'))) {
+      url = id;
+    }
+
+    if (url == null || url.isEmpty) {
+      if (context.mounted) {
+        showAppSnackBar(
+          context,
+          message: l10n.chatMessageWidgetCitationNotFound,
+          type: NotificationType.warning,
+        );
+      }
+      return;
+    }
+    try {
+      final uri = _tryNormalizeExternalUri(url);
+      if (uri == null) {
+        if (!mounted) return;
+        showAppSnackBar(
+          context,
+          message: l10n.chatMessageWidgetOpenLinkError,
+          type: NotificationType.error,
+        );
+        return;
+      }
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok) {
+        if (!mounted) return;
+        showAppSnackBar(
+          context,
+          message: l10n.chatMessageWidgetCannotOpenUrl(uri.toString()),
+          type: NotificationType.error,
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      showAppSnackBar(
+        context,
+        message: l10n.chatMessageWidgetOpenLinkError,
+        type: NotificationType.error,
+      );
+    }
+  }
+
+  // Extract items from all search_web or builtin_search tool results for this assistant message.
+  // We scan from end to start so "latest" items win when there are duplicates.
+  List<Map<String, dynamic>> _allSearchItems() {
+    final parts = widget.toolParts ?? const <ToolUIPart>[];
+    if (identical(parts, _searchItemsParts) && _searchItemsCache != null) {
+      return _searchItemsCache!;
+    }
+    _searchItemsParts = parts;
+    return _searchItemsCache = citationSearchItems(
+      parts.reversed.map((p) => (name: p.toolName, content: p.content)),
+    );
+  }
+
+  void _showCitationsSheet(List<Map<String, dynamic>> items) {
+    final l10n = AppLocalizations.of(context)!;
+    final sources = <CitationSourceItem>[
+      for (int i = 0; i < items.length; i++)
+        CitationSourceItem.fromMap(items[i], fallbackIndex: i + 1),
+    ];
+
+    showCitationSourcesBottomSheet(
+      context: context,
+      title: l10n.chatMessageWidgetSearchResultsTitle,
+      closeSemanticLabel: l10n.mcpPageClose,
+      items: sources,
+      onOpen: _openCitationSource,
+    );
+  }
+
+  Future<void> _openCitationSource(CitationSourceItem item) async {
+    final l10n = AppLocalizations.of(context)!;
+    final uri = _tryNormalizeExternalUri(item.url);
+    if (uri == null) {
+      showAppSnackBar(
+        context,
+        message: l10n.chatMessageWidgetOpenLinkError,
+        type: NotificationType.error,
+      );
+      return;
+    }
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!mounted) return;
+      if (!ok) {
+        showAppSnackBar(
+          context,
+          message: l10n.chatMessageWidgetCannotOpenUrl(uri.toString()),
+          type: NotificationType.error,
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      showAppSnackBar(
+        context,
+        message: l10n.chatMessageWidgetOpenLinkError,
+        type: NotificationType.error,
+      );
+    }
+  }
+
+  Widget _buildAssistantAvatar(ColorScheme cs) {
+    final av = (widget.assistantAvatar ?? '').trim();
+    if (av.isNotEmpty) {
+      if (av.startsWith('http') || av.startsWith('/') || av.contains(':')) {
+        return AvatarImage(
+          source: av,
+          isNetwork: av.startsWith('http'),
+          size: 32,
+          fallback: _assistantInitial(cs),
+        );
+      }
+      // treat as emoji or single char label
+      final bool isIOS = defaultTargetPlatform == TargetPlatform.iOS;
+      final double fs = 18;
+      final Offset? nudge = isIOS ? Offset(fs * 0.065, fs * -0.05) : null;
+      return Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: cs.primary.withValues(alpha: 0.1),
+          shape: BoxShape.circle,
+        ),
+        alignment: Alignment.center,
+        child: EmojiText(
+          av.characters.take(1).toString(),
+          fontSize: fs,
+          optimizeEmojiAlign: true,
+          nudge: nudge,
+        ),
+      );
+    }
+    return _assistantInitial(cs);
+  }
+
+  Widget _assistantInitial(ColorScheme cs) {
+    // ChatTtt 品牌标记（黑白星芒），不使用姓名首字母。
+    return ChatTttMark(size: 32);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final target = switch (widget.message.role) {
+      'user' => ChatBubbleStyleTarget.user,
+      'tool' => ChatBubbleStyleTarget.thinkingToolCard,
+      _ => ChatBubbleStyleTarget.assistant,
+    };
+    final palette = computeChatSurfaceForegroundPalette(
+      context,
+      target: target,
+    );
+    final child = switch (target) {
+      ChatBubbleStyleTarget.user => _buildUserMessage(),
+      ChatBubbleStyleTarget.thinkingToolCard => _buildToolMessage(),
+      ChatBubbleStyleTarget.assistant => PageStorage(
+        bucket: widget.timelineStorage ?? _localTimelineStorage,
+        child: _buildAssistantMessage(),
+      ),
+    };
+    return ChatSurfaceTheme(palette: palette, child: child);
+  }
+}
+
+class _AnimatedPopup extends StatefulWidget {
+  const _AnimatedPopup({required this.child});
+  final Widget child;
+
+  @override
+  State<_AnimatedPopup> createState() => _AnimatedPopupState();
+}
+
+class _AnimatedPopupState extends State<_AnimatedPopup> {
+  double _opacity = 0.0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _opacity = 1.0;
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 150),
+      curve: Curves.easeOutCubic,
+      opacity: _opacity,
+      child: widget.child,
+    );
+  }
+}
+
+class _MenuItem extends StatelessWidget {
+  const _MenuItem({
+    required this.icon,
+    required this.label,
+    this.onTap,
+    this.danger = false,
+  });
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = danger ? Theme.of(context).colorScheme.error : cs.onSurface;
+    final ic = danger
+        ? Theme.of(context).colorScheme.error
+        : cs.onSurface.withValues(alpha: 0.9);
+    // iOS-style press effect: no ripple. Use transparent base and a subtle
+    // pressed blend inside the blurred/glass menu container.
+    return IosCardPress(
+      borderRadius: BorderRadius.zero,
+      baseColor: Colors.transparent,
+      onTap: () {
+        try {
+          Haptics.light();
+        } catch (_) {}
+        onTap?.call();
+      },
+      child: Container(
+        height: 44,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        alignment: Alignment.centerLeft,
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: ic),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 14.5,
+                  color: fg,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BranchSelector extends StatelessWidget {
+  const _BranchSelector({
+    required this.index,
+    required this.total,
+    this.onPrev,
+    this.onNext,
+  });
+  final int index; // zero-based
+  final int total;
+  final VoidCallback? onPrev;
+  final VoidCallback? onNext;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final canPrev = index > 0;
+    final canNext = index < total - 1;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 28,
+          height: 28,
+          child: Center(
+            child: IosIconButton(
+              size: 16,
+              enabled: canPrev,
+              color: cs.onSurface,
+              icon: Lucide.ChevronLeft,
+              onTap: canPrev ? onPrev : null,
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 28,
+          height: 28,
+          child: Center(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                '${index + 1}/$total',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: cs.onSurface.withValues(alpha: 0.8),
+                  fontWeight: AppFontWeights.medium,
+                ),
+                maxLines: 1,
+                softWrap: false,
+              ),
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 28,
+          height: 28,
+          child: Center(
+            child: IosIconButton(
+              size: 16,
+              enabled: canNext,
+              color: cs.onSurface,
+              icon: Lucide.ChevronRight,
+              onTap: canNext ? onNext : null,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+int _retrySecondsLeft(RetryStatus status) {
+  final remaining = status.retryAt.difference(DateTime.now());
+  if (remaining.isNegative) return 0;
+  return remaining.inMilliseconds == 0
+      ? 0
+      : (remaining.inMilliseconds / 1000).ceil();
+}
+
+class _RetryCountdownHint extends StatelessWidget {
+  const _RetryCountdownHint({required this.status});
+
+  final RetryStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final remaining = status.retryAt.difference(DateTime.now());
+    final startSeconds = remaining.inMilliseconds / 1000.0;
+    final style = TextStyle(
+      fontSize: 12,
+      color: cs.onSurface.withValues(alpha: 0.55),
+    );
+    if (startSeconds <= 0) {
+      return Text(
+        l10n.autoRetryCountdown(0, status.attempt, status.maxRetries),
+        style: style,
+      );
+    }
+    return TweenAnimationBuilder<double>(
+      key: ValueKey(status.retryAt),
+      tween: Tween<double>(begin: startSeconds, end: 0),
+      duration: remaining,
+      builder: (context, value, _) {
+        final seconds = value <= 0 ? 0 : value.ceil();
+        return Text(
+          l10n.autoRetryCountdown(seconds, status.attempt, status.maxRetries),
+          style: style,
+        );
+      },
+    );
+  }
+}
+
+// Pulsing 3-dot loading indicator for chat thinking states (shared)
+class LoadingIndicator extends StatelessWidget {
+  const LoadingIndicator({
+    super.key,
+    this.height = 16,
+    this.dotSize = 9,
+    this.spacing = 6,
+    this.color,
+  });
+
+  final double height;
+  final double dotSize;
+  final double spacing;
+  final Color? color;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final base = color ?? cs.primary;
+
+    return RepaintBoundary(
+      child: StatusAnimation(
+        duration: const Duration(milliseconds: 1100),
+        builder: (context, progress) => CustomPaint(
+          size: Size(dotSize * 3 + spacing * 2, height),
+          painter: _LoadingDotsPainter(
+            animation: progress,
+            color: base,
+            dotSize: dotSize,
+            spacing: spacing,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LoadingDotsPainter extends CustomPainter {
+  _LoadingDotsPainter({
+    required this.animation,
+    required this.color,
+    required this.dotSize,
+    required this.spacing,
+  }) : super(repaint: animation);
+
+  final ValueListenable<double> animation;
+  final Color color;
+  final double dotSize;
+  final double spacing;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (var i = 0; i < 3; i++) {
+      final phase = (animation.value - i * 0.22) * 2 * math.pi;
+      final wave = (math.sin(phase) + 1) / 2;
+      final scale = 0.85 + 0.15 * wave;
+      final opacity = 0.45 + 0.45 * wave;
+      final cx = i * (dotSize + spacing) + dotSize / 2;
+      final cy = size.height / 2;
+      canvas.save();
+      canvas.translate(cx, cy);
+      canvas.scale(scale);
+      canvas.drawCircle(
+        Offset.zero,
+        dotSize / 2,
+        Paint()..color = color.withValues(alpha: opacity),
+      );
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+/// Streaming visual wrapper for assistant message content.
+///
+/// Goals:
+/// - Make streaming output feel less "chunky" by smoothing size growth.
+/// - Respect reduce-motion settings.
+class _StreamingAssistantMessageMotion extends StatefulWidget {
+  const _StreamingAssistantMessageMotion({
+    required this.enabled,
+    required this.child,
+  });
+
+  final bool enabled;
+  final Widget child;
+
+  @override
+  State<_StreamingAssistantMessageMotion> createState() =>
+      _StreamingAssistantMessageMotionState();
+}
+
+class _StreamingAssistantMessageMotionState
+    extends State<_StreamingAssistantMessageMotion> {
+  final _contentKey = GlobalKey();
+
+  @override
+  Widget build(BuildContext context) {
+    // Reparent the same content when motion stops, retaining table gestures
+    // and offsets without leaving an AnimatedSize on completed messages.
+    final child = KeyedSubtree(key: _contentKey, child: widget.child);
+    if (!widget.enabled) return child;
+
+    return AnimatedSize(
+      key: const ValueKey('streaming-assistant-message-motion'),
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topLeft,
+      clipBehavior: Clip.hardEdge,
+      child: child,
+    );
+  }
+}
+
+ToolUIPart? toolUiFromPayload(String payloadJson, {int fallbackOrdinal = 0}) {
+  try {
+    final decoded = jsonDecode(payloadJson);
+    if (decoded is! Map) return null;
+    var id = (decoded['id'] ?? '').toString();
+    final name = (decoded['name'] ?? '').toString();
+    if (id.isEmpty) {
+      id = '${name.isEmpty ? 'tool' : name}-$fallbackOrdinal';
+    }
+    final args = decoded['arguments'];
+    final content = decoded['content']?.toString();
+    final rawMeta = decoded['metadata'];
+    return ToolUIPart(
+      id: id,
+      toolName: name,
+      arguments: args is Map
+          ? args.cast<String, dynamic>()
+          : const <String, dynamic>{},
+      content: content,
+      metadata: rawMeta is Map ? Map<String, dynamic>.from(rawMeta) : null,
+      loading: content == null || content.isEmpty,
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+// UI data for MCP tool calls/results
+class ToolUIPart {
+  final String id;
+  final String toolName;
+  final Map<String, dynamic> arguments;
+  final String? content; // null means still loading/result not yet available
+  final Map<String, dynamic>? metadata;
+  final bool loading;
+
+  /// Stable memo identity from the original live tool, if any.
+  final int? memoToken;
+
+  const ToolUIPart({
+    required this.id,
+    required this.toolName,
+    required this.arguments,
+    this.content,
+    this.metadata,
+    this.loading = false,
+    this.memoToken,
+  });
+
+  int get cacheToken => memoToken ?? identityHashCode(this);
+}
+
+final _workspacePartMemo = Expando<WorkspaceToolPart>('workspace tool');
+final _producedPartsMemo = Expando<List<WorkspaceToolPart>>('produced tools');
+
+WorkspaceToolPart _workspacePartFromUi(ToolUIPart part) {
+  return _workspacePartMemo[part] ??= WorkspaceToolPart(
+    id: part.id,
+    toolName: part.toolName,
+    arguments: part.arguments,
+    content: part.content,
+    metadata: part.metadata,
+    loading: part.loading,
+  );
+}
+
+List<WorkspaceToolPart> _producedWorkspaceParts(List<ToolUIPart>? parts) {
+  if (parts == null || parts.isEmpty) return const <WorkspaceToolPart>[];
+  final cached = parts is ToolPartSnapshot ? _producedPartsMemo[parts] : null;
+  if (cached != null) return cached;
+  final result = List<WorkspaceToolPart>.unmodifiable([
+    for (final part in parts)
+      if (isWorkspaceToolName(part.toolName)) _workspacePartFromUi(part),
+  ]);
+  if (parts is ToolPartSnapshot) _producedPartsMemo[parts] = result;
+  return result;
+}
+
+/// Only an immutable tool-list snapshot can serve as an O(1) cache key.
+class ToolPartSnapshot extends UnmodifiableListView<ToolUIPart> {
+  ToolPartSnapshot(Iterable<ToolUIPart> parts)
+    : super(List<ToolUIPart>.of(parts, growable: false));
+
+  ToolPartSnapshot.withPart(
+    List<ToolUIPart> previous,
+    int index,
+    ToolUIPart part,
+  ) : super(
+        List<ToolUIPart>.generate(
+          index == previous.length ? previous.length + 1 : previous.length,
+          (i) => i == index ? part : previous[i],
+          growable: false,
+        ),
+      );
+
+  late final ToolUIPart? lastLoading = reversed
+      .where((part) => part.loading)
+      .firstOrNull;
+}
+
+// Data for a reasoning segment (for mixed display)
+class ReasoningSegment {
+  final String text;
+  final bool expanded;
+  final bool loading;
+  final DateTime? startAt;
+  final DateTime? finishedAt;
+  final VoidCallback? onToggle;
+  // Index of the first tool call that occurs after this segment starts.
+  final int toolStartIndex;
+
+  const ReasoningSegment({
+    required this.text,
+    required this.expanded,
+    required this.loading,
+    this.startAt,
+    this.finishedAt,
+    this.onToggle,
+    this.toolStartIndex = 0,
+  });
+
+  /// Toggle is excluded: the step State looks it up on tap so a new
+  /// closure every parent rebuild does not bust widget memoization.
+  @override
+  bool operator ==(Object other) =>
+      other is ReasoningSegment &&
+      other.text == text &&
+      other.expanded == expanded &&
+      other.loading == loading &&
+      other.startAt == startAt &&
+      other.finishedAt == finishedAt &&
+      other.toolStartIndex == toolStartIndex;
+
+  @override
+  int get hashCode =>
+      Object.hash(text, expanded, loading, startAt, finishedAt, toolStartIndex);
+}
+
+class _TimelineStepData {
+  const _TimelineStepData.reasoning({
+    required this.reasoning,
+    required this.reasoningCountAfter,
+    required this.toolCountAfter,
+    this.sourceOrdinal = 0,
+  }) : tool = null,
+       browserTools = null,
+       browserLite = false;
+  const _TimelineStepData.tool({
+    required this.tool,
+    required this.reasoningCountAfter,
+    required this.toolCountAfter,
+    this.sourceOrdinal = 0,
+  }) : reasoning = null,
+       browserTools = null,
+       browserLite = false;
+  _TimelineStepData.browserGroup({
+    required List<ToolUIPart> tools,
+    required bool lite,
+    required this.sourceOrdinal,
+    required this.reasoningCountAfter,
+    required this.toolCountAfter,
+  }) : browserTools = tools,
+       browserLite = lite,
+       tool = tools.last,
+       reasoning = null;
+  final ReasoningSegment? reasoning;
+  final ToolUIPart? tool;
+  final List<ToolUIPart>? browserTools;
+  final bool browserLite;
+  final int reasoningCountAfter, toolCountAfter, sourceOrdinal;
+  bool get isReasoning => reasoning != null;
+  bool get isTool => tool != null;
+  bool get loading =>
+      browserTools?.any((tool) => tool.loading) ??
+      reasoning?.loading ??
+      tool?.loading ??
+      false;
+}
+
+List<_TimelineStepData> _groupBrowserSteps(
+  List<_TimelineStepData> steps,
+  _IdSet pendingApprovalIds,
+) => groupAdjacentBrowserSteps(
+  steps,
+  eligible: (step) =>
+      step.tool?.toolName == LocalToolNames.browser &&
+      !pendingApprovalIds.contains(step.tool!.id),
+  group: (steps, lite) => _TimelineStepData.browserGroup(
+    tools: List.unmodifiable(steps.map((step) => step.tool!)),
+    lite: lite,
+    sourceOrdinal: steps.first.sourceOrdinal,
+    reasoningCountAfter: steps.last.reasoningCountAfter,
+    toolCountAfter: steps.last.toolCountAfter,
+  ),
+);
+
+/// Value-equal id set so [context.select] can ignore identical approval snapshots.
+class _IdSet {
+  const _IdSet(this.ids);
+  final Set<String> ids;
+
+  bool contains(String? id) => id != null && ids.contains(id);
+
+  @override
+  bool operator ==(Object other) =>
+      other is _IdSet &&
+      other.ids.length == ids.length &&
+      other.ids.containsAll(ids);
+
+  @override
+  int get hashCode => Object.hashAllUnordered(ids);
+}
+
+ToolApprovalRequest? _matchingApprovalRequest({
+  required ToolApprovalService approval,
+  required String? conversationId,
+  String? toolCallId,
+}) {
+  if (toolCallId == null || toolCallId.isEmpty) {
+    return null;
+  }
+  return approval.pendingFor(
+    toolCallId: toolCallId,
+    conversationId: conversationId,
+  );
+}
+
+bool _shouldShowToolCard(
+  BuildContext context,
+  ToolUIPart part, {
+  bool? showToolCards,
+  String? conversationId,
+}) {
+  final visible =
+      showToolCards ??
+      context.select<SettingsProvider, bool>((s) => s.showToolCards);
+  var pendingApproval = false;
+  if (!visible && part.loading) {
+    try {
+      pendingApproval = context.select<ToolApprovalService, bool>(
+        (approval) =>
+            _matchingApprovalRequest(
+              approval: approval,
+              conversationId: conversationId,
+              toolCallId: part.id,
+            ) !=
+            null,
+      );
+    } catch (_) {}
+  }
+  return isTimelineToolVisible(
+    toolName: part.toolName,
+    loading: part.loading,
+    showToolCards: visible,
+    pendingApproval: pendingApproval,
+    filterBuiltinSearch: false,
+  );
+}
+
+List<_TimelineStepData> _visibleChatTimelineSteps(
+  BuildContext context,
+  List<_TimelineStepData> steps, {
+  required bool showThinkingCards,
+  required bool showToolCards,
+  required String conversationId,
+}) {
+  if (showThinkingCards && showToolCards) return steps;
+  ToolApprovalService? approval;
+  if (!showToolCards) {
+    try {
+      approval = context.read<ToolApprovalService>();
+      context.select<ToolApprovalService, int>(
+        (service) => Object.hashAll([
+          for (final req in service.pendingRequests)
+            Object.hash(req.toolCallId, req.conversationId),
+        ]),
+      );
+    } catch (_) {}
+  }
+  return [
+    for (final step in steps)
+      if (step.isReasoning
+          ? showThinkingCards
+          : isTimelineToolVisible(
+              toolName: step.tool!.toolName,
+              loading: step.tool!.loading,
+              showToolCards: showToolCards,
+              pendingApproval:
+                  approval?.pendingFor(
+                    toolCallId: step.tool?.id ?? '',
+                    conversationId: conversationId,
+                  ) !=
+                  null,
+            ))
+        step,
+  ];
+}
+
+enum _ReasoningStepState { collapsed, preview, expanded }
+
+const double _timelineStepPaddingV = 8;
+const double _timelineIconSize = 18;
+const double _timelineIconColumnWidth = 24;
+const double _timelineGap = timelineStepContentInset - _timelineIconColumnWidth;
+const double _timelineLineGap = 3;
+const double _timelineLineX = (_timelineIconColumnWidth - 1) / 2;
+
+/// Holds the latest reasoning-toggle callbacks so memoized step widgets can
+/// look them up on tap without baking a new closure into the cache key.
+class _ChainOfThoughtActions extends InheritedWidget {
+  const _ChainOfThoughtActions({required this.toggles, required super.child});
+
+  final List<VoidCallback?> toggles;
+
+  static VoidCallback? toggleOf(BuildContext context, int index) {
+    final scope = context
+        .getInheritedWidgetOfExactType<_ChainOfThoughtActions>();
+    if (scope == null || index < 0 || index >= scope.toggles.length) {
+      return null;
+    }
+    return scope.toggles[index];
+  }
+
+  @override
+  bool updateShouldNotify(_ChainOfThoughtActions oldWidget) => false;
+}
+
+/// Holds the latest recovered-answer callback so memoized ask-user steps can
+/// submit without baking a new closure into the cache key.
+class _RecoveredAskUserAction extends InheritedWidget {
+  const _RecoveredAskUserAction({
+    required this.conversationId,
+    required this.onSubmit,
+    required super.child,
+  });
+
+  final String conversationId;
+  final Future<void> Function(ToolUIPart part, AskUserResult result)? onSubmit;
+
+  static _RecoveredAskUserAction? maybeOf(BuildContext context) {
+    return context.getInheritedWidgetOfExactType<_RecoveredAskUserAction>();
+  }
+
+  @override
+  bool updateShouldNotify(_RecoveredAskUserAction oldWidget) => false;
+}
+
+class _CachedTimelineStep extends StatefulWidget {
+  const _CachedTimelineStep({
+    super.key,
+    required this.signature,
+    required this.builder,
+  });
+
+  /// Must include every ambient input the [builder] reads. Returning the same
+  /// widget instance lets [Element.updateChild] skip the subtree entirely.
+  final Object signature;
+  final Widget Function() builder;
+
+  @override
+  State<_CachedTimelineStep> createState() => _CachedTimelineStepState();
+}
+
+class _CachedTimelineStepState extends State<_CachedTimelineStep> {
+  Widget? _rendered;
+
+  @override
+  void didUpdateWidget(covariant _CachedTimelineStep oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.signature != widget.signature) {
+      _rendered = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => _rendered ??= widget.builder();
+}
+
+class _ChainOfThoughtCard extends StatefulWidget {
+  const _ChainOfThoughtCard({
+    super.key,
+    required this.steps,
+    required this.message,
+    required this.showThinkingCards,
+    required this.showToolCards,
+    required this.collapseThinkingSteps,
+    required this.streaming,
+    this.onRecoveredAnswer,
+  });
+
+  final List<_TimelineStepData> steps;
+  final ChatMessage message;
+  String get conversationId => message.conversationId;
+  final bool showThinkingCards;
+  final bool showToolCards;
+  final bool? collapseThinkingSteps;
+  final bool streaming;
+  final Future<void> Function(ToolUIPart part, AskUserResult result)?
+  onRecoveredAnswer;
+
+  @override
+  State<_ChainOfThoughtCard> createState() => _ChainOfThoughtCardState();
+}
+
+class _ChainOfThoughtCardState extends State<_ChainOfThoughtCard>
+    with _StoredTimelineState<_ChainOfThoughtCard> {
+  @override
+  Object get storageId => ('chain', widget.key);
+  @override
+  Object saveViewState() => _showAllSteps;
+  @override
+  void restoreViewState(Object value) {
+    _showAllSteps = value as bool;
+  }
+
+  bool _showAllSteps = false;
+
+  Object _reasoningStepSignature({
+    required ReasoningSegment step,
+    required int sourceIndex,
+    required bool isFirst,
+    required bool isLast,
+    required ChatSurfaceForegroundPalette fg,
+    required Brightness brightness,
+    required bool enableReasoningMarkdown,
+    required double textScale,
+    required bool hasToggle,
+  }) {
+    return (
+      'reasoning',
+      widget.message.id,
+      widget.message.modelId,
+      widget.message.timestamp,
+      step.text,
+      step.expanded,
+      step.loading,
+      step.startAt,
+      step.finishedAt,
+      step.toolStartIndex,
+      sourceIndex,
+      isFirst,
+      isLast,
+      fg,
+      brightness,
+      enableReasoningMarkdown,
+      textScale,
+      hasToggle,
+    );
+  }
+
+  Object _toolStepSignature({
+    required ToolUIPart part,
+    required bool isFirst,
+    required bool isLast,
+    required ChatSurfaceForegroundPalette fg,
+    required Brightness brightness,
+    required bool showToolResultSummary,
+    required bool hideToolResultImages,
+    required bool pendingApproval,
+    required double textScale,
+  }) {
+    return Object.hash(
+      'tool',
+      widget.conversationId,
+      part.cacheToken,
+      isFirst,
+      isLast,
+      fg,
+      brightness,
+      showToolResultSummary,
+      hideToolResultImages,
+      pendingApproval,
+      textScale,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final fg = computeChatSurfaceForegroundPalette(
+      context,
+      target: ChatBubbleStyleTarget.thinkingToolCard,
+    );
+    final collapseThinkingSteps =
+        widget.collapseThinkingSteps ??
+        context.select<SettingsProvider, bool>((s) => s.collapseThinkingSteps);
+    final showToolResultSummary = context.select<SettingsProvider, bool>(
+      (s) => s.showToolResultSummary,
+    );
+    final hideToolResultImages = context.select<SettingsProvider, bool>(
+      (s) => s.hideToolResultImages,
+    );
+    final showBrowserPageCards = context.select<SettingsProvider, bool>(
+      (s) => s.showBrowserPageCards,
+    );
+    final enableReasoningMarkdown = context.select<SettingsProvider, bool>(
+      (s) => s.enableReasoningMarkdown,
+    );
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
+    final ungroupedSteps = _visibleChatTimelineSteps(
+      context,
+      widget.steps,
+      showThinkingCards: widget.showThinkingCards,
+      showToolCards: widget.showToolCards,
+      conversationId: widget.conversationId,
+    );
+    if (ungroupedSteps.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final pendingApprovalIds = context.select<ToolApprovalService, _IdSet>((
+      approval,
+    ) {
+      return _IdSet({
+        for (final step in ungroupedSteps)
+          if (step.tool != null &&
+              _matchingApprovalRequest(
+                    approval: approval,
+                    conversationId: widget.conversationId,
+                    toolCallId: step.tool!.id,
+                  ) !=
+                  null)
+            step.tool!.id,
+      });
+    });
+    final filteredSteps = _groupBrowserSteps(
+      ungroupedSteps,
+      pendingApprovalIds,
+    );
+    final l10n = AppLocalizations.of(context)!;
+    final enableAdaptiveWidth =
+        filteredSteps.isNotEmpty &&
+        filteredSteps.every((step) => step.isReasoning) &&
+        !filteredSteps.any((step) => step.isReasoning && step.loading);
+    final canCollapse = collapseThinkingSteps && filteredSteps.length > 2;
+    final target = ConversationFindHighlights.of(context)?.current;
+    final findStep = target?.part == FindPart.reasoning
+        ? filteredSteps.indexWhere(
+            (s) => s.isReasoning && s.sourceOrdinal == target!.block,
+          )
+        : -1;
+    if (findStep >= 0 && findStep < filteredSteps.length - 2) {
+      _showAllSteps = true;
+    }
+    final hiddenCount = canCollapse && !_showAllSteps
+        ? filteredSteps.length - 2
+        : 0;
+    final visibleSteps = hiddenCount > 0
+        ? filteredSteps.sublist(hiddenCount)
+        : filteredSteps;
+    final fillWidth =
+        !enableAdaptiveWidth ||
+        visibleSteps.any(
+          (step) =>
+              step.isReasoning &&
+              ((step.reasoning?.expanded ?? false) || step.loading),
+        );
+
+    final card = buildSharedChatSurface(
+      context,
+      target: ChatBubbleStyleTarget.thinkingToolCard,
+      borderRadius: BorderRadius.circular(16),
+      padding: const EdgeInsets.symmetric(
+        horizontal: timelineCardHorizontalPadding,
+        vertical: 4,
+      ),
+      defaultColor: cs.primaryContainer.withValues(
+        alpha: theme.brightness == Brightness.dark ? 0.25 : 0.30,
+      ),
+      child: _TimelineAnimatedSize(
+        curve: Curves.easeInOutCubicEmphasized,
+        child: _RecoveredAskUserAction(
+          conversationId: widget.conversationId,
+          onSubmit: widget.onRecoveredAnswer,
+          child: _ChainOfThoughtActions(
+            toggles: [
+              for (final step in filteredSteps) step.reasoning?.onToggle,
+            ],
+            child: Column(
+              mainAxisSize: fillWidth ? MainAxisSize.max : MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (canCollapse)
+                  IosCardPress(
+                    onTap: () => setState(() => _showAllSteps = !_showAllSteps),
+                    borderRadius: BorderRadius.circular(12),
+                    baseColor: Colors.transparent,
+                    pressedScale: 1,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 0,
+                      vertical: 0,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: _timelineIconColumnWidth,
+                            child: Center(
+                              child: Icon(
+                                _showAllSteps
+                                    ? Lucide.ChevronUp
+                                    : Lucide.ChevronDown,
+                                size: 16,
+                                color: fg.strong,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: _timelineGap),
+                          Text(
+                            _showAllSteps
+                                ? l10n.chainOfThoughtCollapse
+                                : l10n.chainOfThoughtExpandSteps(hiddenCount),
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: AppFontWeights.semibold,
+                              color: fg.strong,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ViewportBlockList(
+                  storageId: ('steps', widget.key, showBrowserPageCards),
+                  revealIndex: findStep >= 0 ? findStep - hiddenCount : null,
+                  itemCount: visibleSteps.length,
+                  structureToken: (visibleSteps.length, hiddenCount),
+                  itemKey: (i) {
+                    final step = visibleSteps[i];
+                    if (step.browserTools case final tools?) {
+                      return 'browser-group-${tools.first.id}-${step.sourceOrdinal}';
+                    }
+                    if (step.isReasoning) {
+                      return 'reasoning-${step.sourceOrdinal}';
+                    }
+                    return timelineToolStepKey(
+                      id: step.tool!.id,
+                      sourceOrdinal: step.sourceOrdinal,
+                      toolName: step.tool!.toolName,
+                    );
+                  },
+                  estimateExtent: (i, width) {
+                    final step = visibleSteps[i];
+                    if (!showBrowserPageCards || step.browserTools == null) {
+                      return 36;
+                    }
+                    return 36 +
+                        estimateBrowserGroupBodyHeight(lite: step.browserLite);
+                  },
+                  keepAlive: (i) =>
+                      visibleSteps[i].tool?.toolName ==
+                          LocalToolNames.askUser &&
+                      (visibleSteps[i].tool!.loading ||
+                          (visibleSteps[i].tool!.content?.isEmpty ?? true)),
+                  itemBuilder: (context, i) {
+                    final step = visibleSteps[i];
+                    final sourceIndex = hiddenCount + i;
+                    final isFirst = i == 0;
+                    final isLast = i == visibleSteps.length - 1;
+                    if (step.isReasoning) {
+                      final reasoning = step.reasoning!;
+                      final hasToggle = reasoning.onToggle != null;
+                      return _CachedTimelineStep(
+                        key: ValueKey<String>(
+                          'reasoning-${step.sourceOrdinal}',
+                        ),
+                        signature: _reasoningStepSignature(
+                          step: reasoning,
+                          sourceIndex: sourceIndex,
+                          isFirst: isFirst,
+                          isLast: isLast,
+                          fg: fg,
+                          brightness: theme.brightness,
+                          enableReasoningMarkdown: enableReasoningMarkdown,
+                          textScale: textScale,
+                          hasToggle: hasToggle,
+                        ),
+                        builder: () => _ChainOfThoughtReasoningStep(
+                          message: widget.message,
+                          step: reasoning,
+                          sourceIndex: sourceIndex,
+                          sourceOrdinal: step.sourceOrdinal,
+                          isFirst: isFirst,
+                          isLast: isLast,
+                        ),
+                      );
+                    }
+                    final part = step.tool!;
+                    if (step.browserTools case final tools?) {
+                      final expandAllSteps =
+                          widget.collapseThinkingSteps == false;
+                      return _CachedTimelineStep(
+                        key: ValueKey(
+                          'browser-group-${tools.first.id}-${step.sourceOrdinal}',
+                        ),
+                        signature: (
+                          Object.hashAll(
+                            tools.map(
+                              (part) => (
+                                part.id,
+                                part.loading,
+                                part.content.hashCode,
+                                part.metadata.hashCode,
+                                Object.hashAll(
+                                  part.arguments.entries.map(
+                                    (entry) => (entry.key, entry.value),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          step.browserLite,
+                          expandAllSteps,
+                          isFirst,
+                          isLast,
+                          fg,
+                          theme.brightness,
+                          textScale,
+                          hideToolResultImages,
+                          showBrowserPageCards,
+                          widget.streaming,
+                          widget.conversationId,
+                        ),
+                        builder: () => _ChainOfThoughtBrowserGroup(
+                          sourceOrdinal: step.sourceOrdinal,
+                          tools: tools,
+                          lite: step.browserLite,
+                          expandAllSteps: expandAllSteps,
+                          conversationId: widget.conversationId,
+                          isFirst: isFirst,
+                          isLast: isLast,
+                          hideImages: hideToolResultImages,
+                          showPageCard: showBrowserPageCards,
+                          streaming: widget.streaming,
+                        ),
+                      );
+                    }
+                    return _CachedTimelineStep(
+                      key: ValueKey<String>(
+                        timelineToolStepKey(
+                          id: part.id,
+                          sourceOrdinal: step.sourceOrdinal,
+                          toolName: part.toolName,
+                        ),
+                      ),
+                      signature: _toolStepSignature(
+                        part: part,
+                        isFirst: isFirst,
+                        isLast: isLast,
+                        fg: fg,
+                        brightness: theme.brightness,
+                        showToolResultSummary: showToolResultSummary,
+                        hideToolResultImages: hideToolResultImages,
+                        pendingApproval: pendingApprovalIds.contains(part.id),
+                        textScale: textScale,
+                      ),
+                      builder: () {
+                        debugTimelineToolStepBuilds++;
+                        return _ChainOfThoughtToolStep(
+                          part: part,
+                          conversationId: widget.conversationId,
+                          isFirst: isFirst,
+                          isLast: isLast,
+                        );
+                      },
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      widthFactor: fillWidth ? null : 1,
+      child: ChatSurfaceTheme(palette: fg, child: card),
+    );
+  }
+}
+
+class _TimelineStepShell extends StatelessWidget {
+  const _TimelineStepShell({
+    required this.icon,
+    required this.label,
+    required this.isFirst,
+    required this.isLast,
+    this.onTap,
+    this.extra,
+    this.indicator,
+    this.content,
+    this.contentVisible = false,
+    this.expectContent = false,
+    this.stableKey,
+    this.contentBottomPadding = 8,
+  });
+
+  final Widget icon;
+  final Widget label;
+  final bool isFirst;
+  final bool isLast;
+  final VoidCallback? onTap;
+  final Widget? extra;
+  final Widget? indicator;
+  final Widget? content;
+  final bool contentVisible;
+
+  /// Keep [AnimatedSize] mounted so a later result or expand can grow in.
+  /// Finished steps with no body skip the slot entirely.
+  final bool expectContent;
+  final Key? stableKey;
+  final double contentBottomPadding;
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = chatSurfaceForegroundPalette(context);
+    final headerContent = Padding(
+      padding: const EdgeInsets.symmetric(vertical: _timelineStepPaddingV),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const SizedBox(
+            width: _timelineIconColumnWidth,
+            height: _timelineIconSize,
+          ),
+          const SizedBox(width: _timelineGap),
+          Expanded(child: label),
+          if (extra != null) ...[const SizedBox(width: 8), extra!],
+          if (indicator != null) ...[const SizedBox(width: 6), indicator!],
+        ],
+      ),
+    );
+
+    final header = Stack(
+      children: [
+        headerContent,
+        Positioned(
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: _timelineIconColumnWidth,
+          child: _TimelineIconColumn(
+            icon: icon,
+            isFirst: isFirst,
+            isLast: isLast,
+            lineColor: fg.divider,
+          ),
+        ),
+      ],
+    );
+
+    final pressableHeader = IosCardPress(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      baseColor: Colors.transparent,
+      pressedScale: 1,
+      padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
+      child: header,
+    );
+    if (content == null && !expectContent) {
+      return KeyedSubtree(
+        key:
+            stableKey ??
+            ValueKey<String>('chatMessageTimelineStepShell:$isFirst:$isLast'),
+        child: pressableHeader,
+      );
+    }
+
+    return KeyedSubtree(
+      key:
+          stableKey ??
+          ValueKey<String>('chatMessageTimelineStepShell:$isFirst:$isLast'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          pressableHeader,
+          _TimelineStepBody(
+            isLast: isLast,
+            content: content,
+            visible: contentVisible,
+            bottomPadding: contentBottomPadding,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shared connector and inset for timeline content, including a group's
+/// persistent preview. Only the owner of changing content animates its height.
+class _TimelineStepBody extends StatelessWidget {
+  const _TimelineStepBody({
+    required this.isLast,
+    required this.content,
+    this.visible = true,
+    this.animate = true,
+    this.bottomPadding = 8,
+  });
+
+  final bool isLast, visible, animate;
+  final Widget? content;
+  final double bottomPadding;
+
+  @override
+  Widget build(BuildContext context) {
+    final body = visible
+        ? Padding(
+            padding: EdgeInsets.only(
+              left: timelineStepContentInset,
+              top: 4,
+              bottom: bottomPadding,
+            ),
+            child: content,
+          )
+        : const SizedBox.shrink();
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        if (!isLast)
+          Positioned(
+            left: _timelineLineX,
+            top: 0,
+            bottom: 0,
+            child: SizedBox(
+              key: const ValueKey('chatMessageTimelineContentLine'),
+              width: 1,
+              child: ColoredBox(
+                color: chatSurfaceForegroundPalette(context).divider,
+              ),
+            ),
+          ),
+        if (animate)
+          _TimelineAnimatedSize(
+            curve: const Cubic(0.2, 0.8, 0.2, 1),
+            child: body,
+          )
+        else
+          body,
+      ],
+    );
+  }
+}
+
+class _TimelineAnimatedSize extends StatefulWidget {
+  const _TimelineAnimatedSize({required this.curve, required this.child});
+
+  final Curve curve;
+  final Widget child;
+
+  static void snapAncestors(BuildContext context, int layoutFrames) {
+    context.visitAncestorElements((element) {
+      if (element case StatefulElement(
+        state: final _TimelineAnimatedSizeState state,
+      )) {
+        state._snap(layoutFrames);
+      }
+      return true;
+    });
+  }
+
+  @override
+  State<_TimelineAnimatedSize> createState() => _TimelineAnimatedSizeState();
+}
+
+class _TimelineAnimatedSizeState extends State<_TimelineAnimatedSize> {
+  final _bodyKey = GlobalKey();
+  int _snapFrames = 0;
+
+  void _snap(int frames) {
+    if (_snapFrames > 0) {
+      _snapFrames = math.max(_snapFrames, frames);
+      return;
+    }
+    setState(() => _snapFrames = frames);
+    WidgetsBinding.instance.addPostFrameCallback(_finishFrame);
+  }
+
+  void _finishFrame(Duration _) {
+    if (!mounted) return;
+    if (_snapFrames > 1) {
+      _snapFrames--;
+      WidgetsBinding.instance.addPostFrameCallback(_finishFrame);
+    } else {
+      setState(() => _snapFrames = 0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Apply an asynchronously decoded size within the anchored layouts, while
+    // keeping the interactive subtree mounted when the animation is bypassed.
+    final body = KeyedSubtree(key: _bodyKey, child: widget.child);
+    if (_snapFrames > 0) return body;
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 300),
+      curve: widget.curve,
+      alignment: Alignment.topLeft,
+      child: body,
+    );
+  }
+}
+
+class _TimelineIconColumn extends StatelessWidget {
+  const _TimelineIconColumn({
+    required this.icon,
+    required this.isFirst,
+    required this.isLast,
+    required this.lineColor,
+  });
+
+  final Widget icon;
+  final bool isFirst;
+  final bool isLast;
+  final Color lineColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      key: ValueKey<String>('chatMessageTimelineIconColumn:$isFirst:$isLast'),
+      painter: _TimelineLinePainter(
+        isFirst: isFirst,
+        isLast: isLast,
+        lineColor: lineColor,
+      ),
+      child: SizedBox.expand(child: Center(child: icon)),
+    );
+  }
+}
+
+class _TimelineLinePainter extends CustomPainter {
+  const _TimelineLinePainter({
+    required this.isFirst,
+    required this.isLast,
+    required this.lineColor,
+  });
+
+  final bool isFirst;
+  final bool isLast;
+  final Color lineColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = lineColor
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+    final x = size.width / 2;
+    final iconTop = (size.height - _timelineIconSize) / 2;
+    final iconBottom = iconTop + _timelineIconSize;
+    if (!isFirst) {
+      canvas.drawLine(
+        Offset(x, 0),
+        Offset(x, math.max(0, iconTop - _timelineLineGap)),
+        paint,
+      );
+    }
+    if (!isLast) {
+      canvas.drawLine(
+        Offset(x, math.min(size.height, iconBottom + _timelineLineGap)),
+        Offset(x, size.height),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _TimelineLinePainter oldDelegate) {
+    return oldDelegate.isFirst != isFirst ||
+        oldDelegate.isLast != isLast ||
+        oldDelegate.lineColor != lineColor;
+  }
+}
+
+class _ChainOfThoughtReasoningStep extends StatefulWidget {
+  const _ChainOfThoughtReasoningStep({
+    required this.message,
+    required this.step,
+    required this.sourceIndex,
+    required this.sourceOrdinal,
+    required this.isFirst,
+    required this.isLast,
+  });
+
+  final ChatMessage message;
+  final ReasoningSegment step;
+  final int sourceIndex;
+  final int sourceOrdinal;
+  final bool isFirst;
+  final bool isLast;
+
+  @override
+  State<_ChainOfThoughtReasoningStep> createState() =>
+      _ChainOfThoughtReasoningStepState();
+}
+
+class _ChainOfThoughtReasoningStepState
+    extends State<_ChainOfThoughtReasoningStep>
+    with _StoredTimelineState<_ChainOfThoughtReasoningStep> {
+  @override
+  Object get storageId => ('reasoning-expanded', widget.sourceOrdinal);
+  @override
+  Object saveViewState() => (_localExpanded,);
+  @override
+  void restoreViewState(Object value) {
+    _localExpanded = (value as (bool?,)).$1;
+  }
+
+  final ValueNotifier<int> _elapsedTick = ValueNotifier<int>(0);
+  Timer? _elapsedTimer;
+  final ScrollController _scroll = ScrollController();
+  bool _followBottom = true;
+  bool _hasOverflow = false;
+  bool? _localExpanded;
+
+  _ReasoningStepState get _stepState {
+    // Persisted parts can outnumber the timing/interaction metadata (for
+    // example after a background tool round). The content still needs a toggle.
+    final expanded =
+        (_ChainOfThoughtActions.toggleOf(context, widget.sourceIndex) == null
+            ? _localExpanded
+            : null) ??
+        widget.step.expanded;
+    if (widget.step.loading) {
+      return expanded
+          ? _ReasoningStepState.expanded
+          : _ReasoningStepState.preview;
+    }
+    return expanded
+        ? _ReasoningStepState.expanded
+        : _ReasoningStepState.collapsed;
+  }
+
+  String _elapsed() {
+    final start = widget.step.startAt;
+    if (start == null) return '';
+    final end =
+        widget.step.finishedAt ??
+        (widget.step.loading ? DateTime.now() : start);
+    final ms = end.difference(start).inMilliseconds;
+    return '(${(ms / 1000).toStringAsFixed(1)}s)';
+  }
+
+  void _syncElapsedTimer() {
+    if (widget.step.loading) {
+      _elapsedTimer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
+        if (mounted) _elapsedTick.value++;
+      });
+    } else {
+      _elapsedTimer?.cancel();
+      _elapsedTimer = null;
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_updateFollowBottom);
+    _syncElapsedTimer();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkOverflow();
+      if (mounted &&
+          widget.step.loading &&
+          _followBottom &&
+          _scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChainOfThoughtReasoningStep oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncElapsedTimer();
+    if (widget.step.loading && widget.step.text != oldWidget.step.text) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            widget.step.loading &&
+            _followBottom &&
+            _scroll.hasClients) {
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        }
+      });
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkOverflow());
+  }
+
+  void _updateFollowBottom() {
+    if (!_scroll.hasClients) return;
+    final position = _scroll.position;
+    _followBottom =
+        position.userScrollDirection != ScrollDirection.forward &&
+        position.extentAfter <= 1;
+  }
+
+  @override
+  void dispose() {
+    _elapsedTimer?.cancel();
+    _elapsedTick.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _checkOverflow() {
+    if (!_scroll.hasClients) return;
+    final over = _scroll.position.maxScrollExtent > 0.5;
+    if (over != _hasOverflow && mounted) {
+      setState(() => _hasOverflow = over);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    final enableReasoningMarkdown = context.select<SettingsProvider, bool>(
+      (s) => s.enableReasoningMarkdown,
+    );
+    final find = ConversationFindHighlights.of(context);
+    final target = find?.current;
+    final selected =
+        target?.part == FindPart.reasoning &&
+        target?.block == widget.sourceOrdinal;
+    if (selected) _localExpanded = true;
+    final state = selected ? _ReasoningStepState.expanded : _stepState;
+    final display = reasoningDisplayText(widget.step.text);
+    final ranges =
+        find?.ranges(FindPart.reasoning, widget.sourceOrdinal) ??
+        const <SourceSpan>[];
+    final label = ThinkingSheen(
+      enabled: widget.step.loading,
+      color: fg.strong,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            l10n.chatMessageWidgetDeepThinking,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: AppFontWeights.semibold,
+              color: fg.strong,
+            ),
+          ),
+          if (widget.step.startAt != null) ...[
+            const SizedBox(width: 6),
+            ValueListenableBuilder<int>(
+              valueListenable: _elapsedTick,
+              builder: (context, _, __) => Text(
+                _elapsed(),
+                style: TextStyle(fontSize: 13, color: fg.medium),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+
+    final icon = SizedBox(
+      width: 18,
+      height: 18,
+      child: Center(
+        child: ReasoningIcons.thinkingCardIcon(size: 18, color: fg.strong),
+      ),
+    );
+
+    Widget reasoningContent(String text) {
+      final source = text.isNotEmpty ? UnicodeSanitizer.sanitize(text) : '…';
+      const style = TextStyle(fontSize: 12.5, height: 1.32);
+      return QuoteSourceAnchor(
+        message: widget.message,
+        source: source,
+        findPart: FindPart.reasoning,
+        findBlock: widget.sourceOrdinal,
+        markdown: enableReasoningMarkdown,
+        child: AppSelectionArea(
+          message: widget.message,
+          quoteTextOnly: true,
+          child: enableReasoningMarkdown
+              ? RepaintBoundary(
+                  child: MarkdownWithCodeHighlight(
+                    text: source,
+                    highlightRanges: ranges,
+                    highlightColor: context.appColors.searchHighlight,
+                    baseStyle: style,
+                    streaming: widget.step.loading,
+                  ),
+                )
+              : plainMessageText(
+                  text: source,
+                  style: style,
+                  buildSpan: ranges.isEmpty
+                      ? null
+                      : (start, end) => highlightedQuoteSource(
+                          source,
+                          ranges,
+                          context.appColors.searchHighlight,
+                          start: start,
+                          end: end,
+                        ),
+                ),
+        ),
+      );
+    }
+
+    Widget? content;
+    if (state == _ReasoningStepState.preview) {
+      content = ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 100),
+        child: OptionalShaderMask(
+          enabled: _hasOverflow,
+          shaderCallback: (rect) {
+            final h = rect.height;
+            const double topFade = 12;
+            const double bottomFade = 28;
+            final double sTop = (topFade / h).clamp(0.0, 1.0);
+            final double sBot = (1.0 - bottomFade / h).clamp(0.0, 1.0);
+            return LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: const [
+                Color(0x00FFFFFF), // color-gate: ignore (dstIn alpha mask)
+                Color(0xFFFFFFFF), // color-gate: ignore (dstIn alpha mask)
+                Color(0xFFFFFFFF), // color-gate: ignore (dstIn alpha mask)
+                Color(0x00FFFFFF), // color-gate: ignore (dstIn alpha mask)
+              ],
+              stops: [0.0, sTop, sBot, 1.0],
+            ).createShader(rect);
+          },
+          blendMode: BlendMode.dstIn,
+          child: SingleChildScrollView(
+            controller: _scroll,
+            // Bouncing physics already declines drags when content fits.
+            // Keeping it stable also retains ScrollPosition on overflow.
+            physics: const BouncingScrollPhysics(),
+            child: reasoningContent(display),
+          ),
+        ),
+      );
+    } else if (state == _ReasoningStepState.expanded) {
+      content = reasoningContent(display);
+    }
+
+    return _TimelineStepShell(
+      icon: icon,
+      label: label,
+      isFirst: widget.isFirst,
+      isLast: widget.isLast,
+      onTap: () {
+        final toggle = _ChainOfThoughtActions.toggleOf(
+          context,
+          widget.sourceIndex,
+        );
+        if (toggle != null) {
+          toggle();
+        } else {
+          setState(() {
+            _localExpanded = !(_localExpanded ?? widget.step.expanded);
+          });
+        }
+      },
+      indicator: Icon(
+        state == _ReasoningStepState.expanded
+            ? Lucide.ChevronUp
+            : Lucide.ChevronDown,
+        size: 16,
+        color: fg.muted,
+      ),
+      content: content,
+      contentVisible: state != _ReasoningStepState.collapsed,
+      expectContent: true,
+    );
+  }
+}
+
+class _ChainOfThoughtBrowserGroup extends StatefulWidget {
+  const _ChainOfThoughtBrowserGroup({
+    required this.sourceOrdinal,
+    required this.tools,
+    required this.lite,
+    required this.expandAllSteps,
+    required this.conversationId,
+    required this.isFirst,
+    required this.isLast,
+    required this.hideImages,
+    required this.showPageCard,
+    required this.streaming,
+  });
+  final int sourceOrdinal;
+  final List<ToolUIPart> tools;
+  final bool lite, isFirst, isLast, hideImages, showPageCard, streaming;
+  final bool expandAllSteps;
+  final String conversationId;
+  @override
+  State<_ChainOfThoughtBrowserGroup> createState() =>
+      _ChainOfThoughtBrowserGroupState();
+}
+
+class _ChainOfThoughtBrowserGroupState
+    extends State<_ChainOfThoughtBrowserGroup>
+    with _StoredTimelineState<_ChainOfThoughtBrowserGroup> {
+  @override
+  Object get storageId => ('browser', widget.tools.first.id);
+  @override
+  Object saveViewState() => (_expanded, _userToggled, _showAll);
+  @override
+  void restoreViewState(Object value) {
+    final stored = value as (bool?, bool, bool);
+    _expanded = stored.$1;
+    _userToggled = stored.$2;
+    _showAll = stored.$3;
+    _keepSteps = _isExpanded;
+  }
+
+  List<BrowserToolAction> _actions = const [];
+  List<Object> _inputs = const [];
+  List<List<String>> _images = const [];
+  List<(BrowserToolAction?, String?)> _stepContexts = const [];
+  int _structureRevision = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _parse();
+    _syncAction(immediate: true);
+    _keepSteps = _isExpanded;
+  }
+
+  @override
+  void didUpdateWidget(_ChainOfThoughtBrowserGroup oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final changedGroup =
+        oldWidget.tools.first.id != widget.tools.first.id ||
+        oldWidget.conversationId != widget.conversationId;
+    if (changedGroup) {
+      _expanded = null;
+      _userToggled = false;
+      _showAll = false;
+    }
+    _parse();
+    _syncAction(immediate: changedGroup);
+    if (changedGroup || MediaQuery.disableAnimationsOf(context)) {
+      _keepSteps = _isExpanded;
+      if (!_keepSteps) _showAll = false;
+    } else if (_isExpanded) {
+      _keepSteps = true;
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context) && !_isExpanded) {
+      _keepSteps = false;
+      _showAll = false;
+    }
+  }
+
+  void _parse() {
+    final actions = <BrowserToolAction>[];
+    final inputs = <Object>[];
+    final images = <List<String>>[];
+    final contexts = <(BrowserToolAction?, String?)>[];
+    var structureChanged = widget.tools.length != _actions.length;
+    BrowserToolAction? snapshot;
+    String? previousUrl;
+    for (var i = 0; i < widget.tools.length; i++) {
+      final tool = widget.tools[i];
+      if (i >= _actions.length || tool.id != _actions[i].id) {
+        structureChanged = true;
+      }
+      final input = (
+        tool.id,
+        tool.loading,
+        tool.content,
+        tool.metadata,
+        Object.hashAll(
+          tool.arguments.entries.map((entry) => (entry.key, entry.value)),
+        ),
+      );
+      inputs.add(input);
+      if (i < _inputs.length && input == _inputs[i]) {
+        actions.add(_actions[i]);
+        images.add(_images[i]);
+      } else {
+        actions.add(
+          BrowserToolAction(
+            id: tool.id,
+            arguments: tool.arguments,
+            content: tool.content,
+            metadata: tool.metadata,
+            loading: tool.loading,
+          ),
+        );
+        images.add(
+          parseToolResultImages(tool.content, metadata: tool.metadata).$2,
+        );
+      }
+      // A lazily mounted row still resolves refs and repeated-page icons
+      // against the complete preceding history, including folded rows.
+      contexts.add((snapshot, previousUrl));
+      final action = actions.last;
+      if (action.action == 'snapshot') snapshot = action;
+      if (action.hasPage && action.url.isNotEmpty) previousUrl = action.url;
+    }
+    if (structureChanged) _structureRevision++;
+    _actions = actions;
+    _inputs = inputs;
+    _images = images;
+    _stepContexts = contexts;
+  }
+
+  bool? _expanded;
+  bool _userToggled = false;
+  bool _showAll = false;
+  bool _keepSteps = false;
+
+  // Keep fast calls in one header. Coalesce updates instead of stacking
+  // transitions for steps that can finish within a single frame.
+  Timer? _actionTimer;
+  BrowserToolAction? _displayAction, _pendingAction;
+  bool get _executing =>
+      _actions.any((action) => action.loading) ||
+      (widget.streaming && widget.isLast && !widget.lite);
+
+  void _syncAction({bool immediate = false}) {
+    _pendingAction = _executing
+        ? _actions.lastWhere(
+            (action) => action.loading,
+            orElse: () => _actions.last,
+          )
+        : null;
+    if (immediate) {
+      _actionTimer?.cancel();
+      _actionTimer = null;
+      _displayAction = _pendingAction;
+    } else if (_displayAction?.id == _pendingAction?.id &&
+        _displayAction?.action == _pendingAction?.action) {
+      _actionTimer?.cancel();
+      _actionTimer = null;
+      _displayAction = _pendingAction;
+    } else {
+      _actionTimer ??= Timer(const Duration(milliseconds: 200), () {
+        _actionTimer = null;
+        setState(() {
+          _displayAction = _pendingAction;
+          if (_isExpanded) _keepSteps = true;
+        });
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _actionTimer?.cancel();
+    super.dispose();
+  }
+
+  bool get _isExpanded =>
+      widget.expandAllSteps ||
+      (_userToggled
+          ? _expanded!
+          : !widget.lite &&
+                !_executing &&
+                _displayAction == null &&
+                _actions.any((action) => action.failed));
+
+  void _finishStepsAnimation() {
+    if (!_isExpanded && _keepSteps) {
+      setState(() {
+        _keepSteps = false;
+        _showAll = false;
+      });
+    }
+  }
+
+  Widget _loadingIcon(Color color) =>
+      LoadingIndicator(height: 12, dotSize: 3, spacing: 2, color: color);
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = chatSurfaceForegroundPalette(context);
+    final cs = Theme.of(context).colorScheme;
+    final l = AppLocalizations.of(context)!;
+    final running = _executing || _displayAction != null;
+    final failures = _actions.where((action) => action.failed).length;
+    final expanded = _isExpanded;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final tools = widget.tools;
+    final expandAllSteps = widget.expandAllSteps;
+    final firstVisible =
+        _keepSteps &&
+            !expandAllSteps &&
+            !_showAll &&
+            widget.tools.length > _browserStepsFoldThreshold
+        ? widget.tools.length - _browserStepsTail
+        : 0;
+    final pageCard = BrowserStepGroupBody(
+      actions: _actions,
+      conversationId: widget.conversationId,
+      lite: widget.lite,
+      running: running,
+    );
+    final header = _TimelineStepShell(
+      stableKey: ValueKey('browser-group-header-${widget.tools.first.id}'),
+      icon: running
+          ? _loadingIcon(fg.strong)
+          : Icon(Lucide.AppWindow, size: 16, color: fg.strong),
+      label: Semantics(
+        button: !expandAllSteps,
+        expanded: expanded,
+        label: l.browserGroupToggleSemantics,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: ThinkingSheen(
+                enabled: running,
+                color: fg.strong,
+                child: AnimatedSwitcher(
+                  duration: reduceMotion
+                      ? Duration.zero
+                      : const Duration(milliseconds: 160),
+                  switchInCurve: Curves.easeOut,
+                  switchOutCurve: Curves.easeIn,
+                  layoutBuilder: (current, previous) => Stack(
+                    alignment: AlignmentDirectional.centerStart,
+                    children: [...previous, if (current != null) current],
+                  ),
+                  child: Text(
+                    _displayAction?.label(l) ?? l.browserStepGroupTitle,
+                    key: ValueKey(_displayAction?.action ?? 'browser-idle'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: AppFontWeights.semibold,
+                      color: fg.strong,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                running
+                    ? l.browserStepCurrent(_actions.length)
+                    : l.browserStepCount(_actions.length),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, color: fg.medium),
+              ),
+            ),
+            if (failures > 0) ...[
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  l.browserActionFailedCount(failures),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 13, color: cs.error),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      isFirst: widget.isFirst,
+      isLast: widget.isLast && !_keepSteps,
+      onTap: expandAllSteps
+          ? null
+          : () => setState(() {
+              _expanded = !expanded;
+              _userToggled = true;
+              // Keep the current rows (including revealed earlier steps) until
+              // closing ends, so reversal starts at the same visual position.
+              _keepSteps = !reduceMotion || _expanded!;
+              if (!_keepSteps) _showAll = false;
+            }),
+      indicator: expandAllSteps
+          ? null
+          : Icon(
+              expanded ? Lucide.ChevronUp : Lucide.ChevronDown,
+              size: 16,
+              color: fg.muted,
+            ),
+    );
+    final steps = <Widget>[];
+    if (_keepSteps) {
+      if (firstVisible > 0) {
+        steps.add(
+          KeyedSubtree(
+            key: ValueKey('browser-steps-earlier-${widget.tools.first.id}'),
+            child: _TimelineStepShell(
+              isFirst: false,
+              isLast: false,
+              icon: Icon(Lucide.Ellipsis, size: 16, color: fg.muted),
+              label: Text(
+                l.browserStepsShowEarlier(firstVisible),
+                style: TextStyle(fontSize: 13, color: fg.muted),
+              ),
+              indicator: Icon(Lucide.ChevronDown, size: 16, color: fg.muted),
+              onTap: () => setState(() => _showAll = true),
+            ),
+          ),
+        );
+      }
+      steps.add(
+        ViewportBlockList(
+          storageId: ('browser-steps', tools.first.id, widget.sourceOrdinal),
+          itemCount: _actions.length - firstVisible,
+          structureToken: (_structureRevision, firstVisible),
+          itemKey: (i) => timelineToolStepKey(
+            id: tools[firstVisible + i].id,
+            sourceOrdinal: firstVisible + i,
+            toolName: LocalToolNames.browser,
+          ),
+          estimateExtent: (i, width) {
+            final index = firstVisible + i;
+            final hasImages = !widget.hideImages && _images[index].isNotEmpty;
+            return 36.0 +
+                (_actions[index].failed ? 40 : 0) +
+                (hasImages ? kBrowserStepImageHeight + 8 : 0);
+          },
+          itemBuilder: (context, i) {
+            final index = firstVisible + i;
+            final preceding = _stepContexts[index];
+            return _step(
+              context,
+              index,
+              snapshot: preceding.$1,
+              previousUrl: preceding.$2,
+            );
+          },
+        ),
+      );
+    }
+    final stepsContent = Align(
+      alignment: Alignment.topLeft,
+      heightFactor: expanded ? 1 : 0,
+      child: IgnorePointer(
+        ignoring: !expanded,
+        child: ExcludeSemantics(
+          excluding: !expanded,
+          child: TickerMode(
+            enabled: expanded,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: steps,
+            ),
+          ),
+        ),
+      ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        header,
+        // Align reports the target height while retaining the laid-out rows.
+        // The outer clip follows AnimatedSize in both directions; the footer
+        // stays mounted and is pushed by that single animated extent.
+        ClipRect(
+          child: reduceMotion
+              ? stepsContent
+              : AnimatedSize(
+                  key: ValueKey(
+                    'browser-steps-motion-${widget.tools.first.id}',
+                  ),
+                  duration: const Duration(milliseconds: 300),
+                  curve: const Cubic(0.2, 0.8, 0.2, 1),
+                  alignment: Alignment.topLeft,
+                  clipBehavior: Clip.none,
+                  onEnd: _finishStepsAnimation,
+                  child: stepsContent,
+                ),
+        ),
+        if (widget.showPageCard)
+          _TimelineStepBody(
+            isLast: widget.isLast,
+            animate: false,
+            content: pageCard,
+          ),
+      ],
+    );
+  }
+
+  Widget _step(
+    BuildContext context,
+    int index, {
+    required BrowserToolAction? snapshot,
+    required String? previousUrl,
+  }) {
+    final part = widget.tools[index];
+    final action = _actions[index];
+    final fg = chatSurfaceForegroundPalette(context);
+    final cs = Theme.of(context).colorScheme;
+    final l = AppLocalizations.of(context)!;
+    final tabUrl = switch ((action.action, widget.expandAllSteps)) {
+      ('switch_tab', true) => action.url,
+      ('switch_tab', false) =>
+        BrowserService.instance.tabs
+            .where((tab) => tab.id == action.tabId)
+            .firstOrNull
+            ?.url,
+      _ => null,
+    };
+    final target = tabUrl == null
+        ? action.target(l, [if (snapshot != null) snapshot])
+        : browserUrlLabel(tabUrl, includePath: true);
+    final content = <Widget>[
+      if (action.failed)
+        Text(
+          browserErrorSummary(l, action.error),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 12,
+            height: 1.4,
+            color: cs.error.withValues(alpha: .9),
+          ),
+        ),
+      if (!widget.hideImages && _images[index].isNotEmpty)
+        SizedBox(
+          key: ValueKey('tool-image-thumbnails:${part.id}'),
+          height: kBrowserStepImageHeight,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: _images[index].length,
+            separatorBuilder: (_, _) => const SizedBox(width: 8),
+            itemBuilder: (_, imageIndex) {
+              final path = _images[index][imageIndex];
+              return GestureDetector(
+                onTap: () => _showToolFullImage(context, path),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: _buildToolImageFromPath(
+                    context,
+                    path,
+                    height: kBrowserStepImageHeight,
+                    maxLogicalWidth: kBrowserStepImageMaxWidth,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+    ];
+    return KeyedSubtree(
+      key: ValueKey('browser-step-${part.id}'),
+      child: _TimelineStepShell(
+        isFirst: false,
+        isLast: widget.isLast && index == widget.tools.length - 1,
+        icon: action.loading
+            ? _loadingIcon(fg.strong)
+            : Icon(
+                action.failed
+                    ? LucideIcons.circleAlert
+                    : browserActionIcon(action.action),
+                size: 16,
+                color: action.failed ? cs.error : fg.strong,
+              ),
+        label: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: ThinkingSheen(
+                enabled: action.loading,
+                color: fg.strong,
+                child: Text(
+                  action.failed
+                      ? l.browserActionFailed(action.label(l))
+                      : action.label(l),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: AppFontWeights.medium,
+                    color: action.failed ? cs.error : fg.strong,
+                  ),
+                ),
+              ),
+            ),
+            if (target != null && target.isNotEmpty) ...[
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  target,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 13, color: fg.muted),
+                ),
+              ),
+            ],
+          ],
+        ),
+        extra:
+            action.hasPage && action.url.isNotEmpty && action.url != previousUrl
+            ? BrowserFavicon(url: action.url, size: 14)
+            : null,
+        indicator: Icon(Lucide.ChevronRight, size: 16, color: fg.muted),
+        content: content.isEmpty
+            ? null
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 0; i < content.length; i++) ...[
+                    if (i > 0) const SizedBox(height: 8),
+                    content[i],
+                  ],
+                ],
+              ),
+        contentVisible: content.isNotEmpty,
+        // This row's body and the persistent preview share an 8dp gap.
+        contentBottomPadding: index == widget.tools.length - 1 ? 4 : 8,
+        expectContent: part.loading || content.isNotEmpty,
+        onTap: () => _showBrowserStepDetail(
+          context,
+          part,
+          conversationId: widget.conversationId,
+        ),
+      ),
+    );
+  }
+}
+
+class _SingleToolImageThumbnail extends StatefulWidget {
+  const _SingleToolImageThumbnail({
+    super.key,
+    required this.path,
+    required this.knownAspect,
+  });
+
+  final String path;
+  final double? knownAspect;
+
+  @override
+  State<_SingleToolImageThumbnail> createState() =>
+      _SingleToolImageThumbnailState();
+}
+
+class _SingleToolImageThumbnailState extends State<_SingleToolImageThumbnail> {
+  ImageStream? _stream;
+  ImageStreamListener? _listener;
+  (ImageProvider, Map<String, double>)? _listenedInput;
+
+  @override
+  void didUpdateWidget(_SingleToolImageThumbnail oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.path != widget.path ||
+        oldWidget.knownAspect != widget.knownAspect) {
+      _stopListening();
+      _listenedInput = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _stopListening();
+    super.dispose();
+  }
+
+  void _stopListening() {
+    final listener = _listener;
+    if (listener != null) _stream?.removeListener(listener);
+    _stream = null;
+    _listener = null;
+  }
+
+  void _listenForAspect(ImageProvider provider, Map<String, double> aspects) {
+    final input = (provider, aspects);
+    if (_listenedInput == input) return;
+    _stopListening();
+    _listenedInput = input;
+    final path = widget.path;
+    _stream = provider.resolve(createLocalImageConfiguration(context));
+    _listener = ImageStreamListener((info, synchronous) {
+      final aspect = info.image.width / info.image.height;
+      info.dispose();
+      _stopListening();
+      void applyAspect() {
+        if (!mounted || _listenedInput != input) return;
+        final frames = ViewportBlockList.layoutFramesForChildResize(context);
+        preserveScrollLayoutAnchor(context, layoutFrames: frames);
+        _TimelineAnimatedSize.snapAncestors(context, frames);
+        setState(() => aspects[path] = aspect);
+      }
+
+      // Cached pixels may arrive during build even when a recycled row has
+      // no measured aspect. Wait for its reserved height to be laid out so
+      // we can anchor the same resize as an asynchronously decoded frame.
+      if (synchronous) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => applyAspect());
+      } else {
+        applyAspect();
+      }
+    }, onError: (_, _) => _stopListening());
+    _stream!.addListener(_listener!);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final path = widget.path;
+    final provider = _previewImageProvider(
+      path,
+      logicalWidth: kToolImageTimelineMaxWidth,
+      logicalHeight: kToolImageTimelineHeight,
+      devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
+      fit: BoxFit.contain,
+    );
+    var aspect = widget.knownAspect;
+    if (aspect == null && provider != null) {
+      final storage = PageStorage.of(context);
+      const id = timelineToolImageAspectsStorageId;
+      final cached =
+          storage.readState(context, identifier: id) as Map<String, double>?;
+      final aspects = cached ?? <String, double>{};
+      if (cached == null) storage.writeState(context, aspects, identifier: id);
+      if (!aspects.containsKey(path)) _listenForAspect(provider, aspects);
+      aspect = aspects[path];
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = timelineToolImageSize(constraints.maxWidth, aspect);
+        return GestureDetector(
+          onTap: () => _showToolFullImage(context, path),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: _buildPreviewImage(
+              context,
+              provider,
+              width: size.width,
+              height: size.height,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ChainOfThoughtToolStep extends StatefulWidget {
+  const _ChainOfThoughtToolStep({
+    required this.part,
+    required this.conversationId,
+    required this.isFirst,
+    required this.isLast,
+  });
+
+  final ToolUIPart part;
+  final String conversationId;
+  final bool isFirst;
+  final bool isLast;
+
+  @override
+  State<_ChainOfThoughtToolStep> createState() =>
+      _ChainOfThoughtToolStepState();
+}
+
+class _ChainOfThoughtToolStepState extends State<_ChainOfThoughtToolStep>
+    with _StoredTimelineState<_ChainOfThoughtToolStep> {
+  @override
+  Object get storageId => ('ask-expanded', widget.part.id);
+  @override
+  Object saveViewState() => (_askUserExpanded,);
+  @override
+  void restoreViewState(Object value) {
+    _askUserExpanded = (value as (bool?,)).$1;
+  }
+
+  bool get _isAskUser => widget.part.toolName == LocalToolNames.askUser;
+  bool? _askUserExpanded;
+
+  String? _cachedContent;
+  Map<String, dynamic>? _cachedMetadata;
+  String _cleanText = '';
+  List<String> _imagePaths = const [];
+
+  bool get _askUserAnswered =>
+      widget.part.content?.trim().isNotEmpty == true && !widget.part.loading;
+
+  @override
+  void initState() {
+    super.initState();
+    _updateContentCache();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChainOfThoughtToolStep oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final wasAnswered =
+        oldWidget.part.content?.trim().isNotEmpty == true &&
+        !oldWidget.part.loading;
+    if (_isAskUser && !wasAnswered && _askUserAnswered) {
+      _askUserExpanded = true;
+    }
+    if (oldWidget.part.content != widget.part.content ||
+        oldWidget.part.metadata != widget.part.metadata) {
+      _updateContentCache();
+    }
+  }
+
+  void _updateContentCache() {
+    final content = widget.part.content;
+    final metadata = widget.part.metadata;
+    if (content == _cachedContent && metadata == _cachedMetadata) return;
+    _cachedContent = content;
+    _cachedMetadata = metadata;
+    final (cleanText, paths) = parseToolResultImages(
+      content,
+      metadata: metadata,
+    );
+    _cleanText = UnicodeSanitizer.sanitize(cleanText);
+    _imagePaths = paths;
+  }
+
+  IconData _iconFor(String name, Map<String, dynamic> args) {
+    return _toolIconFor(name, args);
+  }
+
+  String _titleFor(
+    BuildContext context,
+    String name,
+    Map<String, dynamic> args, {
+    required bool isResult,
+  }) {
+    return _toolTitleFor(context, name, args, isResult: isResult);
+  }
+
+  String _argsSummary(Map<String, dynamic> args) {
+    if (args.isEmpty) return '';
+    final entries = args.entries.take(2).map((entry) {
+      final value = entry.value?.toString() ?? '';
+      final truncated = value.length > 40
+          ? '${truncateHeadUtf16Safe(value, 40)}...'
+          : value;
+      return '${entry.key}: $truncated';
+    });
+    final suffix = args.length > 2 ? ' ...' : '';
+    return entries.join(', ') + suffix;
+  }
+
+  void _showDetail(BuildContext context) {
+    if (shouldUseWorkspaceToolUi(_workspacePartFromUi(widget.part))) {
+      unawaited(
+        showWorkspaceToolDetail(
+          context,
+          _workspacePartFromUi(widget.part),
+          conversationId: widget.conversationId,
+        ),
+      );
+      return;
+    }
+    _showToolDetail(context, widget.part);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = chatSurfaceForegroundPalette(context);
+    final showToolResultSummary = context.select<SettingsProvider, bool>(
+      (s) => s.showToolResultSummary,
+    );
+    final hideToolResultImages = context.select<SettingsProvider, bool>(
+      (s) => s.hideToolResultImages,
+    );
+    final approvalService = context.read<ToolApprovalService>();
+    final pendingRequest = context
+        .select<ToolApprovalService, ToolApprovalRequest?>(
+          (approval) => _matchingApprovalRequest(
+            approval: approval,
+            conversationId: widget.conversationId,
+            toolCallId: widget.part.id,
+          ),
+        );
+    final isPendingApproval = pendingRequest != null;
+    final approvalRequest = pendingRequest;
+    final workspacePart = _workspacePartFromUi(widget.part);
+    final isWorkspace = shouldUseWorkspaceToolUi(workspacePart);
+
+    final Widget loadingIcon = LoadingIndicator(
+      height: 12,
+      dotSize: 3,
+      spacing: 2,
+      color: fg.strong,
+    );
+    final icon = _isAskUser
+        ? Icon(
+            _iconFor(widget.part.toolName, widget.part.arguments),
+            size: 16,
+            color: fg.strong,
+          )
+        : widget.part.loading && !isPendingApproval
+        ? (isWorkspace
+              ? KeyedSubtree(
+                  key: WorkspaceStatusBadge.runningKey,
+                  child: loadingIcon,
+                )
+              : loadingIcon)
+        : Icon(
+            _iconFor(widget.part.toolName, widget.part.arguments),
+            size: 16,
+            color: fg.strong,
+          );
+
+    final title = _titleFor(
+      context,
+      widget.part.toolName,
+      widget.part.arguments,
+      isResult: !widget.part.loading && !isPendingApproval,
+    );
+    final label = ThinkingSheen(
+      enabled: widget.part.loading && !_isAskUser,
+      color: fg.strong,
+      child: Text(
+        title,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: AppFontWeights.semibold,
+          color: fg.strong,
+        ),
+      ),
+    );
+
+    final cleanText = _cleanText;
+    final imagePaths = _imagePaths;
+    final screenTimeResult = widget.part.toolName == LocalToolNames.screenTime
+        ? ScreenTimeResult.tryParse(cleanText)
+        : null;
+    final weatherResult = widget.part.toolName == LocalToolNames.weather
+        ? WeatherToolResult.tryParse(cleanText)
+        : null;
+    final String summaryText = approvalRequest != null
+        ? UnicodeSanitizer.sanitize(_argsSummary(approvalRequest.arguments))
+        : cleanText.isNotEmpty
+        ? cleanText
+        : UnicodeSanitizer.sanitize(
+            ((widget.part.arguments['query'] ??
+                        widget.part.arguments['url'] ??
+                        widget.part.arguments['text']) ??
+                    '')
+                .toString(),
+          );
+    final bool shouldShowSummary = showToolResultSummary;
+    final askUserExpanded = _askUserExpanded ?? true;
+    final ttsText = widget.part.toolName == LocalToolNames.textToSpeech
+        ? _textToSpeechToolText(widget.part.arguments)
+        : '';
+    final Widget? summaryContent = _isAskUser
+        ? _AskUserInlineBody(part: widget.part, compact: true)
+        : isWorkspace
+        ? WorkspaceToolCardBody(
+            part: workspacePart,
+            conversationId: widget.conversationId,
+          )
+        : ttsText.isNotEmpty
+        ? _buildTextToSpeechReplayRow(
+            context,
+            text: ttsText,
+            textColor: fg.body,
+            buttonColor: fg.accent,
+          )
+        : screenTimeResult != null &&
+              (screenTimeResult.isNoPermission || screenTimeResult.hasApps)
+        ? ScreenTimeToolSummary(
+            result: screenTimeResult,
+            textColor: fg.body,
+            secondaryColor: fg.muted,
+            errorColor: cs.error,
+          )
+        : weatherResult != null && !weatherResult.isError
+        ? WeatherToolSummary(result: weatherResult, textColor: fg.body)
+        : !shouldShowSummary || summaryText.trim().isEmpty
+        ? null
+        : Text(
+            summaryText.trim(),
+            maxLines: isPendingApproval ? 2 : 4,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.4,
+              fontFamily: isPendingApproval ? 'monospace' : null,
+              color: fg.body,
+            ),
+          );
+    final showImages =
+        !_isAskUser && !hideToolResultImages && imagePaths.isNotEmpty;
+    final useCompactImage =
+        showImages && usesCompactToolImage(widget.part.toolName, imagePaths);
+    final thumbnailsKey = ValueKey('tool-image-thumbnails:${widget.part.id}');
+    final Widget? imageThumbnails = !showImages
+        ? null
+        : useCompactImage
+        ? _SingleToolImageThumbnail(
+            key: thumbnailsKey,
+            path: imagePaths.single,
+            knownAspect: viewImageResultAspect(cleanText),
+          )
+        : SizedBox(
+            key: thumbnailsKey,
+            height: kToolImageTimelineHeight,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: imagePaths.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (ctx, i) {
+                final path = imagePaths[i];
+                return GestureDetector(
+                  onTap: () => _showToolFullImage(context, path),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: _buildToolImageFromPath(
+                      context,
+                      path,
+                      height: kToolImageTimelineHeight,
+                      maxLogicalWidth: kToolImageTimelineMaxWidth,
+                    ),
+                  ),
+                );
+              },
+            ),
+          );
+    final Widget? content =
+        (summaryContent == null &&
+            imageThumbnails == null &&
+            !(isPendingApproval && !isWorkspace))
+        ? null
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (summaryContent != null) summaryContent,
+              if (isPendingApproval && !isWorkspace)
+                SwitchToFullAccess(conversationId: widget.conversationId),
+              if (summaryContent != null && imageThumbnails != null)
+                const SizedBox(height: 8),
+              if (imageThumbnails != null) imageThumbnails,
+            ],
+          );
+
+    final extra = approvalRequest != null
+        ? Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IosIconButton(
+                size: 14,
+                padding: const EdgeInsets.all(7),
+                color: cs.error,
+                semanticLabel: AppLocalizations.of(context)!.toolApprovalDeny,
+                builder: (color) => Icon(Lucide.X, size: 14, color: color),
+                onTap: () => approvalService.deny(
+                  approvalRequest.toolCallId,
+                  conversationId: approvalRequest.conversationId,
+                ),
+                onLongPress: () => showToolApprovalDenyDialog(
+                  context,
+                  approvalService,
+                  approvalRequest.toolCallId,
+                  conversationId: approvalRequest.conversationId,
+                ),
+              ),
+              const SizedBox(width: 6),
+              IosIconButton(
+                size: 14,
+                padding: const EdgeInsets.all(7),
+                color: fg.accent,
+                semanticLabel: AppLocalizations.of(
+                  context,
+                )!.workspaceToolApprove,
+                builder: (color) => Icon(Lucide.Check, size: 14, color: color),
+                onTap: () => approvalService.approve(
+                  approvalRequest.toolCallId,
+                  conversationId: approvalRequest.conversationId,
+                ),
+              ),
+            ],
+          )
+        : isWorkspace
+        ? WorkspaceToolStatusText(
+            part: workspacePart,
+            conversationId: widget.conversationId,
+          )
+        : ToolPermissionResultStatus.isVisible(widget.part.metadata)
+        ? ToolPermissionResultStatus(metadata: widget.part.metadata)
+        : null;
+
+    return _TimelineStepShell(
+      icon: icon,
+      label: label,
+      isFirst: widget.isFirst,
+      isLast: widget.isLast,
+      onTap: _isAskUser
+          ? () => setState(() => _askUserExpanded = !askUserExpanded)
+          : () => _showDetail(context),
+      extra: extra,
+      indicator: _isAskUser
+          ? Icon(
+              askUserExpanded ? Lucide.ChevronUp : Lucide.ChevronDown,
+              size: 16,
+              color: fg.muted,
+            )
+          : Icon(Lucide.ChevronRight, size: 16, color: fg.muted),
+      content: content,
+      contentVisible: content != null && (!_isAskUser || askUserExpanded),
+      expectContent:
+          widget.part.loading ||
+          isPendingApproval ||
+          _isAskUser ||
+          content != null ||
+          (isWorkspace &&
+              (widget.part.loading || isPendingApproval || content != null)),
+    );
+  }
+}
+
+class _ToolCallItem extends StatefulWidget {
+  const _ToolCallItem({required this.part, required this.conversationId});
+  final ToolUIPart part;
+  final String conversationId;
+
+  @override
+  State<_ToolCallItem> createState() => _ToolCallItemState();
+}
+
+class _ToolCallItemState extends State<_ToolCallItem> {
+  // Cache image paths (local file or URL)
+  List<String> _imagePaths = const [];
+  String? _lastContent;
+  Map<String, dynamic>? _lastMetadata;
+
+  void _updateImageCache() {
+    final content = widget.part.content;
+    final metadata = widget.part.metadata;
+    if (content == _lastContent && metadata == _lastMetadata) return;
+    _lastContent = content;
+    _lastMetadata = metadata;
+
+    final (_, paths) = parseToolResultImages(content, metadata: metadata);
+    _imagePaths = paths;
+  }
+
+  /// Build image widget from path (http(s), data URI, or local file).
+  Widget _buildImageFromPath(
+    String path, {
+    double? height,
+    BoxFit fit = BoxFit.contain,
+  }) {
+    return _buildResolvedImage(
+      context,
+      path,
+      height: height,
+      maxLogicalWidth: kToolImageCardMaxWidth,
+      fit: fit,
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _updateImageCache();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ToolCallItem oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.part.content != widget.part.content ||
+        oldWidget.part.metadata != widget.part.metadata) {
+      _updateImageCache();
+    }
+  }
+
+  IconData _iconFor(String name, Map<String, dynamic> args) {
+    return _toolIconFor(name, args);
+  }
+
+  String _titleFor(
+    BuildContext context,
+    String name,
+    Map<String, dynamic> args, {
+    required bool isResult,
+  }) {
+    return _toolTitleFor(context, name, args, isResult: isResult);
+  }
+
+  /// Build a short argument summary for display in the approval card.
+  String _argsSummary(Map<String, dynamic> args) {
+    if (args.isEmpty) return '';
+    // Show first 1-2 key=value pairs, truncated
+    final entries = args.entries.take(2).map((e) {
+      final v = e.value?.toString() ?? '';
+      final truncated = v.length > 40
+          ? '${truncateHeadUtf16Safe(v, 40)}...'
+          : v;
+      return '${e.key}: $truncated';
+    });
+    final suffix = args.length > 2 ? ' ...' : '';
+    return entries.join(', ') + suffix;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fg = chatSurfaceForegroundPalette(context);
+    final hideToolResultImages = context.select<SettingsProvider, bool>(
+      (s) => s.hideToolResultImages,
+    );
+    final hasImages = !hideToolResultImages && _imagePaths.isNotEmpty;
+    final l10n = AppLocalizations.of(context)!;
+    final ttsText = widget.part.toolName == LocalToolNames.textToSpeech
+        ? _textToSpeechToolText(widget.part.arguments)
+        : '';
+
+    if (widget.part.toolName == LocalToolNames.askUser) {
+      return _AskUserToolCard(part: widget.part);
+    }
+
+    final workspacePart = _workspacePartFromUi(widget.part);
+    final isWorkspace = shouldUseWorkspaceToolUi(workspacePart);
+
+    // Check if this tool call is pending approval
+    final approvalService = context.watch<ToolApprovalService>();
+    final pendingRequest = widget.part.loading
+        ? _matchingApprovalRequest(
+            approval: approvalService,
+            conversationId: widget.conversationId,
+            toolCallId: widget.part.id,
+          )
+        : null;
+    final isPendingApproval = pendingRequest != null;
+    final pendingToolCallId = pendingRequest?.toolCallId;
+
+    return IosCardPress(
+      borderRadius: BorderRadius.circular(16),
+      baseColor: Colors.transparent,
+      pressedScale: 1.0,
+      duration: const Duration(milliseconds: 260),
+      onTap: isPendingApproval ? null : () => _showDetail(context),
+      padding: EdgeInsets.zero,
+      child: buildSharedChatSurface(
+        context,
+        target: ChatBubbleStyleTarget.thinkingToolCard,
+        borderRadius: BorderRadius.circular(16),
+        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+        defaultColor: cs.primaryContainer.withValues(
+          alpha: isDark ? 0.25 : 0.30,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Icon — approval pending / loading spinner / result icon
+                if (isPendingApproval && !isWorkspace)
+                  SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: Center(
+                      child: Icon(Lucide.Shield, size: 18, color: fg.accent),
+                    ),
+                  )
+                else if (widget.part.loading && !isPendingApproval)
+                  SizedBox(
+                    key: isWorkspace ? WorkspaceStatusBadge.runningKey : null,
+                    width: 18,
+                    height: 18,
+                    child: LoadingIndicator(
+                      height: 12,
+                      dotSize: 3,
+                      spacing: 2,
+                      color: fg.accent,
+                    ),
+                  )
+                else
+                  SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: Center(
+                      child: Icon(
+                        _iconFor(widget.part.toolName, widget.part.arguments),
+                        size: 18,
+                        color: fg.strong,
+                      ),
+                    ),
+                  ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Title: always show tool name; add "waiting" badge when pending
+                      ThinkingSheen(
+                        enabled: widget.part.loading && !isPendingApproval,
+                        color: fg.strong,
+                        child: Text(
+                          _titleFor(
+                            context,
+                            widget.part.toolName,
+                            widget.part.arguments,
+                            isResult:
+                                !widget.part.loading && !isPendingApproval,
+                          ),
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: AppFontWeights.emphasis,
+                            color: isPendingApproval ? fg.accent : fg.strong,
+                          ),
+                        ),
+                      ),
+                      // "Waiting for approval" subtitle
+                      if (isPendingApproval && !isWorkspace) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          l10n.toolApprovalPending,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: AppFontWeights.medium,
+                            color: fg.medium,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (isPendingApproval) ...[
+                  IosIconButton(
+                    size: 14,
+                    padding: const EdgeInsets.all(7),
+                    color: cs.error,
+                    semanticLabel: l10n.toolApprovalDeny,
+                    builder: (color) => Icon(Lucide.X, size: 14, color: color),
+                    onTap: pendingToolCallId == null
+                        ? null
+                        : () => approvalService.deny(
+                            pendingToolCallId,
+                            conversationId: pendingRequest.conversationId,
+                          ),
+                    onLongPress: pendingToolCallId == null
+                        ? null
+                        : () => showToolApprovalDenyDialog(
+                            context,
+                            approvalService,
+                            pendingToolCallId,
+                            conversationId: pendingRequest.conversationId,
+                          ),
+                  ),
+                  const SizedBox(width: 6),
+                  IosIconButton(
+                    size: 14,
+                    padding: const EdgeInsets.all(7),
+                    color: fg.accent,
+                    semanticLabel: l10n.workspaceToolApprove,
+                    builder: (color) =>
+                        Icon(Lucide.Check, size: 14, color: color),
+                    onTap: pendingToolCallId == null
+                        ? null
+                        : () => approvalService.approve(
+                            pendingToolCallId,
+                            conversationId: pendingRequest.conversationId,
+                          ),
+                  ),
+                ] else if (isWorkspace)
+                  WorkspaceToolStatusText(
+                    part: workspacePart,
+                    conversationId: widget.conversationId,
+                  )
+                else if (ToolPermissionResultStatus.isVisible(
+                  widget.part.metadata,
+                ))
+                  ToolPermissionResultStatus(metadata: widget.part.metadata),
+                IosIconButton(
+                  size: 14,
+                  padding: const EdgeInsets.all(7),
+                  semanticLabel: l10n.mcpPageDetails,
+                  builder: (color) =>
+                      Icon(Lucide.ChevronRight, size: 14, color: color),
+                  onTap: () => _showDetail(context),
+                ),
+              ],
+            ),
+            if (isWorkspace) ...[
+              const SizedBox(height: 8),
+              WorkspaceToolCardBody(
+                part: workspacePart,
+                conversationId: widget.conversationId,
+              ),
+            ],
+            if (widget.part.toolName == LocalToolNames.browser)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  icon: const Icon(LucideIcons.appWindow, size: 16),
+                  label: Text(l10n.browserOpen),
+                  onPressed: () => openBrowserPage(
+                    context,
+                    conversationId: widget.conversationId,
+                    tabId: BrowserToolAction(
+                      id: widget.part.id,
+                      arguments: widget.part.arguments,
+                      metadata: widget.part.metadata,
+                    ).tabId,
+                  ),
+                ),
+              ),
+            if (ttsText.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _buildTextToSpeechReplayRow(
+                context,
+                text: ttsText,
+                textColor: fg.body,
+                buttonColor: fg.accent,
+              ),
+            ],
+            if (!widget.part.loading &&
+                !isPendingApproval &&
+                widget.part.toolName == LocalToolNames.weather) ...[
+              Builder(
+                builder: (context) {
+                  final weather = WeatherToolResult.tryParse(
+                    widget.part.content,
+                  );
+                  if (weather == null || weather.isError) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: WeatherToolSummary(
+                      result: weather,
+                      textColor: fg.body,
+                    ),
+                  );
+                },
+              ),
+            ],
+            if (!widget.part.loading &&
+                !isPendingApproval &&
+                widget.part.toolName == LocalToolNames.screenTime) ...[
+              Builder(
+                builder: (context) {
+                  final screenTime = ScreenTimeResult.tryParse(
+                    widget.part.content,
+                  );
+                  if (screenTime == null ||
+                      (!screenTime.isNoPermission && !screenTime.hasApps)) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: ScreenTimeToolSummary(
+                      result: screenTime,
+                      textColor: fg.body,
+                      secondaryColor: fg.muted,
+                      errorColor: cs.error,
+                    ),
+                  );
+                },
+              ),
+            ],
+            // Argument summary so users know what the tool is about to do
+            if (!isWorkspace &&
+                isPendingApproval &&
+                widget.part.arguments.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.04),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  _argsSummary(widget.part.arguments),
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    color: fg.body,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+            if (!isWorkspace && isPendingApproval)
+              SwitchToFullAccess(conversationId: widget.conversationId),
+            // Show image thumbnails if available
+            if (hasImages) ...[
+              const SizedBox(height: 10),
+              SizedBox(
+                height: kToolImageCardHeight,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _imagePaths.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemBuilder: (ctx, i) {
+                    final path = _imagePaths[i];
+                    return GestureDetector(
+                      onTap: () => _showToolFullImage(context, path),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: _buildImageFromPath(
+                          path,
+                          height: kToolImageCardHeight,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showDetail(BuildContext context) {
+    if (shouldUseWorkspaceToolUi(_workspacePartFromUi(widget.part))) {
+      unawaited(
+        showWorkspaceToolDetail(
+          context,
+          _workspacePartFromUi(widget.part),
+          conversationId: widget.conversationId,
+        ),
+      );
+      return;
+    }
+    _showToolDetail(context, widget.part);
+  }
+}
+
+class _AskUserToolCard extends StatefulWidget {
+  const _AskUserToolCard({required this.part});
+
+  final ToolUIPart part;
+
+  @override
+  State<_AskUserToolCard> createState() => _AskUserToolCardState();
+}
+
+class _AskUserToolCardState extends State<_AskUserToolCard> {
+  bool? _expanded;
+
+  bool get _answered =>
+      widget.part.content?.trim().isNotEmpty == true && !widget.part.loading;
+
+  @override
+  void didUpdateWidget(covariant _AskUserToolCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final wasAnswered =
+        oldWidget.part.content?.trim().isNotEmpty == true &&
+        !oldWidget.part.loading;
+    if (!wasAnswered && _answered) {
+      _expanded = true;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fg = chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    final expanded = _expanded ?? true;
+    return buildSharedChatSurface(
+      context,
+      target: ChatBubbleStyleTarget.thinkingToolCard,
+      borderRadius: BorderRadius.circular(16),
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+      defaultColor: cs.primaryContainer.withValues(alpha: isDark ? 0.25 : 0.30),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          IosCardPress(
+            onTap: () => setState(() => _expanded = !expanded),
+            borderRadius: BorderRadius.circular(10),
+            baseColor: Colors.transparent,
+            pressedScale: 1,
+            padding: EdgeInsets.zero,
+            child: Row(
+              children: [
+                Icon(
+                  Lucide.MessageCircleQuestionMark,
+                  size: 18,
+                  color: fg.strong,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _askUserToolTitleFor(l10n, widget.part.arguments),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: AppFontWeights.emphasis,
+                      color: fg.strong,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                if (_answered) ...[
+                  Text(
+                    l10n.askUserCardAnswered,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: AppFontWeights.emphasis,
+                      color: fg.muted,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Icon(
+                  expanded ? Lucide.ChevronUp : Lucide.ChevronDown,
+                  size: 16,
+                  color: fg.muted,
+                ),
+              ],
+            ),
+          ),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topLeft,
+            child: expanded
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: _AskUserInlineBody(part: widget.part),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AskUserInlineBody extends StatefulWidget {
+  const _AskUserInlineBody({required this.part, this.compact = false});
+
+  final ToolUIPart part;
+  final bool compact;
+
+  @override
+  State<_AskUserInlineBody> createState() => _AskUserInlineBodyState();
+}
+
+class _AskUserInlineBodyState extends State<_AskUserInlineBody>
+    with _StoredTimelineState<_AskUserInlineBody> {
+  @override
+  Object get storageId => ('ask-draft', widget.part.id);
+  @override
+  Object saveViewState() => (
+    Map<String, String>.of(_singleAnswers),
+    {
+      for (final entry in _multiAnswers.entries)
+        entry.key: Set<String>.of(entry.value),
+    },
+    {for (final entry in _textControllers.entries) entry.key: entry.value.text},
+    Set<String>.of(_skippedQuestions),
+  );
+  @override
+  void restoreViewState(Object value) {
+    if (_hasLiveDraft) return;
+    final stored =
+        value
+            as (
+              Map<String, String>,
+              Map<String, Set<String>>,
+              Map<String, String>,
+              Set<String>,
+            );
+    _singleAnswers.addAll(stored.$1);
+    _multiAnswers.addAll(stored.$2);
+    for (final entry in stored.$3.entries) {
+      _controllerFor(entry.key).text = entry.value;
+    }
+    _skippedQuestions.addAll(stored.$4);
+  }
+
+  AskUserDraft _draft = AskUserDraft();
+  bool _hasLiveDraft = false;
+  Map<String, String> get _singleAnswers => _draft.singleAnswers;
+  Map<String, Set<String>> get _multiAnswers => _draft.multiAnswers;
+  final Map<String, TextEditingController> _textControllers =
+      <String, TextEditingController>{};
+  Set<String> get _skippedQuestions => _draft.skippedQuestions;
+  bool _submittingRecovered = false;
+
+  @override
+  void didChangeDependencies() {
+    final request = context
+        .read<AskUserInteractionService>()
+        .pendingRequests[widget.part.id];
+    _hasLiveDraft = request != null;
+    if (request != null && !identical(_draft, request.draft)) {
+      for (final controller in _textControllers.values) {
+        controller.dispose();
+      }
+      _textControllers.clear();
+      _draft = request.draft;
+    }
+    super.didChangeDependencies();
+  }
+
+  @override
+  void dispose() {
+    storeViewState();
+    for (final controller in _textControllers.values) {
+      controller.dispose();
+    }
+    _textControllers.clear();
+    super.dispose();
+  }
+
+  TextEditingController _controllerFor(String id) {
+    return _textControllers.putIfAbsent(id, () {
+      final controller = TextEditingController(text: _draft.freeText[id]);
+      controller.addListener(() => _draft.freeText[id] = controller.text);
+      return controller;
+    });
+  }
+
+  bool _hasAnswer(AskUserQuestion question) {
+    if (_skippedQuestions.contains(question.id)) return true;
+    final textValue = _controllerFor(question.id).text.trim();
+    if (textValue.isNotEmpty) return true;
+    return switch (question.kind) {
+      AskUserQuestionKind.single =>
+        (_singleAnswers[question.id] ?? '').trim().isNotEmpty,
+      AskUserQuestionKind.multi =>
+        (_multiAnswers[question.id] ?? const <String>{}).isNotEmpty,
+    };
+  }
+
+  bool _canSubmit(List<AskUserQuestion> questions) {
+    return questions.isNotEmpty && questions.every(_hasAnswer);
+  }
+
+  Map<String, AskUserAnswerValue> _buildAnswers(
+    List<AskUserQuestion> questions,
+  ) {
+    final out = <String, AskUserAnswerValue>{};
+    for (final question in questions) {
+      if (_skippedQuestions.contains(question.id)) {
+        out[question.id] = AskUserAnswerValue.skipped(kind: question.kind);
+        continue;
+      }
+      final textValue = _controllerFor(question.id).text.trim();
+      switch (question.kind) {
+        case AskUserQuestionKind.single:
+          final selected = _singleAnswers[question.id] ?? '';
+          if (textValue.isNotEmpty && textValue != selected) {
+            out[question.id] = AskUserAnswerValue.single(
+              value: textValue,
+              custom: true,
+            );
+            break;
+          }
+          out[question.id] = AskUserAnswerValue.single(
+            value: selected,
+            custom: false,
+          );
+          break;
+        case AskUserQuestionKind.multi:
+          final selectedValues =
+              (_multiAnswers[question.id] ?? const <String>{}).toList();
+          if (textValue.isNotEmpty && !selectedValues.contains(textValue)) {
+            selectedValues.add(textValue);
+            out[question.id] = AskUserAnswerValue.multi(
+              value: selectedValues,
+              custom: true,
+            );
+            break;
+          }
+          out[question.id] = AskUserAnswerValue.multi(
+            value: selectedValues,
+            custom: false,
+          );
+          break;
+      }
+    }
+    return out;
+  }
+
+  String _answerLabel(
+    BuildContext context,
+    AskUserQuestion question,
+    Map<dynamic, dynamic> answers,
+  ) {
+    final l10n = AppLocalizations.of(context)!;
+    final raw = answers[question.id];
+    if (raw is! Map) return '';
+    if (raw['skipped'] == true) return l10n.askUserCardSkipped;
+    final value = raw['value'];
+    if (value is List) {
+      return value.map((item) => item.toString()).join(', ');
+    }
+    return value?.toString() ?? '';
+  }
+
+  Map<dynamic, dynamic> _answeredValues(String content) {
+    try {
+      final payload = jsonDecode(content) as Map<String, dynamic>;
+      final answers = payload['answers'];
+      if (answers is Map) return answers;
+    } catch (_) {}
+    return const <dynamic, dynamic>{};
+  }
+
+  void _clearSkip(String questionId) {
+    _skippedQuestions.remove(questionId);
+  }
+
+  Future<void> _submitAnswers(
+    AskUserInteractionService askUserService,
+    List<AskUserQuestion> questions,
+    AskUserRequest? pendingRequest,
+  ) async {
+    final answers = _buildAnswers(questions);
+    if (pendingRequest != null) {
+      askUserService.answer(widget.part.id, answers);
+      return;
+    }
+
+    final action = _RecoveredAskUserAction.maybeOf(context);
+    final onRecoveredAnswer = action?.onSubmit;
+    if (onRecoveredAnswer == null || _submittingRecovered) return;
+    final partId = widget.part.id;
+    final conversationId = action!.conversationId;
+    setState(() => _submittingRecovered = true);
+    try {
+      await onRecoveredAnswer(widget.part, AskUserResult.answer(answers));
+    } finally {
+      if (mounted) {
+        final current = _RecoveredAskUserAction.maybeOf(context);
+        if (widget.part.id == partId &&
+            current?.conversationId == conversationId) {
+          setState(() => _submittingRecovered = false);
+        }
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final askUserService = context.watch<AskUserInteractionService>();
+    final pendingRequest = askUserService.pendingRequests[widget.part.id];
+    final storedQuestions = AskUserInteractionService.normalizeQuestions(
+      widget.part.arguments,
+    );
+    final questions = pendingRequest?.questions ?? storedQuestions;
+    final answered = widget.part.content?.trim().isNotEmpty == true;
+    final invalid = questions.isEmpty && !answered;
+    final answeredValues = answered
+        ? _answeredValues(widget.part.content ?? '')
+        : const <dynamic, dynamic>{};
+
+    final children = <Widget>[
+      if (invalid)
+        Text(
+          l10n.askUserCardInactive,
+          style: TextStyle(fontSize: 12, height: 1.35, color: fg.body),
+        )
+      else if (answered)
+        for (final question in questions) ...[
+          _AskUserAnsweredQuestion(
+            question: question,
+            answer: _answerLabel(context, question, answeredValues),
+          ),
+          if (question != questions.last) const SizedBox(height: 10),
+        ]
+      else ...[
+        for (final question in questions) ...[
+          _AskUserQuestionView(
+            question: question,
+            selectedSingle: _singleAnswers[question.id],
+            selectedMulti: _multiAnswers[question.id] ?? const <String>{},
+            textController: _controllerFor(question.id),
+            skipped: _skippedQuestions.contains(question.id),
+            showQuestionText: true,
+            onOtherChanged: (value) {
+              setState(() {
+                _clearSkip(question.id);
+                if (question.kind == AskUserQuestionKind.single &&
+                    value.trim().isNotEmpty) {
+                  _singleAnswers.remove(question.id);
+                }
+              });
+            },
+            onSelectSingle: (value) {
+              setState(() {
+                _clearSkip(question.id);
+                _singleAnswers[question.id] = value;
+                _controllerFor(question.id).clear();
+              });
+            },
+            onToggleMulti: (value) {
+              setState(() {
+                _clearSkip(question.id);
+                final set = _multiAnswers[question.id]?.toSet() ?? <String>{};
+                if (set.contains(value)) {
+                  set.remove(value);
+                } else {
+                  set.add(value);
+                }
+                _multiAnswers[question.id] = set;
+              });
+            },
+            onToggleSkip: () {
+              setState(() {
+                if (_skippedQuestions.contains(question.id)) {
+                  _skippedQuestions.remove(question.id);
+                } else {
+                  _singleAnswers.remove(question.id);
+                  _multiAnswers.remove(question.id);
+                  _controllerFor(question.id).clear();
+                  _skippedQuestions.add(question.id);
+                }
+              });
+            },
+          ),
+          const SizedBox(height: 12),
+        ],
+        Align(
+          alignment: Alignment.centerRight,
+          child: _AskUserSubmitButton(
+            label: l10n.askUserCardSubmit,
+            color: cs.primary,
+            onTap:
+                _canSubmit(questions) &&
+                    !_submittingRecovered &&
+                    (pendingRequest != null ||
+                        _RecoveredAskUserAction.maybeOf(context)?.onSubmit !=
+                            null)
+                ? () =>
+                      _submitAnswers(askUserService, questions, pendingRequest)
+                : null,
+          ),
+        ),
+      ],
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+}
+
+class _AskUserQuestionView extends StatelessWidget {
+  const _AskUserQuestionView({
+    required this.question,
+    required this.selectedSingle,
+    required this.selectedMulti,
+    required this.textController,
+    required this.skipped,
+    required this.showQuestionText,
+    required this.onOtherChanged,
+    required this.onSelectSingle,
+    required this.onToggleMulti,
+    required this.onToggleSkip,
+  });
+
+  final AskUserQuestion question;
+  final String? selectedSingle;
+  final Set<String> selectedMulti;
+  final TextEditingController textController;
+  final bool skipped;
+  final bool showQuestionText;
+  final ValueChanged<String> onOtherChanged;
+  final ValueChanged<String> onSelectSingle;
+  final ValueChanged<String> onToggleMulti;
+  final VoidCallback onToggleSkip;
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = chatSurfaceForegroundPalette(context);
+    final isMulti = question.kind == AskUserQuestionKind.multi;
+    final questionText = Text(
+      question.question,
+      style: TextStyle(fontSize: 13, height: 1.35, color: fg.body),
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: showQuestionText ? questionText : const SizedBox()),
+            const SizedBox(width: 8),
+            _AskUserSkipPill(selected: skipped, onTap: onToggleSkip),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (question.options.isNotEmpty) ...[
+          for (final entry in question.options.asMap().entries) ...[
+            _AskUserOptionRow(
+              index: entry.key + 1,
+              label: entry.value,
+              multi: isMulti,
+              selected: isMulti
+                  ? selectedMulti.contains(entry.value)
+                  : selectedSingle == entry.value,
+              disabled: skipped,
+              onTap: () => isMulti
+                  ? onToggleMulti(entry.value)
+                  : onSelectSingle(entry.value),
+            ),
+            const SizedBox(height: 7),
+          ],
+        ],
+        _AskUserOtherRow(
+          index: question.options.length + 1,
+          multi: isMulti,
+          selected: textController.text.trim().isNotEmpty,
+          controller: textController,
+          disabled: skipped,
+          onChanged: onOtherChanged,
+        ),
+      ],
+    );
+  }
+}
+
+class _AskUserAnsweredQuestion extends StatelessWidget {
+  const _AskUserAnsweredQuestion({
+    required this.question,
+    required this.answer,
+  });
+
+  final AskUserQuestion question;
+  final String answer;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = chatSurfaceForegroundPalette(context);
+    final displayAnswer = answer.trim().isEmpty
+        ? AppLocalizations.of(context)!.askUserCardSkipped
+        : answer.trim();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            question.question,
+            style: TextStyle(
+              fontSize: 12.5,
+              height: 1.35,
+              color: fg.body,
+              fontWeight: AppFontWeights.semibold,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            displayAnswer,
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.35,
+              color: cs.primary.withValues(alpha: 0.86),
+              fontWeight: AppFontWeights.semibold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AskUserOptionRow extends StatelessWidget {
+  const _AskUserOptionRow({
+    required this.index,
+    required this.label,
+    required this.multi,
+    required this.selected,
+    required this.disabled,
+    required this.onTap,
+  });
+
+  final int index;
+  final String label;
+  final bool multi;
+  final bool selected;
+  final bool disabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = chatSurfaceForegroundPalette(context);
+    final bg = selected
+        ? cs.primary.withValues(alpha: 0.09)
+        : Colors.transparent;
+    return IosCardPress(
+      borderRadius: BorderRadius.circular(14),
+      baseColor: bg,
+      pressedScale: disabled ? 1 : 0.995,
+      padding: EdgeInsets.zero,
+      onTap: disabled ? null : onTap,
+      child: Container(
+        width: double.infinity,
+        constraints: const BoxConstraints(minHeight: 40),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          color: bg,
+        ),
+        child: Row(
+          children: [
+            if (multi)
+              IosCheckbox(
+                value: selected,
+                onChanged: disabled ? null : (_) => onTap(),
+                size: 18,
+                hitTestSize: 24,
+                activeColor: cs.primary,
+                semanticLabel: label,
+              )
+            else
+              _AskUserIndexBadge(index: index, selected: selected),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.25,
+                  fontWeight: AppFontWeights.medium,
+                  color: selected ? cs.primary : fg.strong,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AskUserOtherRow extends StatelessWidget {
+  const _AskUserOtherRow({
+    required this.index,
+    required this.multi,
+    required this.selected,
+    required this.controller,
+    required this.disabled,
+    required this.onChanged,
+  });
+
+  final int index;
+  final bool multi;
+  final bool selected;
+  final TextEditingController controller;
+  final bool disabled;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    final effectiveSelected = selected;
+    final bg = effectiveSelected
+        ? cs.primary.withValues(alpha: 0.09)
+        : Colors.transparent;
+    return Container(
+      width: double.infinity,
+      constraints: const BoxConstraints(minHeight: 40),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          if (multi)
+            IgnorePointer(
+              child: IosCheckbox(
+                value: effectiveSelected,
+                onChanged: disabled ? null : (_) {},
+                size: 18,
+                hitTestSize: 24,
+                activeColor: cs.primary,
+                semanticLabel: l10n.askUserCardSomethingElse,
+              ),
+            )
+          else
+            _AskUserIndexBadge(index: index, selected: effectiveSelected),
+          const SizedBox(width: 10),
+          Expanded(
+            child: TextField(
+              enabled: !disabled,
+              controller: controller,
+              minLines: 1,
+              maxLines: 2,
+              onChanged: onChanged,
+              decoration: InputDecoration(
+                hintText: l10n.askUserCardCustomHint,
+                isDense: true,
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.zero,
+              ),
+              style: TextStyle(fontSize: 13, height: 1.25, color: fg.strong),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AskUserIndexBadge extends StatelessWidget {
+  const _AskUserIndexBadge({required this.index, required this.selected});
+
+  final int index;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = chatSurfaceForegroundPalette(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      width: 24,
+      height: 24,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: selected
+            ? cs.primary.withValues(alpha: 0.13)
+            : cs.onSurface.withValues(alpha: isDark ? 0.08 : 0.05),
+        border: Border.all(
+          color: selected
+              ? cs.primary.withValues(alpha: 0.28)
+              : cs.onSurface.withValues(alpha: isDark ? 0.10 : 0.07),
+        ),
+      ),
+      child: Text(
+        '$index',
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: AppFontWeights.emphasis,
+          color: selected ? cs.primary : fg.muted,
+        ),
+      ),
+    );
+  }
+}
+
+class _AskUserSkipPill extends StatelessWidget {
+  const _AskUserSkipPill({required this.selected, required this.onTap});
+
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    return IosCardPress(
+      borderRadius: BorderRadius.circular(7),
+      baseColor: Colors.transparent,
+      pressedScale: 0.98,
+      padding: EdgeInsets.zero,
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+        child: Text(
+          l10n.askUserCardSkip,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: AppFontWeights.semibold,
+            color: selected ? cs.primary.withValues(alpha: 0.78) : fg.muted,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AskUserSubmitButton extends StatelessWidget {
+  const _AskUserSubmitButton({
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  final String label;
+  final Color color;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    final cs = Theme.of(context).colorScheme;
+    return IosCardPress(
+      borderRadius: BorderRadius.circular(14),
+      baseColor: enabled
+          ? color.withValues(alpha: 0.86)
+          : cs.surfaceContainerHighest.withValues(alpha: 0.45),
+      pressedScale: enabled ? 0.985 : 1,
+      padding: EdgeInsets.zero,
+      onTap: onTap,
+      child: Container(
+        height: 38,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(14)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Lucide.ArrowUp,
+              size: 15,
+              color: enabled
+                  ? cs.onPrimary
+                  : cs.onSurface.withValues(alpha: 0.38),
+            ),
+            const SizedBox(width: 7),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: AppFontWeights.heavy,
+                color: enabled
+                    ? cs.onPrimary
+                    : cs.onSurface.withValues(alpha: 0.38),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SourcesSummaryCard extends StatelessWidget {
+  const _SourcesSummaryCard({
+    required this.count,
+    required this.items,
+    required this.onTap,
+  });
+
+  final int count;
+  final List<Map<String, dynamic>> items;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final label = l10n.chatMessageWidgetCitationsCount(count);
+    final isDark = theme.brightness == Brightness.dark;
+
+    return IosCardPress(
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(
+        color: cs.onSurface.withValues(alpha: isDark ? 0.16 : 0.10),
+        width: 0.8,
+      ),
+      baseColor: Colors.transparent,
+      pressedScale: 1.0,
+      duration: const Duration(milliseconds: 260),
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 18),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _SourceFaviconStack(items: items),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.clip,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1,
+                fontWeight: AppFontWeights.semibold,
+                color: cs.onSurface.withValues(alpha: isDark ? 0.90 : 0.86),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SourceFaviconStack extends StatelessWidget {
+  const _SourceFaviconStack({required this.items});
+
+  final List<Map<String, dynamic>> items;
+
+  static const double _iconSize = 16;
+  static const double _slotSize = 18;
+  static const double _overlapStep = 11;
+  static const int _maxIcons = 3;
+
+  @override
+  Widget build(BuildContext context) {
+    final domains = _domains();
+    if (domains.isEmpty) {
+      return const _SourceFaviconFallback(size: _slotSize);
+    }
+
+    return SizedBox(
+      width: _slotSize + (domains.length - 1) * _overlapStep,
+      height: _slotSize,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          for (var i = 0; i < domains.length; i++)
+            PositionedDirectional(
+              start: i * _overlapStep,
+              top: 1,
+              child: _SourceFavicon(domain: domains[i]),
+            ),
+        ],
+      ),
+    );
+  }
+
+  List<String> _domains() {
+    final seen = <String>{};
+    final domains = <String>[];
+    for (final item in items) {
+      final url = (item['url'] ?? '').toString();
+      final host = _tryNormalizeExternalUri(url)?.host ?? '';
+      if (host.isEmpty || !seen.add(host)) {
+        continue;
+      }
+      domains.add(host);
+      if (domains.length == _maxIcons) {
+        break;
+      }
+    }
+    return domains;
+  }
+}
+
+class _SourceFavicon extends StatelessWidget {
+  const _SourceFavicon({required this.domain});
+
+  final String domain;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final borderColor = cs.onSurface.withValues(alpha: isDark ? 0.14 : 0.06);
+
+    return Container(
+      width: _SourceFaviconStack._iconSize,
+      height: _SourceFaviconStack._iconSize,
+      decoration: BoxDecoration(
+        color: isDark ? cs.surfaceContainerHigh : cs.surface,
+        shape: BoxShape.circle,
+        border: Border.all(color: borderColor, width: 0.5),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Image.network(
+        'https://favicone.com/$domain',
+        width: _SourceFaviconStack._iconSize,
+        height: _SourceFaviconStack._iconSize,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) =>
+            const _SourceFaviconFallback(size: _SourceFaviconStack._iconSize),
+      ),
+    );
+  }
+}
+
+class _SourceFaviconFallback extends StatelessWidget {
+  const _SourceFaviconFallback({required this.size});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Icon(
+        Lucide.Globe,
+        size: size * 0.72,
+        color: cs.onSurface.withValues(alpha: 0.52),
+      ),
+    );
+  }
+}
+
+class _ReasoningSection extends StatefulWidget {
+  const _ReasoningSection({
+    required this.text,
+    required this.expanded,
+    required this.loading,
+    required this.startAt,
+    required this.finishedAt,
+    // ignore: unused_element_parameter
+    this.onToggle,
+  });
+
+  final String text;
+  final bool expanded;
+  final bool loading;
+  final DateTime? startAt;
+  final DateTime? finishedAt;
+  final VoidCallback? onToggle;
+
+  @override
+  State<_ReasoningSection> createState() => _ReasoningSectionState();
+}
+
+class _ReasoningSectionState extends State<_ReasoningSection> {
+  // Use ValueNotifier to only update elapsed time display, not rebuild entire widget
+  final ValueNotifier<int> _elapsedTick = ValueNotifier<int>(0);
+  Timer? _elapsedTimer;
+  final ScrollController _scroll = ScrollController();
+  bool _hasOverflow = false;
+
+  String _sanitize(String s) {
+    return s.replaceAll('\r', '').trim();
+  }
+
+  String _elapsed() {
+    final start = widget.startAt;
+    if (start == null) return '';
+    final end = widget.finishedAt ?? (widget.loading ? DateTime.now() : start);
+    final ms = end.difference(start).inMilliseconds;
+    return '(${(ms / 1000).toStringAsFixed(1)}s)';
+  }
+
+  void _syncElapsedTimer() {
+    if (widget.loading && widget.finishedAt == null) {
+      _elapsedTimer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
+        if (mounted) _elapsedTick.value++;
+      });
+    } else {
+      _elapsedTimer?.cancel();
+      _elapsedTimer = null;
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.loading) _syncElapsedTimer();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkOverflow();
+      if (widget.loading && _scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _ReasoningSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncElapsedTimer();
+    if (widget.loading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scroll.hasClients) {
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        }
+      });
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkOverflow());
+  }
+
+  @override
+  void dispose() {
+    _elapsedTimer?.cancel();
+    _elapsedTick.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _checkOverflow() {
+    if (!_scroll.hasClients) return;
+    final over = _scroll.position.maxScrollExtent > 0.5;
+    if (over != _hasOverflow && mounted) setState(() => _hasOverflow = over);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fg = chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    final enableReasoningMarkdown = context.select<SettingsProvider, bool>(
+      (s) => s.enableReasoningMarkdown,
+    );
+    final loading = widget.loading;
+
+    // Android-like surface style
+    final curve = const Cubic(0.2, 0.8, 0.2, 1);
+
+    // Build a compact header with optional scrolling preview when loading
+    Widget header = IosCardPress(
+      borderRadius: BorderRadius.circular(12),
+      baseColor: Colors.transparent,
+      pressedScale: 1.0,
+      duration: const Duration(milliseconds: 220),
+      onTap: widget.onToggle,
+      padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Row(
+          children: [
+            ReasoningIcons.thinkingCardIcon(size: 18, color: fg.strong),
+            const SizedBox(width: 8),
+            ThinkingSheen(
+              enabled: loading,
+              color: fg.strong,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    l10n.chatMessageWidgetDeepThinking,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: AppFontWeights.emphasis,
+                      color: fg.strong,
+                    ),
+                  ),
+                  if (widget.startAt != null) ...[
+                    const SizedBox(width: 8),
+                    ValueListenableBuilder<int>(
+                      valueListenable: _elapsedTick,
+                      builder: (context, _, __) => Text(
+                        _elapsed(),
+                        style: TextStyle(fontSize: 13, color: fg.medium),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            // No header marquee; content area handles scrolling when loading
+            const Spacer(),
+            AnimatedRotation(
+              turns: widget.expanded ? 0.25 : 0.0, // right -> down
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeInOutCubic,
+              child: Icon(Lucide.ChevronRight, size: 18, color: fg.strong),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    // 抽公共样式，继承当前 DefaultTextStyle（从而继承正确的颜色）
+    final TextStyle baseStyle = DefaultTextStyle.of(
+      context,
+    ).style.copyWith(fontSize: 12.5, height: 1.32);
+
+    const StrutStyle baseStrut = StrutStyle(
+      forceStrutHeight: true,
+      fontSize: 12.5,
+      height: 1.32,
+      leading: 0,
+    );
+
+    const TextHeightBehavior baseTHB = TextHeightBehavior(
+      applyHeightToFirstAscent: false,
+      applyHeightToLastDescent: false,
+      leadingDistribution: TextLeadingDistribution.proportional,
+    );
+
+    final bool isLoading = loading;
+    final display = _sanitize(widget.text);
+
+    // 未加载：不要再指定 color: fg，让它继承和"加载中"相同的颜色
+    Widget reasoningContent(String text) {
+      if (enableReasoningMarkdown) {
+        return RepaintBoundary(
+          child: MarkdownWithCodeHighlight(
+            text: text.isNotEmpty ? text : '…',
+            baseStyle: baseStyle,
+            streaming: isLoading,
+          ),
+        );
+      }
+      return plainMessageText(
+        text: text.isNotEmpty ? UnicodeSanitizer.sanitize(text) : '…',
+        style: baseStyle,
+        strutStyle: baseStrut,
+        textHeightBehavior: baseTHB,
+      );
+    }
+
+    Widget body = Padding(
+      padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+      child: reasoningContent(display),
+    );
+
+    if (isLoading && !widget.expanded) {
+      body = Padding(
+        padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 80),
+          child: OptionalShaderMask(
+            enabled: _hasOverflow,
+            shaderCallback: (rect) {
+              final h = rect.height;
+              const double topFade = 12.0;
+              const double bottomFade = 28.0;
+              final double sTop = (topFade / h).clamp(0.0, 1.0);
+              final double sBot = (1.0 - bottomFade / h).clamp(0.0, 1.0);
+              return LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: const [
+                  Color(0x00FFFFFF), // color-gate: ignore (dstIn alpha mask)
+                  Color(0xFFFFFFFF), // color-gate: ignore (dstIn alpha mask)
+                  Color(0xFFFFFFFF), // color-gate: ignore (dstIn alpha mask)
+                  Color(0x00FFFFFF), // color-gate: ignore (dstIn alpha mask)
+                ],
+                stops: [0.0, sTop, sBot, 1.0],
+              ).createShader(rect);
+            },
+            blendMode: BlendMode.dstIn,
+            child: NotificationListener<ScrollUpdateNotification>(
+              onNotification: (_) {
+                WidgetsBinding.instance.addPostFrameCallback(
+                  (_) => _checkOverflow(),
+                );
+                return false;
+              },
+              child: SingleChildScrollView(
+                controller: _scroll,
+                physics: const BouncingScrollPhysics(),
+                child: reasoningContent(display),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Enable long-press text selection in reasoning body
+    body = AppSelectionArea(child: body);
+
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 300),
+      curve: curve,
+      alignment: Alignment.topLeft,
+      child: SizedBox(
+        width: double.infinity,
+        child: buildSharedChatSurface(
+          context,
+          borderRadius: BorderRadius.circular(16),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          defaultColor: cs.primaryContainer.withValues(
+            alpha: isDark ? 0.25 : 0.30,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [header, if (widget.expanded || isLoading) body],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Only small interaction state survives viewport recycling. Parsing results,
+/// timers, animation controllers and render trees remain owned by the view.
+mixin _StoredTimelineState<T extends StatefulWidget> on State<T> {
+  Object get storageId;
+  Object saveViewState();
+  void restoreViewState(Object value);
+  PageStorageBucket? _storage;
+  bool _restored = false;
+  bool _stored = false;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _storage = PageStorage.maybeOf(context);
+    if (!_restored) {
+      _restored = true;
+      final value = _storage?.readState(context, identifier: storageId);
+      if (value != null) restoreViewState(value);
+    }
+  }
+
+  void storeViewState() {
+    if (_stored) return;
+    _stored = true;
+    _storage?.writeState(context, saveViewState(), identifier: storageId);
+  }
+
+  @override
+  void deactivate() {
+    storeViewState();
+    super.deactivate();
+  }
+
+  @override
+  void activate() {
+    super.activate();
+    _stored = false;
+  }
+
+  @override
+  void dispose() {
+    storeViewState();
+    super.dispose();
+  }
+}

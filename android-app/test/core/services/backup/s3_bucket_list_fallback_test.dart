@@ -1,0 +1,1169 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+
+import 'package:Kelivo/core/models/backup.dart';
+import 'package:Kelivo/core/services/backup/backup_cancel_token.dart';
+import 'package:Kelivo/core/services/backup/backup_task_progress.dart';
+import 'package:Kelivo/core/services/backup/s3_client.dart';
+
+class _SingleChunkFile extends Fake implements File {
+  static const bytes = [1, 2, 3];
+
+  @override
+  Future<int> length() async => bytes.length;
+
+  @override
+  Stream<List<int>> openRead([int? start, int? end]) =>
+      Stream.value(bytes.sublist(start ?? 0, end));
+}
+
+S3Config _config(HttpServer server) {
+  return S3Config(
+    endpoint: 'http://${server.address.address}:${server.port}',
+    region: 'us-east-1',
+    bucket: 'backup-bucket',
+    accessKeyId: 'test-access-key',
+    secretAccessKey: 'test-secret-key',
+    prefix: 'kelivo_backups',
+    pathStyle: true,
+  );
+}
+
+String _listResultXml() {
+  return '''<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Contents>
+    <Key>kelivo_backups/kelivo_backup_2026-04-22T10-11-12.123456.zip</Key>
+    <LastModified>2026-04-22T10:11:12.123Z</LastModified>
+    <Size>128</Size>
+  </Contents>
+</ListBucketResult>''';
+}
+
+String _legacyListResultXml() {
+  return '''<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Contents>
+    <Key>kelivo_backups/kelivo_backup_2026-04-20T09-00-00.123456.zip</Key>
+    <LastModified>2026-04-20T09:00:00.123Z</LastModified>
+    <Size>64</Size>
+  </Contents>
+</ListBucketResult>''';
+}
+
+String _backup3ListResultXml() {
+  return '''<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Contents>
+    <Key>kelivo_backups/backup_3.zip</Key>
+    <LastModified>2026-04-22T12:00:00.000Z</LastModified>
+    <Size>333</Size>
+  </Contents>
+</ListBucketResult>''';
+}
+
+String _emptyListResultXml() {
+  return '''<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+</ListBucketResult>''';
+}
+
+String _pagedListResultXml({required bool firstPage}) {
+  if (firstPage) {
+    return '''<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <IsTruncated>true</IsTruncated>
+  <Contents>
+    <Key>kelivo_backups/page_1.zip</Key>
+    <LastModified>2026-04-22T11:00:00.000Z</LastModified>
+    <Size>111</Size>
+  </Contents>
+  <NextContinuationToken>page-two</NextContinuationToken>
+</ListBucketResult>''';
+  }
+  return '''<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <IsTruncated>false</IsTruncated>
+  <Contents>
+    <Key>kelivo_backups/page_2.zip</Key>
+    <LastModified>2026-04-22T12:00:00.000Z</LastModified>
+    <Size>222</Size>
+  </Contents>
+</ListBucketResult>''';
+}
+
+String _noSuchKeyXml() {
+  return '''<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>NoSuchKey</Code>
+  <Message>The specified key does not exist.</Message>
+</Error>''';
+}
+
+String _manifestJson() {
+  return '''{
+  "version": 1,
+  "items": [
+    {
+      "key": "kelivo_backups/kelivo_backup_2026-04-22T10-11-12.123456.zip",
+      "displayName": "kelivo_backup_2026-04-22T10-11-12.123456.zip",
+      "size": 128,
+      "lastModified": "2026-04-22T10:11:12.123Z"
+    }
+  ]
+}''';
+}
+
+String _manifestWithGhostsJson() {
+  return '''{
+  "version": 1,
+  "items": [
+    {
+      "key": "kelivo_backups/backup_1.zip",
+      "displayName": "backup_1.zip",
+      "size": 111,
+      "lastModified": "2026-04-20T12:00:00.000Z"
+    },
+    {
+      "key": "kelivo_backups/backup_2.zip",
+      "displayName": "backup_2.zip",
+      "size": 222,
+      "lastModified": "2026-04-21T12:00:00.000Z"
+    },
+    {
+      "key": "kelivo_backups/backup_3.zip",
+      "displayName": "backup_3.zip",
+      "size": 999,
+      "lastModified": "2026-04-23T12:00:00.000Z"
+    }
+  ]
+}''';
+}
+
+void main() {
+  group('S3 bucket list fallback', () {
+    test('test() succeeds when manifest key is missing', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+
+      final seenPaths = <String>[];
+      server.listen((request) async {
+        seenPaths.add(request.uri.path);
+        request.response.statusCode = HttpStatus.notFound;
+        request.response.headers.contentType = ContentType(
+          'application',
+          'xml',
+          charset: 'utf-8',
+        );
+        request.response.write(_noSuchKeyXml());
+        await request.response.close();
+      });
+
+      await const S3BackupClient().test(_config(server));
+
+      expect(seenPaths, [
+        '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json',
+      ]);
+    });
+
+    test(
+      'listObjects returns manifest items when bucket listing is unavailable',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+
+        final seenPaths = <String>[];
+        server.listen((request) async {
+          seenPaths.add(request.uri.path);
+          if (request.uri.path ==
+              '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(_manifestJson());
+          } else if (request.uri.path == '/backup-bucket' ||
+              request.uri.path == '/backup-bucket/') {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_noSuchKeyXml());
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+          }
+          await request.response.close();
+        });
+
+        final items = await const S3BackupClient().listObjects(_config(server));
+
+        expect(items, hasLength(1));
+        expect(
+          seenPaths,
+          contains(
+            '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json',
+          ),
+        );
+      },
+    );
+
+    test(
+      'listObjects treats successful bucket listing as authoritative',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+
+        server.listen((request) async {
+          if (request.uri.path ==
+              '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(_manifestJson());
+          } else if (request.uri.path == '/backup-bucket') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_legacyListResultXml());
+          } else if (request.method == 'PUT' &&
+              request.uri.path ==
+                  '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            await request.drain<void>();
+            request.response.statusCode = HttpStatus.ok;
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+          }
+          await request.response.close();
+        });
+
+        final items = await const S3BackupClient().listObjects(_config(server));
+
+        expect(items, hasLength(1));
+        expect(items.map((e) => e.displayName).toList(), [
+          'kelivo_backup_2026-04-20T09-00-00.123456.zip',
+        ]);
+      },
+    );
+
+    test(
+      'listObjects prunes manifest-only items when bucket listing succeeds',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+
+        String? manifestBody;
+        server.listen((request) async {
+          if (request.method == 'GET' &&
+              request.uri.path ==
+                  '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(_manifestWithGhostsJson());
+          } else if (request.method == 'GET' &&
+              request.uri.path == '/backup-bucket') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_backup3ListResultXml());
+          } else if (request.method == 'PUT' &&
+              request.uri.path ==
+                  '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            manifestBody = await utf8.decoder.bind(request).join();
+            request.response.statusCode = HttpStatus.ok;
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+          }
+          await request.response.close();
+        });
+
+        final items = await const S3BackupClient().listObjects(_config(server));
+
+        expect(items.map((e) => e.href.pathSegments.join('/')).toList(), [
+          'kelivo_backups/backup_3.zip',
+        ]);
+        expect(items.single.size, 333);
+        final manifest = jsonDecode(manifestBody!) as Map<String, dynamic>;
+        final manifestItems = manifest['items'] as List<dynamic>;
+        expect(manifestItems, hasLength(1));
+        expect(
+          manifestItems.single,
+          containsPair('key', 'kelivo_backups/backup_3.zip'),
+        );
+        expect(manifestItems.single, containsPair('size', 333));
+      },
+    );
+
+    test(
+      'listObjects clears manifest items when bucket listing is empty',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+
+        String? manifestBody;
+        server.listen((request) async {
+          if (request.method == 'GET' &&
+              request.uri.path ==
+                  '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(_manifestWithGhostsJson());
+          } else if (request.method == 'GET' &&
+              request.uri.path == '/backup-bucket') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_emptyListResultXml());
+          } else if (request.method == 'PUT' &&
+              request.uri.path ==
+                  '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            manifestBody = await utf8.decoder.bind(request).join();
+            request.response.statusCode = HttpStatus.ok;
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+          }
+          await request.response.close();
+        });
+
+        final items = await const S3BackupClient().listObjects(_config(server));
+
+        expect(items, isEmpty);
+        final manifest = jsonDecode(manifestBody!) as Map<String, dynamic>;
+        expect(manifest['items'], isEmpty);
+      },
+    );
+
+    test('listObjects reads all ListBucket pages', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+
+      final continuationTokens = <String?>[];
+      server.listen((request) async {
+        if (request.uri.path ==
+            '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+          request.response.statusCode = HttpStatus.notFound;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write(_noSuchKeyXml());
+        } else if (request.uri.path == '/backup-bucket') {
+          final token = request.uri.queryParameters['continuation-token'];
+          continuationTokens.add(token);
+          request.response.statusCode = HttpStatus.ok;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write(_pagedListResultXml(firstPage: token == null));
+        } else {
+          request.response.statusCode = HttpStatus.notFound;
+        }
+        await request.response.close();
+      });
+
+      final items = await const S3BackupClient().listObjects(_config(server));
+
+      expect(continuationTokens, [null, 'page-two']);
+      expect(items.map((e) => e.displayName).toList(), [
+        'page_2.zip',
+        'page_1.zip',
+      ]);
+    });
+
+    test(
+      'listObjects surfaces manifest sync write failures after bucket listing',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+
+        server.listen((request) async {
+          if (request.method == 'GET' &&
+              request.uri.path ==
+                  '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(_manifestWithGhostsJson());
+          } else if (request.method == 'GET' &&
+              request.uri.path == '/backup-bucket') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_backup3ListResultXml());
+          } else if (request.method == 'PUT' &&
+              request.uri.path ==
+                  '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            await request.drain<void>();
+            request.response.statusCode = HttpStatus.forbidden;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write('''<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>AccessDenied</Code>
+  <Message>Access Denied</Message>
+</Error>''');
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+          }
+          await request.response.close();
+        });
+
+        await expectLater(
+          () => const S3BackupClient().listObjects(_config(server)),
+          throwsA(
+            isA<Exception>().having(
+              (e) => e.toString(),
+              'message',
+              contains('S3 manifest write failed'),
+            ),
+          ),
+        );
+      },
+    );
+
+    test('listObjects cancel during manifest PUT does not succeed', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+      final putStarted = Completer<void>();
+      server.listen((request) async {
+        if (request.method == 'GET' &&
+            request.uri.path ==
+                '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+          request.response.statusCode = HttpStatus.ok;
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(_manifestWithGhostsJson());
+          await request.response.close();
+        } else if (request.method == 'GET' &&
+            request.uri.path == '/backup-bucket') {
+          request.response.statusCode = HttpStatus.ok;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write(_backup3ListResultXml());
+          await request.response.close();
+        } else if (request.method == 'PUT' &&
+            request.uri.path ==
+                '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+          if (!putStarted.isCompleted) putStarted.complete();
+        } else {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+        }
+      });
+
+      final token = BackupCancelToken();
+      addTearDown(token.dispose);
+      final future = const S3BackupClient().listObjects(
+        _config(server),
+        cancelToken: token,
+      );
+      await putStarted.future.timeout(const Duration(seconds: 3));
+      token.cancel();
+      await expectLater(future, throwsA(isA<BackupCancelledException>()));
+    });
+
+    test(
+      'listObjects cancel closes the client and reports listingRemote',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+        server.listen((_) {});
+
+        final token = BackupCancelToken();
+        addTearDown(token.dispose);
+        final phases = <BackupPhase>[];
+        final future = const S3BackupClient().listObjects(
+          _config(server),
+          onProgress: (progress) => phases.add(progress.phase),
+          cancelToken: token,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        token.cancel();
+
+        await expectLater(future, throwsA(isA<BackupCancelledException>()));
+        expect(phases, contains(BackupPhase.listingRemote));
+      },
+    );
+
+    for (final (copyStatus, copyError, fallbackStatus) in const [
+      (501, null, 200),
+      (501, null, 503),
+      (404, 'NoSuchKey', 200),
+      (404, 'NoSuchKey', 503),
+      (200, 'NoSuchKey', 200),
+      (404, 'NoSuchBucket', null),
+    ]) {
+      test(
+        'uploadFile handles CopyObject $copyStatus (${copyError ?? 'empty body'}) with final PUT ${fallbackStatus ?? 'skipped'}',
+        () async {
+          final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          addTearDown(() => server.close(force: true));
+          final calls = <String>[];
+          var fallbackCancellable = false;
+          final payload = List<int>.filled(256 * 1024, 42);
+          final token = BackupCancelToken();
+          addTearDown(token.dispose);
+          server.listen((req) async {
+            final name = req.uri.pathSegments.last;
+            final bytes = await req.fold<List<int>>(
+              [],
+              (all, chunk) => all..addAll(chunk),
+            );
+            if (req.headers.value('x-amz-copy-source') != null) {
+              calls.add('copy');
+              req.response.statusCode = copyStatus;
+              if (copyError != null) {
+                req.response.write('<Error><Code>$copyError</Code></Error>');
+              }
+            } else if (req.method == 'PUT') {
+              calls.add('put $name');
+              if (name == 'archive.zip') {
+                expect(bytes, payload);
+                // The server has the full object but has not replied yet.
+                token.cancel();
+                req.response.statusCode = fallbackStatus ?? HttpStatus.ok;
+              }
+            } else if (req.method == 'DELETE') {
+              calls.add('delete $name');
+              req.response.statusCode = 204;
+            } else {
+              req.response.statusCode = 404;
+              req.response.write(_noSuchKeyXml());
+            }
+            await req.response.close();
+          });
+          final tmp = await Directory.systemTemp.createTemp();
+          addTearDown(() => tmp.delete(recursive: true));
+          final file = File('${tmp.path}/archive.zip')
+            ..writeAsBytesSync(payload);
+          final result = const S3BackupClient().uploadFile(
+            _config(server),
+            key: 'kelivo_backups/archive.zip',
+            file: file,
+            cancelToken: token,
+            onProgress: (p) {
+              if (calls.contains('copy') &&
+                  p.phase == BackupPhase.uploading &&
+                  p.processed > 0 &&
+                  p.processed < payload.length) {
+                fallbackCancellable = p.cancellable && token.cancellable;
+              }
+            },
+          );
+          if (fallbackStatus == 200) {
+            await result;
+          } else {
+            final message = fallbackStatus == null
+                ? 'S3 copy failed: $copyError'
+                : 'S3 upload failed: HTTP $fallbackStatus';
+            await expectLater(
+              result,
+              throwsA(
+                isA<Exception>().having(
+                  (e) => e.toString(),
+                  'message',
+                  contains(message),
+                ),
+              ),
+            );
+          }
+          expect(fallbackCancellable, fallbackStatus != null);
+          expect(token.isCancelled, isFalse);
+          expect(calls, [
+            'put archive.zip.partial',
+            'copy',
+            if (fallbackStatus != null) 'put archive.zip',
+            'delete archive.zip.partial',
+            if (fallbackStatus == 200) 'put .kelivo_backups_manifest.json',
+          ]);
+        },
+      );
+    }
+    test('can cancel a one-chunk fallback PUT while connecting', () async {
+      final token = BackupCancelToken();
+      addTearDown(token.dispose);
+      final completed = <String>[];
+      BackupProgress? latestProgress;
+      BackupProgress? whileConnecting;
+      final client = MockClient.streaming((req, body) async {
+        final name = req.url.pathSegments.last;
+        if (req.headers.containsKey('x-amz-copy-source')) {
+          return http.StreamedResponse(
+            Stream.value(utf8.encode(_noSuchKeyXml())),
+            HttpStatus.notFound,
+          );
+        }
+        if (req.method == 'PUT' && name == 'archive.zip') {
+          // Model openUrl waiting before the HTTP client consumes the body.
+          await Future<void>.delayed(Duration.zero);
+          whileConnecting = latestProgress;
+          token.cancel();
+        }
+        await body.drain<void>();
+        completed.add('${req.method} $name');
+        return http.StreamedResponse(
+          const Stream.empty(),
+          req.method == 'GET' ? HttpStatus.notFound : HttpStatus.ok,
+        );
+      });
+      await expectLater(
+        http.runWithClient(
+          () => const S3BackupClient().uploadFile(
+            const S3Config(
+              endpoint: 'https://s3.example.test',
+              bucket: 'backup-bucket',
+              accessKeyId: 'test-access-key',
+              secretAccessKey: 'test-secret-key',
+            ),
+            key: 'kelivo_backups/archive.zip',
+            file: _SingleChunkFile(),
+            cancelToken: token,
+            onProgress: (progress) => latestProgress = progress,
+          ),
+          () => client,
+        ),
+        throwsA(isA<BackupCancelledException>()),
+      );
+      expect(whileConnecting?.phase, BackupPhase.uploading);
+      expect(whileConnecting?.processed, 0);
+      expect(whileConnecting?.cancellable, isTrue);
+      expect(completed, [
+        'PUT archive.zip.partial',
+        'DELETE archive.zip.partial',
+      ]);
+    });
+
+    test('uploadFile marks manifest upsert as non-cancellable', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+      server.listen((request) async {
+        if (request.headers.value('x-amz-copy-source')
+            case final String source) {
+          expect(source, '/backup-bucket/kelivo_backups/demo.zip.partial');
+          request.response.write(
+            '<CopyObjectResult><ETag>ok</ETag></CopyObjectResult>',
+          );
+        } else if (request.method == 'GET' &&
+            request.uri.path ==
+                '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+          request.response.statusCode = HttpStatus.notFound;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write(_noSuchKeyXml());
+        } else if (request.method == 'PUT') {
+          await request.drain<void>();
+          request.response.statusCode = HttpStatus.ok;
+        } else {
+          request.response.statusCode = HttpStatus.notFound;
+        }
+        await request.response.close();
+      });
+
+      final tmpDir = await Directory.systemTemp.createTemp(
+        'kelivo_s3_manifest_progress_',
+      );
+      addTearDown(() async {
+        if (await tmpDir.exists()) {
+          await tmpDir.delete(recursive: true);
+        }
+      });
+      final file = File('${tmpDir.path}/demo.zip');
+      await file.writeAsBytes([1, 2, 3]);
+      final events = <BackupProgress>[];
+
+      await const S3BackupClient().uploadFile(
+        _config(server),
+        key: 'kelivo_backups/demo.zip',
+        file: file,
+        onProgress: events.add,
+      );
+
+      expect(events.where((event) => !event.cancellable), isNotEmpty);
+      expect(events.last.cancellable, isFalse);
+    });
+
+    test('uploadFile writes manifest object after upload', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+
+      final seenPaths = <String>[];
+      String? manifestBody;
+      server.listen((request) async {
+        seenPaths.add(request.uri.path);
+        if (request.headers.value('x-amz-copy-source')
+            case final String source) {
+          expect(source, '/backup-bucket/kelivo_backups/demo.zip.partial');
+          request.response.write(
+            '<CopyObjectResult><ETag>ok</ETag></CopyObjectResult>',
+          );
+        } else if (request.method == 'GET' &&
+            request.uri.path ==
+                '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+          request.response.statusCode = HttpStatus.notFound;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write(_noSuchKeyXml());
+        } else if (request.method == 'PUT' &&
+            request.uri.path ==
+                '/backup-bucket/kelivo_backups/demo.zip.partial') {
+          await request.drain<void>();
+          request.response.statusCode = HttpStatus.ok;
+        } else if (request.method == 'PUT' &&
+            request.uri.path ==
+                '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+          manifestBody = await utf8.decoder.bind(request).join();
+          request.response.statusCode = HttpStatus.ok;
+        } else {
+          request.response.statusCode = HttpStatus.notFound;
+        }
+        await request.response.close();
+      });
+
+      final tmpDir = await Directory.systemTemp.createTemp(
+        'kelivo_s3_manifest_upload_',
+      );
+      addTearDown(() async {
+        if (await tmpDir.exists()) {
+          await tmpDir.delete(recursive: true);
+        }
+      });
+      final file = File('${tmpDir.path}/demo.zip');
+      await file.writeAsBytes([1, 2, 3]);
+
+      await const S3BackupClient().uploadFile(
+        _config(server),
+        key: 'kelivo_backups/demo.zip',
+        file: file,
+      );
+
+      expect(
+        seenPaths,
+        contains('/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json'),
+      );
+      expect(
+        seenPaths,
+        containsAllInOrder([
+          '/backup-bucket/kelivo_backups/demo.zip.partial',
+          '/backup-bucket/kelivo_backups/demo.zip',
+          '/backup-bucket/kelivo_backups/demo.zip.partial',
+        ]),
+      );
+      expect(manifestBody, isNot(contains('.partial')));
+      expect(manifestBody, contains('"key":"kelivo_backups/demo.zip"'));
+    });
+
+    test(
+      'downloadToFile writes object response directly to destination',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+
+        final seenPaths = <String>[];
+        final payload = List<int>.generate(128 * 1024, (i) => i % 251);
+        server.listen((request) async {
+          seenPaths.add(request.uri.path);
+          if (request.method == 'GET' &&
+              request.uri.path == '/backup-bucket/kelivo_backups/demo.zip') {
+            request.response.statusCode = HttpStatus.ok;
+            for (var offset = 0; offset < payload.length; offset += 4096) {
+              final end = (offset + 4096).clamp(0, payload.length).toInt();
+              request.response.add(payload.sublist(offset, end));
+              await request.response.flush();
+            }
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+          }
+          await request.response.close();
+        });
+
+        final tmpDir = await Directory.systemTemp.createTemp(
+          'kelivo_s3_download_',
+        );
+        addTearDown(() async {
+          if (await tmpDir.exists()) {
+            await tmpDir.delete(recursive: true);
+          }
+        });
+
+        final destination = File('${tmpDir.path}/demo.zip');
+        await const S3BackupClient().downloadToFile(
+          _config(server),
+          key: 'kelivo_backups/demo.zip',
+          destination: destination,
+        );
+
+        expect(seenPaths, contains('/backup-bucket/kelivo_backups/demo.zip'));
+        expect(await destination.readAsBytes(), payload);
+      },
+    );
+
+    test(
+      'listObjects uses primary bucket URL when provider accepts it',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+
+        var requestCount = 0;
+        final seenPaths = <String>[];
+        server.listen((request) async {
+          requestCount += 1;
+          seenPaths.add(request.uri.path);
+          if (request.uri.path ==
+              '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_noSuchKeyXml());
+          } else {
+            expect(request.uri.path, '/backup-bucket');
+            expect(request.uri.queryParameters['list-type'], '2');
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_listResultXml());
+          }
+          await request.response.close();
+        });
+
+        final items = await const S3BackupClient().listObjects(_config(server));
+
+        expect(requestCount, 2);
+        expect(seenPaths, [
+          '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json',
+          '/backup-bucket',
+        ]);
+        expect(items, hasLength(1));
+        expect(
+          items.single.displayName,
+          'kelivo_backup_2026-04-22T10-11-12.123456.zip',
+        );
+      },
+    );
+
+    test(
+      'listObjects retries with trailing slash when primary URL returns NoSuchKey',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+
+        final paths = <String>[];
+        server.listen((request) async {
+          paths.add(request.uri.path);
+          if (request.uri.path ==
+              '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_noSuchKeyXml());
+          } else if (request.uri.path == '/backup-bucket') {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_noSuchKeyXml());
+          } else if (request.uri.path == '/backup-bucket/') {
+            request.response.statusCode = HttpStatus.ok;
+            request.response.headers.contentType = ContentType(
+              'application',
+              'xml',
+              charset: 'utf-8',
+            );
+            request.response.write(_listResultXml());
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+          }
+          await request.response.close();
+        });
+
+        final items = await const S3BackupClient().listObjects(_config(server));
+
+        expect(paths, [
+          '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json',
+          '/backup-bucket',
+          '/backup-bucket/',
+        ]);
+        expect(items, hasLength(1));
+      },
+    );
+
+    test(
+      'test() does not fall back to ListBucket when manifest key is missing',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+
+        final paths = <String>[];
+        server.listen((request) async {
+          paths.add(request.uri.path);
+          request.response.statusCode = HttpStatus.notFound;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write(_noSuchKeyXml());
+          await request.response.close();
+        });
+
+        await const S3BackupClient().test(_config(server));
+
+        expect(paths, [
+          '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json',
+        ]);
+      },
+    );
+
+    test('listObjects preserves non-NoSuchKey failures', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+
+      var requestCount = 0;
+      server.listen((request) async {
+        requestCount += 1;
+        if (request.uri.path ==
+            '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+          request.response.statusCode = HttpStatus.notFound;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write(_noSuchKeyXml());
+        } else {
+          request.response.statusCode = HttpStatus.forbidden;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write('''<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>AccessDenied</Code>
+  <Message>Access Denied</Message>
+</Error>''');
+        }
+        await request.response.close();
+      });
+
+      await expectLater(
+        () => const S3BackupClient().listObjects(_config(server)),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('AccessDenied'),
+          ),
+        ),
+      );
+      expect(requestCount, 2);
+    });
+
+    test('endpoint that already includes bucket is not duplicated', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+
+      final paths = <String>[];
+      server.listen((request) async {
+        paths.add(request.uri.path);
+        if (request.headers.value('x-amz-copy-source')
+            case final String source) {
+          expect(source, '/backup-bucket/kelivo_backups/demo.zip.partial');
+          request.response.write(
+            '<CopyObjectResult><ETag>ok</ETag></CopyObjectResult>',
+          );
+        } else if (request.method == 'GET' &&
+            request.uri.path ==
+                '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json') {
+          request.response.statusCode = HttpStatus.notFound;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write(_noSuchKeyXml());
+        } else if (request.method == 'PUT') {
+          await request.drain<void>();
+          request.response.statusCode = HttpStatus.ok;
+        } else if (request.method == 'GET') {
+          request.response.statusCode = HttpStatus.ok;
+          request.response.headers.contentType = ContentType(
+            'application',
+            'xml',
+            charset: 'utf-8',
+          );
+          request.response.write(_listResultXml());
+        } else {
+          request.response.statusCode = HttpStatus.notFound;
+        }
+        await request.response.close();
+      });
+
+      final cfg = S3Config(
+        endpoint:
+            'http://${server.address.address}:${server.port}/backup-bucket',
+        region: 'us-east-1',
+        bucket: 'backup-bucket',
+        accessKeyId: 'test-access-key',
+        secretAccessKey: 'test-secret-key',
+        prefix: 'kelivo_backups',
+        pathStyle: true,
+      );
+
+      final tmpDir = await Directory.systemTemp.createTemp(
+        'kelivo_s3_endpoint_dedupe_',
+      );
+      addTearDown(() async {
+        if (await tmpDir.exists()) {
+          await tmpDir.delete(recursive: true);
+        }
+      });
+      final file = File('${tmpDir.path}/demo.zip');
+      await file.writeAsBytes([1, 2, 3]);
+
+      await const S3BackupClient().uploadFile(
+        cfg,
+        key: 'kelivo_backups/demo.zip',
+        file: file,
+      );
+      await const S3BackupClient().test(cfg);
+      await const S3BackupClient().listObjects(cfg);
+
+      expect(
+        paths,
+        containsAll([
+          '/backup-bucket/kelivo_backups/.kelivo_backups_manifest.json',
+          '/backup-bucket/kelivo_backups/demo.zip',
+          '/backup-bucket',
+        ]),
+      );
+      expect(paths, isNot(contains('/backup-bucket/backup-bucket')));
+      expect(
+        paths,
+        isNot(contains('/backup-bucket/backup-bucket/kelivo_backups/demo.zip')),
+      );
+    });
+
+    test(
+      'cancels streamed upload while the response body is stalled',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async {
+          await server.close(force: true);
+        });
+        final putStarted = Completer<void>();
+        server.listen((request) async {
+          if (request.method == 'PUT' &&
+              request.uri.path.endsWith('/stall.zip.partial')) {
+            await request.drain<void>();
+            request.response.statusCode = HttpStatus.ok;
+            request.response.contentLength = 1024 * 1024;
+            putStarted.complete();
+            return;
+          }
+          if (request.method == 'DELETE') {
+            request.response.statusCode = HttpStatus.noContent;
+            await request.response.close();
+            return;
+          }
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+        });
+
+        final tmpDir = await Directory.systemTemp.createTemp(
+          'kelivo_s3_stall_upload_',
+        );
+        addTearDown(() async {
+          if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+        });
+        final file = File('${tmpDir.path}/stall.zip');
+        await file.writeAsBytes(List<int>.filled(64 * 1024, 9));
+        final token = BackupCancelToken();
+        addTearDown(token.dispose);
+
+        final future = const S3BackupClient().uploadFile(
+          _config(server),
+          key: 'kelivo_backups/stall.zip',
+          file: file,
+          cancelToken: token,
+        );
+        await putStarted.future.timeout(const Duration(seconds: 5));
+        token.cancel();
+
+        await expectLater(future, throwsA(isA<BackupCancelledException>()));
+      },
+    );
+  });
+}

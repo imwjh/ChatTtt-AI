@@ -1,0 +1,792 @@
+import 'dart:io';
+import 'package:Kelivo/core/database/private_data_storage.dart';
+import '../../support/recovery_fault_durability.dart';
+import 'dart:convert';
+import 'dart:ui' as ui;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:Kelivo/l10n/app_localizations.dart';
+import '../../support/recovery_snapshot_fixture.dart';
+import 'package:Kelivo/core/database/database_installation_gate.dart';
+import 'package:Kelivo/core/database/empty_database_recovery_guard.dart';
+import 'package:Kelivo/theme/theme_factory.dart';
+import 'package:Kelivo/theme/palettes.dart';
+import 'package:Kelivo/core/services/backup/local_snapshot_schedule.dart';
+import 'package:Kelivo/core/services/backup/restore_diagnostic_exception.dart';
+import 'package:Kelivo/shared/widgets/restore_failure_screen.dart';
+
+/// Stands in for the platform channel, which never answers under `flutter
+/// test` and would otherwise leave a pending timeout timer behind.
+Future<({String? version, String? build})> stubVersion() async =>
+    (version: '1.2.4', build: '68');
+
+StartupFailureReport reportFor(
+  Object error, {
+  StartupFailureStage stage = StartupFailureStage.databaseAdmission,
+}) => StartupFailureReport.capture(stage: stage, error: error);
+
+Widget wrap(Widget child) => MaterialApp(
+  locale: const Locale('en'),
+  supportedLocales: AppLocalizations.supportedLocales,
+  localizationsDelegates: AppLocalizations.localizationsDelegates,
+  home: child,
+);
+
+/// The screen scrolls, and a lazy list only builds what fits. A tall surface
+/// keeps every section built so the finders below mean what they say.
+void useTallSurface(WidgetTester tester) {
+  tester.view.physicalSize = const Size(1000, 2400);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.reset);
+}
+
+/// Lets the screen's real file I/O finish. Each `await` on real I/O resumes as
+/// a microtask in the test's fake zone, which only drains on a pump, so the two
+/// have to alternate until the chain is done.
+Future<void> settleDiagnostics(WidgetTester tester) async {
+  final l10n = AppLocalizations.of(
+    tester.element(find.byType(RestoreFailureScreen)),
+  )!;
+  bool loading() =>
+      find.text(l10n.startupRecoveryCollecting).evaluate().isNotEmpty ||
+      find.text(l10n.startupRecoveryBusy).evaluate().isNotEmpty ||
+      find.text(l10n.recoverySearchingCopies).evaluate().isNotEmpty;
+  for (var round = 0; round < 500 && loading(); round++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+  await tester.pumpAndSettle();
+  expect(
+    loading(),
+    isFalse,
+    reason:
+        'Diagnostics and local snapshots must finish loading before assertions.',
+  );
+}
+
+void main() {
+  setUpAll(() async {
+    final font =
+        Platform.environment['KELIVO_RECOVERY_FONT'] ??
+        'test/fixtures/fonts/JetBrainsMono-Regular.ttf';
+    final bytes = await File(font).readAsBytes();
+    await (FontLoader(
+      'RecoveryPreview',
+    )..addFont(Future.value(bytes.buffer.asByteData()))).load();
+    await (FontLoader('packages/lucide_icons_flutter/Lucide')..addFont(
+          rootBundle.load('packages/lucide_icons_flutter/assets/lucide.ttf'),
+        ))
+        .load();
+  });
+  testWidgets(
+    'private publication failure diagnostics leave the copy source unchanged and retry succeeds',
+    (tester) async {
+      useTallSurface(tester);
+      final root = await tester.runAsync(
+        () => Directory.systemTemp.createTemp('private-failure-ui-'),
+      );
+      final source = Directory('${root!.path}/Documents');
+      final target = Directory('${root.path}/Support/kelivo-data');
+      addTearDown(() async => root.delete(recursive: true));
+      await tester.runAsync(() async {
+        await source.create();
+        await File('${source.path}/kelivo.db').writeAsString('retained main');
+        await File(
+          '${source.path}/kelivo.db-wal',
+        ).writeAsString('retained WAL');
+        await expectLater(
+          PrivateDataStorage.prepare(
+            source: source,
+            target: target,
+            durability: FaultDurability()..failPublish = true,
+          ),
+          throwsA(isA<FileSystemException>()),
+        );
+      });
+      await tester.pumpWidget(
+        wrap(
+          RestoreFailureScreen(
+            report: StartupFailureReport.capture(
+              stage: StartupFailureStage.databaseAdmission,
+              step: 'private_storage_activation',
+              error: StateError('private_storage_publish'),
+            ),
+            restart: () async {},
+            appDataDirectory: target,
+            privateStorageSource: source,
+            appVersionLoader: stubVersion,
+          ),
+        ),
+      );
+      await settleDiagnostics(tester);
+      await tester.runAsync(() async {
+        expect(await Directory('${source.path}/logs').exists(), isFalse);
+        expect(
+          await Directory(
+            '${PrivateDataStorage.diagnosticsDirectory(target).path}/logs',
+          ).exists(),
+          isTrue,
+        );
+        await PrivateDataStorage.prepare(source: source, target: target);
+        expect(
+          await File('${target.path}/kelivo.db-wal').readAsString(),
+          'retained WAL',
+        );
+        expect(
+          await File('${source.path}/kelivo.db-wal').readAsString(),
+          'retained WAL',
+        );
+      });
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  testWidgets(
+    'blocked directory continues the same restore without restarting',
+    (tester) async {
+      useTallSurface(tester);
+      var retries = 0;
+      var restarts = 0;
+      final directory = await tester.runAsync(
+        () => Directory.systemTemp.createTemp('restore-blocked-ui-'),
+      );
+      addTearDown(() => directory!.delete(recursive: true));
+      final report = StartupFailureReport.capture(
+        stage: StartupFailureStage.restoreGate,
+        error: RestoreFileSystemException(
+          const FileSystemException(
+            'restore_durability_rename:5',
+            r'C:\app\workspaces',
+          ),
+          const {
+            'operation': 'MoveFileExW',
+            'source type': 'directory',
+            'Windows error code': '5',
+            'source path': r'C:\app\workspaces',
+          },
+        ),
+        restoreDetails: const {
+          'restore stage': 'preservingCurrentData',
+          'last observed receipt state': 'prepared',
+        },
+      );
+      await tester.pumpWidget(
+        wrap(
+          RestoreFailureScreen(
+            report: report,
+            restart: () async => restarts++,
+            retryRestore: () async => retries++,
+            appDataDirectory: directory,
+            appVersionLoader: stubVersion,
+          ),
+        ),
+      );
+      await settleDiagnostics(tester);
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(RestoreFailureScreen)),
+      )!;
+      expect(
+        find.text(l10n.backupRestoreDirectoryBlockedTitle),
+        findsOneWidget,
+      );
+      expect(find.text(r'C:\app\workspaces'), findsNothing);
+      await tester.tap(find.text('Show technical details'));
+      await tester.pumpAndSettle();
+      expect(find.text(r'C:\app\workspaces'), findsOneWidget);
+      expect(find.text(l10n.backupRestoreFailureRestartButton), findsNothing);
+      expect(find.text(l10n.startupRecoverySnapshotTitle), findsNothing);
+      expect(find.text(l10n.startupRecoverySectionDataTitle), findsNothing);
+      await tester.ensureVisible(find.text(l10n.backupRestoreContinueButton));
+      await tester.tap(find.text(l10n.backupRestoreContinueButton));
+      await tester.pump();
+      expect(retries, 1);
+      expect(restarts, 0);
+      await tester.ensureVisible(find.text(l10n.backupRestoreContinueButton));
+      await tester.tap(find.text(l10n.backupRestoreContinueButton));
+      expect(retries, 1);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('explains fail-closed startup without opening business UI', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    var restartCalls = 0;
+    await tester.pumpWidget(
+      wrap(
+        RestoreFailureScreen(
+          report: reportFor(
+            StateError('restore_startup_receipt'),
+            stage: StartupFailureStage.restoreGate,
+          ),
+          restart: () async => restartCalls++,
+          appVersionLoader: stubVersion,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Let’s recover your chats'), findsOneWidget);
+    expect(find.textContaining('paused loading your data'), findsOneWidget);
+    expect(find.text('Restart Kelivo'), findsOneWidget);
+
+    // The first screen guides recovery; diagnostics remain accessible.
+    expect(
+      find.textContaining('StateError: restore_startup_receipt'),
+      findsNothing,
+    );
+    await tester.tap(find.text('Show technical details'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('StateError: restore_startup_receipt'),
+      findsWidgets,
+    );
+    expect(find.text('restore_startup_receipt'), findsOneWidget);
+    expect(find.text('Restore gate'), findsOneWidget);
+
+    await tester.tap(find.text('Restart Kelivo'));
+    await tester.pump();
+    expect(restartCalls, 1);
+  });
+
+  testWidgets('shows the whole report behind one disclosure', (tester) async {
+    useTallSurface(tester);
+    await tester.pumpWidget(
+      wrap(
+        RestoreFailureScreen(
+          report: reportFor(StateError('database_schema_version')),
+          restart: () async {},
+          appVersionLoader: stubVersion,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('== error =='), findsNothing);
+    await tester.tap(find.text('Show technical details'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('== error =='), findsOneWidget);
+    expect(find.textContaining('stage: database_admission'), findsOneWidget);
+  });
+
+  testWidgets('explains an occupied business lease with a useful action', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    await tester.pumpWidget(
+      wrap(
+        RestoreFailureScreen(
+          report: reportFor(
+            StateError('RestoreBusinessLeaseUnavailable'),
+            stage: StartupFailureStage.restoreGate,
+          ),
+          restart: () async {},
+          appVersionLoader: stubVersion,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Kelivo is already running'), findsOneWidget);
+    expect(find.textContaining('another app process'), findsOneWidget);
+    expect(find.text('Restart Kelivo'), findsOneWidget);
+    // A lease conflict is not a data problem, so no file-level actions.
+    expect(find.text('Other options'), findsNothing);
+  });
+
+  group('with a data directory', () {
+    setUpRecoverySnapshotPaths();
+    late Directory directory;
+
+    setUp(() async {
+      directory = await Directory.systemTemp.createTemp(
+        'kelivo_restore_failure_screen_',
+      );
+    });
+
+    tearDown(() async {
+      if (await directory.exists()) await directory.delete(recursive: true);
+    });
+
+    Future<void> pumpScreen(WidgetTester tester) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        wrap(
+          RestoreFailureScreen(
+            report: reportFor(StateError('database_identity_mismatch')),
+            restart: () async {},
+            appDataDirectory: directory,
+            appVersionLoader: stubVersion,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await settleDiagnostics(tester);
+    }
+
+    Future<void> writeSnapshot(DateTime at, int messages) async {
+      final snapshots = Directory('${directory.path}/snapshots');
+      await snapshots.create();
+      final archive = File(
+        '${snapshots.path}/${LocalSnapshotPaths.fileNameFor(at)}',
+      );
+      await writeRecoverySnapshot(archive, messages: messages);
+      await File(
+        '${archive.path}${LocalSnapshotPaths.metadataSuffix}',
+      ).writeAsString(
+        jsonEncode({'conversationCount': 2, 'messageCount': messages}),
+      );
+    }
+
+    testWidgets(
+      'explains missing database and discovers a verified renamed-folder copy',
+      (tester) async {
+        await tester.runAsync(() async {
+          await writeSnapshot(DateTime.utc(2026, 10, 19), 42);
+          await Directory(
+            '${directory.path}/snapshots',
+          ).rename('${directory.path}/snapshots 2');
+        });
+        useTallSurface(tester);
+        await tester.pumpWidget(
+          wrap(
+            RestoreFailureScreen(
+              report: reportFor(StateError('database_missing_with_prior_data')),
+              restart: () async {},
+              appDataDirectory: directory,
+              appVersionLoader: stubVersion,
+            ),
+          ),
+        );
+        await settleDiagnostics(tester);
+        expect(find.text('Let’s recover your chats'), findsOneWidget);
+        expect(
+          find.textContaining('has not created an empty database'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('Found 1 validated copies'), findsOneWidget);
+        expect(find.text('Choose a copy to recover'), findsOneWidget);
+        expect(
+          await tester.runAsync(
+            () => Directory('${directory.path}/snapshots').exists(),
+          ),
+          isFalse,
+        );
+        expect(
+          await tester.runAsync(
+            () => Directory('${directory.path}/snapshots 2').exists(),
+          ),
+          isTrue,
+        );
+      },
+    );
+    testWidgets(
+      'keeps corrupt discovered archives and explains validation failure',
+      (tester) async {
+        await tester.runAsync(() async {
+          final file = File(
+            '${directory.path}/kelivo-snapshot-1792421104232879.zip',
+          );
+          await file.writeAsString('damaged original');
+        });
+        await pumpScreen(tester);
+        expect(
+          find.textContaining(
+            'validation failed. The original file has been kept.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Choose a copy to recover'), findsNothing);
+        expect(
+          await tester.runAsync(
+            () => File(
+              '${directory.path}/kelivo-snapshot-1792421104232879.zip',
+            ).readAsString(),
+          ),
+          'damaged original',
+        );
+      },
+    );
+    testWidgets(
+      'requires an explicit choice before continuing with the empty database',
+      (tester) async {
+        await tester.runAsync(() async {
+          await DatabaseInstallationGate.ensureReady(
+            appDataDirectory: directory,
+          );
+          await writeSnapshot(DateTime.utc(2026, 10, 19), 42);
+        });
+        useTallSurface(tester);
+        var restarts = 0;
+        await tester.pumpWidget(
+          wrap(
+            RestoreFailureScreen(
+              report: reportFor(
+                StateError('database_empty_with_recovery_copies'),
+              ),
+              restart: () async {
+                restarts++;
+              },
+              appDataDirectory: directory,
+              appVersionLoader: stubVersion,
+            ),
+          ),
+        );
+        await settleDiagnostics(tester);
+        expect(find.text('Let’s recover your chats'), findsOneWidget);
+        expect(find.text('Continue with an empty chat list'), findsNothing);
+        await tester.ensureVisible(find.text('Other options'));
+        await tester.tap(find.text('Other options'));
+        await tester.pumpAndSettle();
+        final action = find.text('Continue with an empty chat list');
+        await tester.ensureVisible(action);
+        await tester.tap(action);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(
+          await tester.runAsync(
+            () => File(
+              '${directory.path}/${EmptyDatabaseRecoveryGuard.acknowledgementName}',
+            ).exists(),
+          ),
+          isFalse,
+        );
+        expect(restarts, 0);
+        await tester.tap(action);
+        await tester.pumpAndSettle();
+        final confirm = find
+            .widgetWithText(TextButton, 'Continue with an empty chat list')
+            .last;
+        expect(tester.widget<TextButton>(confirm).onPressed, isNull);
+        await tester.tap(find.byType(Checkbox));
+        await tester.pumpAndSettle();
+        await tester.tap(confirm);
+        for (var n = 0; n < 100 && restarts == 0; n++) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 20)),
+          );
+          await tester.pump();
+        }
+        expect(restarts, 1);
+        expect(
+          await tester.runAsync(
+            () => File(
+              '${directory.path}/${EmptyDatabaseRecoveryGuard.acknowledgementName}',
+            ).exists(),
+          ),
+          isTrue,
+        );
+      },
+    );
+    for (final brightness in Brightness.values) {
+      testWidgets('snapshot picker fits a narrow phone in ${brightness.name}', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        await tester.runAsync(
+          () => writeSnapshot(DateTime.utc(2026, 9, 10, 12), 42),
+        );
+        final palette = ThemePalettes.defaultPalette;
+        final theme = brightness == Brightness.light
+            ? buildLightThemeForScheme(palette.light)
+            : buildDarkThemeForScheme(palette.dark);
+        final key = GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: key,
+            child: MaterialApp(
+              debugShowCheckedModeBanner: false,
+              locale: const Locale('en'),
+              supportedLocales: AppLocalizations.supportedLocales,
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              theme: theme.copyWith(
+                textTheme: theme.textTheme.apply(fontFamily: 'RecoveryPreview'),
+              ),
+              home: RestoreFailureScreen(
+                report: reportFor(StateError('database_missing')),
+                restart: () async {},
+                appDataDirectory: directory,
+                appVersionLoader: stubVersion,
+              ),
+            ),
+          ),
+        );
+        await settleDiagnostics(tester);
+        final button = find.text('Choose a copy to recover');
+        expect(tester.getRect(button).bottom, lessThan(844));
+        expect(tester.takeException(), isNull);
+        Future<void> capture(String stage) async {
+          final destination =
+              Platform.environment['KELIVO_RECOVERY_SCREENSHOTS'];
+          if (destination == null) return;
+          await tester.runAsync(() async {
+            final boundary =
+                key.currentContext!.findRenderObject()!
+                    as RenderRepaintBoundary;
+            final image = await boundary.toImage();
+            try {
+              final bytes = await image.toByteData(
+                format: ui.ImageByteFormat.png,
+              );
+              await Directory(destination).create(recursive: true);
+              await File(
+                '$destination/recovery-${brightness.name}-$stage.png',
+              ).writeAsBytes(bytes!.buffer.asUint8List());
+            } finally {
+              image.dispose();
+            }
+          });
+        }
+
+        await capture('page');
+        await tester.tap(button);
+        await tester.pumpAndSettle();
+        expect(find.text('2 chats · 42 messages'), findsWidgets);
+        expect(
+          tester.getRect(find.byType(AlertDialog)).right,
+          lessThanOrEqualTo(390),
+        );
+        expect(tester.takeException(), isNull);
+        await capture('picker');
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+      });
+    }
+
+    testWidgets(
+      'offers snapshots before diagnostics and confirms before restore',
+      (tester) async {
+        await tester.runAsync(
+          () => writeSnapshot(DateTime(2026, 9, 10, 12).toUtc(), 42),
+        );
+        await pumpScreen(tester);
+        await settleDiagnostics(tester);
+        expect(find.text('Choose a copy to recover'), findsOneWidget);
+        expect(
+          tester.getTopLeft(find.text('Choose a copy to recover')).dy,
+          lessThan(tester.getTopLeft(find.text('Show technical details')).dy),
+        );
+        await tester.tap(find.text('Choose a copy to recover'));
+        await tester.pumpAndSettle();
+        expect(find.text('2 chats · 42 messages'), findsWidgets);
+        await tester.tap(find.text('2 chats · 42 messages').last);
+        await tester.pumpAndSettle();
+        expect(find.text('Restore this copy?'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.textContaining('2026-09-10 12:00'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining('Changes made after this snapshot'),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(find.text('Restore this copy?'), findsNothing);
+        expect(
+          Directory('${directory.path}/.kelivo_restore').existsSync(),
+          isFalse,
+        );
+        expect(
+          Directory('${directory.path}/snapshots').listSync(),
+          hasLength(2),
+        );
+      },
+    );
+
+    testWidgets('offers older chats before a newer empty snapshot', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        await writeSnapshot(DateTime.utc(2026, 10, 19), 42);
+        final newer = LocalSnapshotPaths.fileNameFor(
+          DateTime.utc(2026, 10, 20),
+        );
+        await writeRecoverySnapshot(
+          File('${directory.path}/snapshots/$newer'),
+          conversations: 0,
+          messages: 0,
+        );
+      });
+      await pumpScreen(tester);
+      await tester.tap(find.text('Choose a copy to recover'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(find.text('2 chats · 42 messages').last).dy,
+        lessThan(tester.getTopLeft(find.text('0 chats · 0 messages')).dy),
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets(
+      'failed snapshot validation stays on recovery and allows retry',
+      (tester) async {
+        await tester.runAsync(
+          () => writeSnapshot(DateTime.utc(2026, 9, 10), 42),
+        );
+        useTallSurface(tester);
+        var restarts = 0;
+        await tester.pumpWidget(
+          wrap(
+            RestoreFailureScreen(
+              report: reportFor(StateError('database_missing')),
+              restart: () async {
+                restarts++;
+              },
+              appDataDirectory: directory,
+              appVersionLoader: stubVersion,
+            ),
+          ),
+        );
+        await settleDiagnostics(tester);
+        await tester.runAsync(() async {
+          final archive = Directory('${directory.path}/snapshots')
+              .listSync()
+              .whereType<File>()
+              .firstWhere((file) => file.path.endsWith('.zip'));
+          await archive.writeAsString('archive changed after validation');
+        });
+        final chooseButton = tester.widget<FilledButton>(
+          find.ancestor(
+            of: find.text('Choose a copy to recover'),
+            matching: find.byWidgetPredicate(
+              (widget) => widget is FilledButton,
+            ),
+          ),
+        );
+        late Future<void> restore;
+        await tester.runAsync(() async {
+          // Invoke the same action once, retaining its completion so the test
+          // waits for validation and cleanup rather than a fixed I/O budget.
+          restore = (chooseButton.onPressed! as Future<void> Function())();
+        });
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('2 chats · 42 messages').last);
+        await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Restore'));
+        await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+        await tester.pump();
+        expect(find.text('Preparing copy'), findsOneWidget);
+        await tester.runAsync(
+          () => restore.timeout(const Duration(seconds: 10)),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('The restore could not be completed'),
+          findsOneWidget,
+        );
+        expect(find.text('Choose a copy to recover'), findsOneWidget);
+        expect(restarts, 0);
+        expect(
+          Directory('${directory.path}/.kelivo_restore').existsSync(),
+          isFalse,
+        );
+      },
+    );
+
+    testWidgets(
+      'explains when no snapshot exists without offering an empty picker',
+      (tester) async {
+        await pumpScreen(tester);
+        await settleDiagnostics(tester);
+        expect(
+          find.textContaining('No database snapshots were found'),
+          findsOneWidget,
+        );
+        expect(find.text('Choose a copy to recover'), findsNothing);
+      },
+    );
+
+    testWidgets('hides snapshot recovery while another process owns the data', (
+      tester,
+    ) async {
+      await tester.runAsync(() => writeSnapshot(DateTime.utc(2026, 9, 10), 42));
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        wrap(
+          RestoreFailureScreen(
+            report: reportFor(StateError('RestoreBusinessLeaseUnavailable')),
+            restart: () async {},
+            appDataDirectory: directory,
+            appVersionLoader: stubVersion,
+          ),
+        ),
+      );
+      await settleDiagnostics(tester);
+      expect(find.text('Choose a copy to recover'), findsNothing);
+      expect(find.text('Restore from a database snapshot'), findsNothing);
+    });
+
+    testWidgets('offers salvage before repair and hides reset', (tester) async {
+      await pumpScreen(tester);
+
+      expect(find.text('Export a copy of my data'), findsOneWidget);
+      expect(find.text('Check database integrity'), findsNothing);
+      expect(find.text('Repair and restart'), findsNothing);
+      await tester.tap(find.text('Show technical details'));
+      await tester.pumpAndSettle();
+      expect(find.text('Check database integrity'), findsOneWidget);
+      expect(find.text('Repair and restart'), findsOneWidget);
+      // Reset must never be one stray tap away.
+      expect(find.text('Start with an empty chat list'), findsNothing);
+
+      await tester.tap(find.text('Other options'));
+      await tester.pumpAndSettle();
+      expect(find.text('Start with an empty chat list'), findsOneWidget);
+    });
+
+    testWidgets('keeps reset behind an explicit acknowledgement', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      await tester.tap(find.text('Other options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start with an empty chat list'));
+      await tester.pumpAndSettle();
+
+      final confirm = find.widgetWithText(
+        TextButton,
+        'Keep copies and start fresh',
+      );
+      expect(confirm, findsOneWidget);
+      expect(tester.widget<TextButton>(confirm).onPressed, isNull);
+
+      await tester.tap(find.byType(Checkbox));
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextButton>(confirm).onPressed, isNotNull);
+    });
+
+    testWidgets('persists the report so the failure survives a restart', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      await settleDiagnostics(tester);
+
+      final logs = Directory('${directory.path}/logs');
+      final reports = logs
+          .listSync()
+          .whereType<File>()
+          .where((file) => file.path.contains('startup_failure_'))
+          .toList();
+      expect(reports, hasLength(1));
+      expect(
+        reports.single.readAsStringSync(),
+        contains('database_identity_mismatch'),
+      );
+    });
+  });
+}

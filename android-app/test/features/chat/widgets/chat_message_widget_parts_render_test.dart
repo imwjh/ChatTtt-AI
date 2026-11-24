@@ -1,0 +1,1056 @@
+import '../../../support/markdown_render_helpers.dart';
+import '../../../support/business_test_harness.dart';
+import 'package:Kelivo/core/models/chat_message.dart';
+import 'package:Kelivo/core/models/message_part.dart';
+import 'package:Kelivo/core/models/message_part_snapshot.dart';
+import 'package:Kelivo/core/models/token_usage.dart';
+import 'package:Kelivo/core/providers/settings_provider.dart';
+import 'package:Kelivo/core/providers/tts_provider.dart';
+import 'package:Kelivo/features/chat/pages/image_viewer_page.dart';
+import 'package:Kelivo/features/chat/widgets/chat_message_widget.dart';
+import 'package:Kelivo/features/chat/services/conversation_find_service.dart';
+import 'package:Kelivo/shared/markdown/markdown_with_code_highlight.dart';
+import 'package:Kelivo/shared/widgets/app_selection_area.dart';
+import 'package:Kelivo/features/chat/widgets/quote_source_anchor.dart';
+import 'package:markstream/markstream.dart' show MarkstreamSelectionScope;
+import 'package:Kelivo/features/chat/widgets/timeline_projection.dart';
+import 'package:Kelivo/features/chat/widgets/token_display_widget.dart';
+import 'package:Kelivo/features/home/controllers/stream_controller.dart';
+import 'package:Kelivo/features/home/services/ask_user_interaction_service.dart';
+import 'package:Kelivo/features/home/services/tool_approval_service.dart';
+import 'package:Kelivo/l10n/app_localizations.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+Widget _buildHarness({
+  required Widget child,
+  Brightness brightness = Brightness.light,
+  SettingsProvider? settings,
+}) {
+  SharedPreferences.setMockInitialValues(const {});
+  return MultiProvider(
+    providers: [
+      ChangeNotifierProvider(
+        create: (_) =>
+            settings ?? SettingsProvider(createBusinessTestPreferences()),
+      ),
+      ChangeNotifierProvider(
+        create: (_) =>
+            TtsProvider(preferences: createBusinessTestPreferences()),
+      ),
+      ChangeNotifierProvider(create: (_) => ToolApprovalService()),
+      ChangeNotifierProvider(create: (_) => AskUserInteractionService()),
+    ],
+    child: MaterialApp(
+      theme: ThemeData(brightness: brightness),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(body: child),
+    ),
+  );
+}
+
+void expectAbove(WidgetTester tester, Object upper, Object lower) {
+  double top(Object item) {
+    if (item is String) {
+      final paragraphs = renderedParagraphsWith(item);
+      expect(paragraphs, isNotEmpty, reason: item);
+      return paragraphs.first.localToGlobal(Offset.zero).dy;
+    }
+    final finder = item as Finder;
+    expect(finder, findsWidgets);
+    return tester.getTopLeft(finder.first).dy;
+  }
+
+  expect(top(upper), lessThan(top(lower)));
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets(
+    'pending tools use bounded status animation and settle on finish',
+    (tester) async {
+      Widget message(bool loading) => _buildHarness(
+        child: ChatMessageWidget(
+          message: ChatMessage(
+            id: 'waiting-tool',
+            role: 'assistant',
+            conversationId: 'c',
+            content: '',
+            isStreaming: loading,
+          ),
+          showModelIcon: false,
+          toolParts: [
+            ToolUIPart(
+              id: 'remote-tool',
+              toolName: 'remote_lookup',
+              arguments: const {'query': 'test'},
+              loading: loading,
+              content: loading ? null : 'Finished',
+            ),
+          ],
+        ),
+      );
+      await tester.pumpWidget(message(true));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(LoadingIndicator), findsWidgets);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      await tester.pump(const Duration(milliseconds: 40));
+      expect(tester.binding.transientCallbackCount, 0);
+      expect(tester.binding.hasScheduledFrame, isFalse);
+      await tester.pumpWidget(message(false));
+      await tester.pumpAndSettle();
+      expect(find.byType(LoadingIndicator), findsNothing);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(tester.binding.hasScheduledFrame, isFalse);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('empty reasoning card follows activity without text changes', (
+    tester,
+  ) async {
+    final parts = MessagePartSnapshotBuilder(
+      arrivalOrdered: true,
+    ).update(const [ReasoningPart('')]);
+    final startedAt = DateTime.now();
+    var loading = true;
+    late StateSetter update;
+    await tester.pumpWidget(
+      _buildHarness(
+        child: StatefulBuilder(
+          builder: (context, setState) {
+            update = setState;
+            return ChatMessageWidget(
+              message: ChatMessage(
+                id: 'empty-reasoning',
+                role: 'assistant',
+                conversationId: 'c',
+                isStreaming: true,
+                parts: parts,
+              ),
+              showModelIcon: false,
+              reasoningSegments: [
+                ReasoningSegment(
+                  text: '',
+                  expanded: false,
+                  loading: loading,
+                  startAt: startedAt,
+                  finishedAt: loading
+                      ? null
+                      : startedAt.add(const Duration(seconds: 1)),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    final context = tester.element(find.byType(ChatMessageWidget));
+    final label = AppLocalizations.of(context)!.chatMessageWidgetDeepThinking;
+    expect(find.text(label), findsOneWidget);
+    update(() => loading = false);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text(label), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('token footer switches between finish and total usage', (
+    tester,
+  ) async {
+    final settings = SettingsProvider(createBusinessTestPreferences());
+    await settings.loaded;
+    final message = ChatMessage(
+      role: 'assistant',
+      conversationId: 'c',
+      content: 'done',
+      totalTokens: 350,
+      promptTokens: 300,
+      completionTokens: 50,
+      cachedTokens: 70,
+      cacheWriteTokens: 30,
+      reasoningTokens: 5,
+      durationMs: 5000,
+      firstResponseMs: 100,
+      firstTokenMs: 250,
+      finishUsage: const TokenUsage(
+        promptTokens: 200,
+        completionTokens: 30,
+        cachedTokens: 60,
+      ),
+    );
+    await tester.pumpWidget(
+      _buildHarness(
+        settings: settings,
+        child: ChatMessageWidget(message: message, showModelIcon: false),
+      ),
+    );
+    await tester.pumpAndSettle();
+    for (final enabled in [false, true, false]) {
+      await settings.setShowTotalTokens(enabled);
+      await tester.pumpAndSettle();
+      final display = tester.widget<TokenDisplayWidget>(
+        find.byType(TokenDisplayWidget),
+      );
+      expect(display.totalTokens, enabled ? 350 : 230);
+      expect(display.promptTokens, enabled ? 300 : 200);
+      expect(display.completionTokens, enabled ? 50 : 30);
+      expect(display.cachedTokens, enabled ? 70 : 60);
+      expect(display.cacheWriteTokens, enabled ? 30 : 0);
+      expect(display.reasoningTokens, enabled ? 5 : 0);
+      expect(display.durationMs, 5000);
+      expect(display.firstResponseMs, 100);
+      expect(display.firstTokenMs, 250);
+      expect(display.totalCompletionTokens, 50);
+      expect(message.totalTokens, 350);
+    }
+  });
+
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'second thought starts collapsed and toggles independently in $brightness',
+      (tester) async {
+        tester.view.physicalSize = const Size(1170, 2400);
+        tester.view.devicePixelRatio = 3;
+        addTearDown(tester.view.reset);
+        late StateSetter rebuild;
+        var firstExpanded = false;
+        var reply = 'FINAL_REPLY';
+        await tester.pumpWidget(
+          _buildHarness(
+            brightness: brightness,
+            child: StatefulBuilder(
+              builder: (context, setState) {
+                rebuild = setState;
+                return SingleChildScrollView(
+                  child: ChatMessageWidget(
+                    message: ChatMessage(
+                      id: 'background-tool-reasoning',
+                      role: 'assistant',
+                      conversationId: 'c1',
+                      parts: [
+                        const ReasoningPart('FIRST_THOUGHT'),
+                        const ToolCallPart(
+                          '{"id":"search-1","name":"search","arguments":{},"content":"Found it"}',
+                        ),
+                        const ReasoningPart('SECOND_THOUGHT'),
+                        TextPart(reply),
+                      ],
+                    ),
+                    showModelIcon: false,
+                    reasoningSegments: [
+                      ReasoningSegment(
+                        text: 'FIRST_THOUGHT',
+                        expanded: firstExpanded,
+                        loading: false,
+                        onToggle: () =>
+                            setState(() => firstExpanded = !firstExpanded),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(renderedParagraphsWith('FIRST_THOUGHT', exact: true), isEmpty);
+        expect(renderedParagraphsWith('SECOND_THOUGHT', exact: true), isEmpty);
+        final thoughts = find.text('Deep Thinking');
+        expect(thoughts, findsNWidgets(2));
+        final before = markdownParagraph(
+          tester,
+          'FINAL_REPLY',
+        ).localToGlobal(Offset.zero).dy;
+        await tester.tap(thoughts.last);
+        await tester.pumpAndSettle();
+        expect(
+          renderedParagraphsWith('SECOND_THOUGHT', exact: true),
+          hasLength(1),
+        );
+        expect(
+          markdownParagraph(
+            tester,
+            'FINAL_REPLY',
+          ).localToGlobal(Offset.zero).dy,
+          greaterThan(before),
+        );
+        // A parent update must not undo the second segment's local toggle.
+        rebuild(() => reply = 'UPDATED_REPLY');
+        await tester.pumpAndSettle();
+        expect(
+          renderedParagraphsWith('SECOND_THOUGHT', exact: true),
+          hasLength(1),
+        );
+        await tester.tap(thoughts.last);
+        await tester.pumpAndSettle();
+        expect(renderedParagraphsWith('SECOND_THOUGHT', exact: true), isEmpty);
+        expect(
+          markdownParagraph(
+            tester,
+            'UPDATED_REPLY',
+          ).localToGlobal(Offset.zero).dy,
+          before,
+        );
+        await tester.tap(thoughts.first);
+        await tester.pumpAndSettle();
+        expect(
+          renderedParagraphsWith('FIRST_THOUGHT', exact: true),
+          hasLength(1),
+        );
+        expect(renderedParagraphsWith('SECOND_THOUGHT', exact: true), isEmpty);
+        await tester.tap(thoughts.last);
+        await tester.pumpAndSettle();
+        expect(
+          renderedParagraphsWith('SECOND_THOUGHT', exact: true),
+          hasLength(1),
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('historical contentSplits still render reasoning then text', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildHarness(
+        child: ChatMessageWidget(
+          message: ChatMessage(
+            id: 'legacy-splits',
+            role: 'assistant',
+            content: 'hello',
+            conversationId: 'c1',
+          ),
+          showModelIcon: false,
+          reasoningSegments: const [
+            ReasoningSegment(text: 'plan', expanded: true, loading: false),
+          ],
+          contentSplitOffsets: const [0],
+          reasoningCountAtSplit: const [1],
+          toolCountAtSplit: const [0],
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expectAbove(tester, 'plan', 'hello');
+  });
+
+  testWidgets('historical interleaved splits keep text around thinking', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildHarness(
+        child: ChatMessageWidget(
+          message: ChatMessage(
+            id: 'legacy-interleave',
+            role: 'assistant',
+            content: 'beforeAFTER',
+            conversationId: 'c1',
+          ),
+          showModelIcon: false,
+          reasoningSegments: const [
+            ReasoningSegment(text: 'plan', expanded: true, loading: false),
+          ],
+          contentSplitOffsets: const [6],
+          reasoningCountAtSplit: const [1],
+          toolCountAtSplit: const [0],
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expectAbove(tester, 'before', 'plan');
+    expectAbove(tester, 'plan', 'AFTER');
+  });
+
+  testWidgets(
+    'empty timeline with ToolCallPart falls back to parts when splits exist',
+    (tester) async {
+      await tester.pumpWidget(
+        _buildHarness(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'empty-timeline-tools',
+              role: 'assistant',
+              conversationId: 'c1',
+              parts: const [
+                ToolCallPart(
+                  '{"id":"c1","name":"lookup","arguments":{},"content":"ok"}',
+                ),
+                TextPart('BODY_HELLO'),
+              ],
+            ),
+            showModelIcon: false,
+            contentSplitOffsets: const [0],
+            reasoningCountAtSplit: const [1],
+            toolCountAtSplit: const [0],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expectAbove(tester, 'lookup', 'BODY_HELLO');
+    },
+  );
+
+  testWidgets(
+    'empty timeline with ImagePart keeps image ordinal above the body',
+    (tester) async {
+      const imageUrl = 'https://example.com/empty-timeline.png';
+      await tester.pumpWidget(
+        _buildHarness(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'empty-timeline-image',
+              role: 'assistant',
+              conversationId: 'c1',
+              parts: const [
+                ImagePart(uri: imageUrl),
+                TextPart('BODY_HELLO'),
+              ],
+            ),
+            showModelIcon: false,
+            contentSplitOffsets: const [0],
+            reasoningCountAtSplit: const [1],
+            toolCountAtSplit: const [0],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(
+          const ValueKey('assistant-message-attachments:empty-timeline-image'),
+        ),
+        findsNothing,
+      );
+      expectAbove(tester, find.byType(Image), 'BODY_HELLO');
+    },
+  );
+
+  testWidgets('structured parts render reasoning, text, and tool in order', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildHarness(
+        child: ChatMessageWidget(
+          message: ChatMessage(
+            id: 'structured-parts',
+            role: 'assistant',
+            conversationId: 'c1',
+            parts: const [
+              ReasoningPart('plan'),
+              TextPart('hello'),
+              ToolCallPart(
+                '{"id":"c1","name":"lookup","arguments":{},"content":"ok"}',
+              ),
+              TextPart('done'),
+            ],
+          ),
+          showModelIcon: false,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(renderedParagraphsWith('plan', exact: true), isEmpty);
+    await tester.tap(find.text('Deep Thinking'));
+    await tester.pumpAndSettle();
+
+    expectAbove(tester, 'plan', 'hello');
+    expectAbove(tester, 'hello', 'lookup');
+    expectAbove(tester, 'lookup', 'done');
+  });
+
+  testWidgets(
+    'translation and thinking use the same Markdown document for selection and find',
+    (tester) async {
+      await tester.pumpWidget(
+        _buildHarness(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'selectable',
+              role: 'assistant',
+              conversationId: 'c1',
+              parts: const [ReasoningPart('**plan**'), TextPart('answer')],
+              translation: '**translated**',
+            ),
+            showModelIcon: false,
+          ),
+        ),
+      );
+      await tester.tap(find.text('Deep Thinking'));
+      await tester.pumpAndSettle();
+      for (final part in [FindPart.reasoning, FindPart.translation]) {
+        final anchor = find.byWidgetPredicate(
+          (w) => w is QuoteSourceAnchor && w.findPart == part,
+        );
+        final area = find.descendant(
+          of: anchor,
+          matching: find.byType(AppSelectionArea),
+        );
+        final markdown = find.descendant(
+          of: area,
+          matching: find.byType(MarkdownWithCodeHighlight),
+        );
+        expect(area, findsOneWidget);
+        expect(markdown, findsOneWidget);
+        final selection = tester
+            .element(area)
+            .getInheritedWidgetOfExactType<MarkstreamSelectionScope>()!;
+        final document = tester
+            .element(markdown)
+            .getInheritedWidgetOfExactType<MarkstreamSelectionScope>()!;
+        expect(document.controller, same(selection.controller));
+      }
+    },
+  );
+
+  testWidgets(
+    'empty contentSplits without structured parts keep thinking above body',
+    (tester) async {
+      await tester.pumpWidget(
+        _buildHarness(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'legacy-empty-splits',
+              role: 'assistant',
+              content: 'BODY_HELLO',
+              conversationId: 'c1',
+            ),
+            showModelIcon: false,
+            reasoningSegments: const [
+              ReasoningSegment(
+                text: 'THINK_PLAN',
+                expanded: true,
+                loading: false,
+              ),
+            ],
+            contentSplitOffsets: const [],
+            reasoningCountAtSplit: const [],
+            toolCountAtSplit: const [],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expectAbove(tester, 'THINK_PLAN', 'BODY_HELLO');
+    },
+  );
+
+  testWidgets('empty contentSplits keep reasoning above body', (tester) async {
+    await tester.pumpWidget(
+      _buildHarness(
+        child: ChatMessageWidget(
+          message: ChatMessage(
+            id: 'empty-splits',
+            role: 'assistant',
+            content: 'BODY_HELLO',
+            conversationId: 'c1',
+            parts: const [ReasoningPart('THINK_PLAN'), TextPart('BODY_HELLO')],
+          ),
+          showModelIcon: false,
+          contentSplitOffsets: const [],
+          reasoningCountAtSplit: const [],
+          toolCountAtSplit: const [],
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(renderedParagraphsWith('THINK_PLAN', exact: true), isEmpty);
+    await tester.tap(find.text('Deep Thinking'));
+    await tester.pumpAndSettle();
+
+    expectAbove(tester, 'THINK_PLAN', 'BODY_HELLO');
+  });
+
+  String toolNameAt(int index, int count) {
+    if (index == 1) return 'alpha_search';
+    if (index == count) return 'omega_search';
+    return 'mid_search_$index';
+  }
+
+  List<ToolUIPart> tools(int count) => [
+    for (var i = 1; i <= count; i++)
+      ToolUIPart(
+        id: 'tool-$i',
+        toolName: toolNameAt(i, count),
+        arguments: const {},
+        content: 'ok',
+      ),
+  ];
+
+  List<MessagePart> toolPartsThenBody(int count) => [
+    const ReasoningPart('THINK_PLAN'),
+    for (var i = 1; i <= count; i++)
+      ToolCallPart(
+        '{"id":"tool-$i","name":"${toolNameAt(i, count)}","arguments":{},"content":"ok"}',
+      ),
+    const TextPart('BODY_HELLO'),
+  ];
+
+  testWidgets('incomplete 17-tool splits keep leftover cards above the body', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildHarness(
+        child: SingleChildScrollView(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'incomplete-splits-17',
+              role: 'assistant',
+              content: 'BODY_HELLO',
+              conversationId: 'c1',
+            ),
+            showModelIcon: false,
+            reasoningSegments: const [
+              ReasoningSegment(
+                text: 'THINK_PLAN',
+                expanded: true,
+                loading: false,
+              ),
+            ],
+            toolParts: tools(17),
+            contentSplitOffsets: const [0],
+            reasoningCountAtSplit: const [1],
+            toolCountAtSplit: const [7],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expectAbove(tester, 'omega_search', 'BODY_HELLO');
+  });
+
+  testWidgets('incomplete 24-tool splits keep leftover cards above the body', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildHarness(
+        child: SingleChildScrollView(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'incomplete-splits-24',
+              role: 'assistant',
+              content: 'BODY_HELLO',
+              conversationId: 'c1',
+            ),
+            showModelIcon: false,
+            reasoningSegments: const [
+              ReasoningSegment(
+                text: 'THINK_PLAN',
+                expanded: true,
+                loading: false,
+              ),
+            ],
+            toolParts: tools(24),
+            contentSplitOffsets: const [0],
+            reasoningCountAtSplit: const [1],
+            toolCountAtSplit: const [18],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expectAbove(tester, 'omega_search', 'BODY_HELLO');
+  });
+
+  testWidgets(
+    'incomplete splits with structured parts keep leftover cards above the body',
+    (tester) async {
+      await tester.pumpWidget(
+        _buildHarness(
+          child: SingleChildScrollView(
+            child: ChatMessageWidget(
+              message: ChatMessage(
+                id: 'incomplete-splits-parts',
+                role: 'assistant',
+                conversationId: 'c1',
+                parts: toolPartsThenBody(17),
+              ),
+              showModelIcon: false,
+              reasoningSegments: const [
+                ReasoningSegment(
+                  text: 'THINK_PLAN',
+                  expanded: true,
+                  loading: false,
+                ),
+              ],
+              toolParts: tools(17),
+              contentSplitOffsets: const [0],
+              reasoningCountAtSplit: const [1],
+              toolCountAtSplit: const [7],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expectAbove(tester, 'omega_search', 'BODY_HELLO');
+    },
+  );
+
+  testWidgets('overflowing split offsets fall back to thinking above body', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildHarness(
+        child: ChatMessageWidget(
+          message: ChatMessage(
+            id: 'overflow-offset',
+            role: 'assistant',
+            content: 'hello',
+            conversationId: 'c1',
+          ),
+          showModelIcon: false,
+          reasoningSegments: const [
+            ReasoningSegment(text: 'plan', expanded: true, loading: false),
+          ],
+          contentSplitOffsets: const [11],
+          reasoningCountAtSplit: const [1],
+          toolCountAtSplit: const [0],
+        ),
+      ),
+    );
+    await tester.pump();
+    expectAbove(tester, 'plan', 'hello');
+  });
+
+  testWidgets(
+    'complete historical tool splits keep leftover cards interleaved',
+    (tester) async {
+      await tester.pumpWidget(
+        _buildHarness(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'complete-tools',
+              role: 'assistant',
+              content: 'beforeAFTER',
+              conversationId: 'c1',
+            ),
+            showModelIcon: false,
+            reasoningSegments: const [
+              ReasoningSegment(text: 'plan', expanded: true, loading: false),
+            ],
+            toolParts: tools(2),
+            contentSplitOffsets: const [6],
+            reasoningCountAtSplit: const [1],
+            toolCountAtSplit: const [2],
+          ),
+        ),
+      );
+      await tester.pump();
+      expectAbove(tester, 'before', 'plan');
+      expectAbove(tester, 'omega_search', 'AFTER');
+    },
+  );
+
+  testWidgets('illegal contentSplits fall back to parts order', (tester) async {
+    Future<void> pumpIllegal({
+      required List<int> offsets,
+      required List<int> reasoning,
+      required List<int> tools,
+    }) async {
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(
+        _buildHarness(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'illegal-splits',
+              role: 'assistant',
+              content: 'BODY_HELLO',
+              conversationId: 'c1',
+              parts: const [
+                ReasoningPart('THINK_PLAN'),
+                TextPart('BODY_HELLO'),
+              ],
+            ),
+            showModelIcon: false,
+            contentSplitOffsets: offsets,
+            reasoningCountAtSplit: reasoning,
+            toolCountAtSplit: tools,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(renderedParagraphsWith('THINK_PLAN', exact: true), isEmpty);
+      await tester.tap(find.text('Deep Thinking'));
+      await tester.pumpAndSettle();
+      expectAbove(tester, 'THINK_PLAN', 'BODY_HELLO');
+    }
+
+    await pumpIllegal(
+      offsets: const [0],
+      reasoning: const [1, 2],
+      tools: const [0],
+    );
+    await pumpIllegal(
+      offsets: const [-1],
+      reasoning: const [1],
+      tools: const [0],
+    );
+    await pumpIllegal(
+      offsets: const [0, 3],
+      reasoning: const [2, 1],
+      tools: const [0, 0],
+    );
+  });
+
+  testWidgets('OpenRouter Claude persist-reload keeps thinking above the body', (
+    tester,
+  ) async {
+    final settings = SettingsProvider(createBusinessTestPreferences());
+    final writer = StreamController(
+      onStateChanged: () {},
+      getSettingsProvider: () => settings,
+      getCurrentConversationId: () => 'c1',
+    );
+    final segment = ReasoningSegmentData()
+      ..text = 'THINK_PLAN'
+      ..expanded = true
+      ..toolStartIndex = 0;
+    final persisted = writer.serializeReasoningSegmentsWithSplits(
+      [segment],
+      reasoningDetails: const [
+        {
+          'id': 'rd_1',
+          'type': 'reasoning.encrypted',
+          'data': 'sig',
+          'format': 'anthropic-claude-v1',
+        },
+      ],
+    );
+
+    const staleEmptySplits =
+        '{"v":2,"segments":[{"text":"THINK_PLAN","expanded":true,"toolStartIndex":0}],"contentSplits":{"offsets":[],"reasoningCounts":[],"toolCounts":[]},"reasoningDetails":[{"id":"rd_1","type":"reasoning.encrypted","data":"sig","format":"anthropic-claude-v1"}]}';
+
+    for (final json in [persisted, staleEmptySplits]) {
+      final reader = StreamController(
+        onStateChanged: () {},
+        getSettingsProvider: () => settings,
+        getCurrentConversationId: () => 'c1',
+      );
+      final message = ChatMessage(
+        id: 'or-claude',
+        role: 'assistant',
+        content: 'BODY_HELLO',
+        conversationId: 'c1',
+        reasoningSegmentsJson: json,
+        parts: const [ReasoningPart('THINK_PLAN'), TextPart('BODY_HELLO')],
+      );
+      reader.restoreMessageUiState(
+        message,
+        getToolEventsFromDb: (_) => const [],
+      );
+      expect(reader.getContentSplitData(message.id), isNull);
+
+      final splits = reader.getContentSplitData(message.id);
+      await tester.pumpWidget(
+        _buildHarness(
+          child: ChatMessageWidget(
+            message: message,
+            showModelIcon: false,
+            reasoningSegments: reader
+                .getReasoningSegments(message.id)
+                ?.map(
+                  (s) => ReasoningSegment(
+                    text: s.text,
+                    expanded: true,
+                    loading: false,
+                  ),
+                )
+                .toList(),
+            contentSplitOffsets: splits?.offsets,
+            reasoningCountAtSplit: splits?.reasoningCounts,
+            toolCountAtSplit: splits?.toolCounts,
+          ),
+        ),
+      );
+      await tester.pump();
+      expectAbove(tester, 'THINK_PLAN', 'BODY_HELLO');
+      reader.dispose();
+    }
+    writer.dispose();
+  });
+
+  testWidgets('ChatBox imported reasoning-then-text parts render both blocks', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildHarness(
+        child: ChatMessageWidget(
+          message: ChatMessage(
+            id: 'chatbox-reasoning',
+            role: 'assistant',
+            conversationId: 'c1',
+            parts: const [
+              ReasoningPart('first thought\nsecond thought'),
+              TextPart('Because.'),
+            ],
+          ),
+          showModelIcon: false,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(renderedParagraphsWith('first thought', exact: false), isEmpty);
+    await tester.tap(find.text('Deep Thinking'));
+    await tester.pumpAndSettle();
+
+    expect(renderedParagraphsWith('first thought', exact: false), isNotEmpty);
+    expect(renderedParagraphsWith('second thought', exact: false), isNotEmpty);
+    expect(renderedParagraphsWith('Because.', exact: false), isNotEmpty);
+  });
+
+  testWidgets(
+    'ChatBox imported text-reasoning-text loads as thinking then body',
+    (tester) async {
+      await tester.pumpWidget(
+        _buildHarness(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'chatbox-split',
+              role: 'assistant',
+              conversationId: 'c1',
+              parts: const [
+                ReasoningPart('think'),
+                TextPart('before'),
+                TextPart('\nafter'),
+              ],
+            ),
+            showModelIcon: false,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(renderedParagraphsWith('think', exact: false), isEmpty);
+      await tester.tap(find.text('Deep Thinking'));
+      await tester.pumpAndSettle();
+
+      expect(renderedParagraphsWith('think', exact: false), isNotEmpty);
+      expect(renderedParagraphsWith('before', exact: false), isNotEmpty);
+      expect(renderedParagraphsWith('after', exact: false), isNotEmpty);
+    },
+  );
+
+  testWidgets(
+    'structured image restores viewer, aspect, bubble, and ResizeImage',
+    (tester) async {
+      const png =
+          'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD5N/qhAAAAEklEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      await tester.pumpWidget(
+        _buildHarness(
+          child: ChatMessageWidget(
+            message: ChatMessage(
+              id: 'structured-image',
+              role: 'assistant',
+              conversationId: 'c1',
+              parts: const [
+                ReasoningPart('plan'),
+                ImagePart(uri: png),
+                TextPart('caption'),
+              ],
+            ),
+            showModelIcon: false,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(
+        find.byKey(
+          const ValueKey('assistant-message-attachments:structured-image'),
+        ),
+        findsNothing,
+      );
+      final image = tester.widget<Image>(find.byType(Image).first);
+      expect(image.height, isNot(kTimelineImageBlockHeight));
+      expect(image.image, isA<ResizeImage>());
+      expect(find.byType(ImageViewerPage), findsNothing);
+
+      await tester.tap(
+        find.byKey(const ValueKey('assistant-inline-image:image-ordinal:0')),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(ImageViewerPage), findsOneWidget);
+    },
+  );
+
+  testWidgets('structured image plus valid splits keeps arrival order', (
+    tester,
+  ) async {
+    const imageUrl = 'https://example.com/inline.png';
+    await tester.pumpWidget(
+      _buildHarness(
+        child: ChatMessageWidget(
+          message: ChatMessage(
+            id: 'structured-image-splits',
+            role: 'assistant',
+            content: 'caption',
+            conversationId: 'c1',
+            parts: const [
+              ReasoningPart('plan'),
+              ImagePart(uri: imageUrl),
+              TextPart('caption'),
+            ],
+          ),
+          showModelIcon: false,
+          reasoningSegments: const [
+            ReasoningSegment(text: 'plan', expanded: true, loading: false),
+          ],
+          contentSplitOffsets: const [0],
+          reasoningCountAtSplit: const [1],
+          toolCountAtSplit: const [0],
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final attachmentsFinder = find.byKey(
+      const ValueKey('assistant-message-attachments:structured-image-splits'),
+    );
+    expect(attachmentsFinder, findsOneWidget);
+    expect(
+      find.descendant(of: attachmentsFinder, matching: find.byType(Image)),
+      findsOneWidget,
+    );
+    expectAbove(tester, 'plan', 'caption');
+  });
+
+  testWidgets('standalone builtin_search historical message stays visible', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildHarness(
+        child: ChatMessageWidget(
+          message: ChatMessage(
+            id: 'chatbox-search',
+            role: 'tool',
+            conversationId: 'c1',
+            content: '{"tool":"builtin_search","arguments":{},"result":"hits"}',
+          ),
+          showToolCards: true,
+          showModelIcon: false,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      renderedParagraphsWith('Built-in Search', exact: false),
+      hasLength(1),
+    );
+    expect(
+      tester.getSize(find.byType(ChatMessageWidget)).height,
+      greaterThan(20),
+    );
+  });
+}

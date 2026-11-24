@@ -1,0 +1,842 @@
+import '../features/provider/utils/provider_url_editor.dart';
+import '../features/provider/widgets/provider_base_url_field.dart';
+import '../features/provider/widgets/oauth_login_panel.dart';
+import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:file_picker/file_picker.dart';
+import '../shared/widgets/ios_switch.dart';
+
+import '../l10n/app_localizations.dart';
+import '../icons/lucide_adapter.dart' as lucide;
+import '../core/providers/settings_provider.dart';
+import '../theme/app_font_weights.dart';
+import 'package:Kelivo/theme/app_semantic_colors.dart';
+
+Future<String?> showDesktopAddProviderDialog(BuildContext context) async {
+  String? result;
+  await showGeneralDialog<String?>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: 'add-provider-dialog',
+    barrierColor: Theme.of(context).colorScheme.scrim.withValues(alpha: 0.25),
+    pageBuilder: (ctx, _, __) => const _AddProviderDialogBody(),
+    transitionBuilder: (ctx, anim, _, child) {
+      final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
+      return FadeTransition(
+        opacity: curved,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.98, end: 1).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  ).then((v) => result = v);
+  return result;
+}
+
+class _AddProviderDialogBody extends StatefulWidget {
+  const _AddProviderDialogBody();
+  @override
+  State<_AddProviderDialogBody> createState() => _AddProviderDialogBodyState();
+}
+
+class _AddProviderDialogBodyState extends State<_AddProviderDialogBody>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tab = TabController(length: 4, vsync: this);
+
+  @override
+  void initState() {
+    super.initState();
+    _tab.addListener(_onTabChanged);
+  }
+
+  void _onTabChanged() {
+    if (mounted) setState(() {});
+  }
+
+  String? _createdProviderKey;
+  ProviderKind? _createdProviderKind;
+  late final Map<ProviderKind, ProviderUrlEditor> _urlEditors = {
+    ProviderKind.openai: ProviderUrlEditor(_openaiBase),
+    ProviderKind.google: ProviderUrlEditor(_googleBase),
+    ProviderKind.claude: ProviderUrlEditor(_claudeBase),
+  };
+  final _urlFields = {
+    for (final kind in ProviderKind.values)
+      kind: GlobalKey<ProviderBaseUrlFieldState>(),
+  };
+
+  Widget _baseUrlField(ProviderKind kind) {
+    final settings = context.read<SettingsProvider>();
+    final defaults = ProviderConfig.defaultsFor(switch (kind) {
+      ProviderKind.openai => 'OpenAI',
+      ProviderKind.google => 'Gemini',
+      ProviderKind.claude => 'Claude',
+    });
+    return ProviderBaseUrlField(
+      key: _urlFields[kind],
+      editor: _urlEditors[kind]!,
+      desktop: true,
+      enabled: !(kind == ProviderKind.google && _googleVertex),
+      defaultBaseUrl: defaults.baseUrl,
+      config: defaults.copyWith(
+        providerType: kind,
+        chatPath: _openaiPath.text,
+        useResponseApi: _openaiUseResponse,
+        vertexAI: _googleVertex,
+        location: _googleLocation.text,
+        projectId: _googleProject.text,
+      ),
+      onDetachedUndo: (bare, replaced) {
+        if (mounted) {
+          if (_urlEditors[kind]!.controller.text != replaced) return;
+          _urlEditors[kind]!.undoAutoVersion(kind);
+          setState(() {});
+        } else if (_createdProviderKey != null &&
+            _createdProviderKind == kind) {
+          undoSavedProviderUrl(settings, _createdProviderKey!, bare, replaced);
+        }
+      },
+      onCommit: (result) {
+        if (kind == ProviderKind.openai && result.movedPath != null) {
+          _openaiPath.text = result.movedPath!;
+        }
+        if (mounted) setState(() {});
+      },
+    );
+  }
+
+  // OpenAI
+  bool _openaiEnabled = true;
+  final TextEditingController _openaiName = TextEditingController(
+    text: 'OpenAI',
+  );
+  final TextEditingController _openaiKey = TextEditingController();
+  final TextEditingController _openaiBase = TextEditingController(
+    text: 'https://api.openai.com/v1',
+  );
+  final TextEditingController _openaiPath = TextEditingController(
+    text: '/chat/completions',
+  );
+  bool _openaiUseResponse = false;
+
+  // Google
+  bool _googleEnabled = true;
+  final TextEditingController _googleName = TextEditingController(
+    text: 'Google',
+  );
+  final TextEditingController _googleKey = TextEditingController();
+  final TextEditingController _googleBase = TextEditingController(
+    text: 'https://generativelanguage.googleapis.com/v1beta',
+  );
+  bool _googleVertex = false;
+  final TextEditingController _googleLocation = TextEditingController(
+    text: 'us-central1',
+  );
+  final TextEditingController _googleProject = TextEditingController();
+  final TextEditingController _googleSaJson = TextEditingController();
+
+  // Claude
+  bool _claudeEnabled = true;
+  final TextEditingController _claudeName = TextEditingController(
+    text: 'Claude',
+  );
+  final TextEditingController _claudeKey = TextEditingController();
+  final TextEditingController _claudeBase = TextEditingController(
+    text: 'https://api.anthropic.com/v1',
+  );
+
+  @override
+  void dispose() {
+    _tab.removeListener(_onTabChanged);
+    _tab.dispose();
+    for (final editor in _urlEditors.values) {
+      editor.dispose();
+    }
+    _openaiName.dispose();
+    _openaiKey.dispose();
+    _openaiBase.dispose();
+    _openaiPath.dispose();
+    _googleName.dispose();
+    _googleKey.dispose();
+    _googleBase.dispose();
+    _googleLocation.dispose();
+    _googleProject.dispose();
+    _googleSaJson.dispose();
+    _claudeName.dispose();
+    _claudeKey.dispose();
+    _claudeBase.dispose();
+    super.dispose();
+  }
+
+  InputDecoration _deskInputDecoration(BuildContext context, {String? hint}) {
+    final cs = Theme.of(context).colorScheme;
+    return InputDecoration(
+      isDense: true,
+      hintText: hint,
+      hintStyle: TextStyle(color: cs.onSurface.withValues(alpha: 0.32)),
+      filled: true,
+      fillColor: context.appColors.surfaceFill,
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(
+          color: cs.outlineVariant.withValues(alpha: 0.12),
+          width: 0.6,
+        ),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(
+          color: cs.outlineVariant.withValues(alpha: 0.12),
+          width: 0.6,
+        ),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(
+          color: cs.primary.withValues(alpha: 0.35),
+          width: 0.8,
+        ),
+      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+    );
+  }
+
+  Widget _label(BuildContext context, String text) => Padding(
+    padding: const EdgeInsets.only(bottom: 6),
+    child: Text(
+      text,
+      style: TextStyle(
+        fontSize: 13,
+        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.8),
+      ),
+    ),
+  );
+
+  Widget _switchTile({
+    required String label,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: context.appColors.surfaceFill,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Row(
+        children: [
+          Expanded(child: Text(label, style: TextStyle(fontSize: 13))),
+          IosSwitch(value: value, onChanged: onChanged),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _importGoogleServiceAccount() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['json'],
+        allowMultiple: false,
+      );
+      if (result == null || result.files.isEmpty) return;
+      final f = result.files.single.path;
+      if (f == null) return;
+      final text = await File(f).readAsString();
+      _googleSaJson.text = text;
+      try {
+        final obj = jsonDecode(text) as Map<String, dynamic>;
+        final pid = (obj['project_id'] as String?)?.trim();
+        if ((pid ?? '').isNotEmpty && _googleProject.text.trim().isEmpty) {
+          _googleProject.text = pid!;
+        }
+      } catch (_) {}
+      if (mounted) setState(() {});
+    } catch (_) {}
+  }
+
+  Future<void> _onAdd() async {
+    final settings = context.read<SettingsProvider>();
+    String uniqueKey(String prefix, String display) {
+      final existing = settings.providerConfigs.keys.toSet();
+      if (display.toLowerCase() == prefix.toLowerCase()) {
+        int i = 1;
+        String candidate = '$prefix - $i';
+        while (existing.contains(candidate)) {
+          i++;
+          candidate = '$prefix - $i';
+        }
+        return candidate;
+      }
+      String base = '$prefix - $display';
+      if (!existing.contains(base)) return base;
+      int i = 2;
+      String candidate = '$base ($i)';
+      while (existing.contains(candidate)) {
+        i++;
+        candidate = '$base ($i)';
+      }
+      return candidate;
+    }
+
+    final idx = _tab.index;
+    if (idx > 2) return;
+    final kind = [
+      ProviderKind.openai,
+      ProviderKind.google,
+      ProviderKind.claude,
+    ][idx];
+    if (!(kind == ProviderKind.google && _googleVertex) &&
+        _urlFields[kind]!.currentState?.commit() == false) {
+      return;
+    }
+    String createdKey = '';
+    if (idx == 0) {
+      final rawName = _openaiName.text.trim();
+      final display = rawName.isEmpty ? 'OpenAI' : rawName;
+      final keyName = uniqueKey('OpenAI', display);
+      final base = _openaiBase.text;
+      final promo = base.toLowerCase().contains('aihubmix.com');
+      final cfg = ProviderConfig(
+        id: keyName,
+        enabled: _openaiEnabled,
+        name: display,
+        apiKey: _openaiKey.text.trim(),
+        baseUrl: base,
+        autoVersionDisabled:
+            _urlEditors[ProviderKind.openai]!.autoVersionDisabled,
+        providerType: ProviderKind.openai,
+        chatPath: _openaiUseResponse
+            ? null
+            : (_openaiPath.text.trim().isNotEmpty
+                  ? _openaiPath.text.trim()
+                  : '/chat/completions'),
+        useResponseApi: _openaiUseResponse,
+        models: const [],
+        modelOverrides: const {},
+        proxyEnabled: false,
+        proxyHost: '',
+        proxyPort: '8080',
+        proxyUsername: '',
+        proxyPassword: '',
+        aihubmixAppCodeEnabled: promo,
+      );
+      await settings.setProviderConfig(keyName, cfg);
+      createdKey = keyName;
+      _createdProviderKey = keyName;
+      _createdProviderKind = kind;
+    } else if (idx == 1) {
+      final rawName = _googleName.text.trim();
+      final display = rawName.isEmpty ? 'Google' : rawName;
+      final keyName = uniqueKey('Google', display);
+      final base = _googleVertex
+          ? 'https://aiplatform.googleapis.com'
+          : _googleBase.text;
+      final promo = base.toLowerCase().contains('aihubmix.com');
+      final cfg = ProviderConfig(
+        id: keyName,
+        enabled: _googleEnabled,
+        name: display,
+        apiKey: _googleVertex ? '' : _googleKey.text.trim(),
+        baseUrl: base,
+        autoVersionDisabled:
+            _urlEditors[ProviderKind.google]!.autoVersionDisabled,
+        providerType: ProviderKind.google,
+        vertexAI: _googleVertex,
+        location: _googleVertex
+            ? (_googleLocation.text.trim().isNotEmpty
+                  ? _googleLocation.text.trim()
+                  : 'us-central1')
+            : '',
+        projectId: _googleVertex ? _googleProject.text.trim() : '',
+        serviceAccountJson: _googleVertex ? _googleSaJson.text.trim() : null,
+        models: const [],
+        modelOverrides: const {},
+        proxyEnabled: false,
+        proxyHost: '',
+        proxyPort: '8080',
+        proxyUsername: '',
+        proxyPassword: '',
+        aihubmixAppCodeEnabled: promo,
+      );
+      await settings.setProviderConfig(keyName, cfg);
+      createdKey = keyName;
+      _createdProviderKey = keyName;
+      _createdProviderKind = kind;
+    } else {
+      final rawName = _claudeName.text.trim();
+      final display = rawName.isEmpty ? 'Claude' : rawName;
+      final keyName = uniqueKey('Claude', display);
+      final base = _claudeBase.text;
+      final promo = base.toLowerCase().contains('aihubmix.com');
+      final cfg = ProviderConfig(
+        id: keyName,
+        enabled: _claudeEnabled,
+        name: display,
+        apiKey: _claudeKey.text.trim(),
+        baseUrl: base,
+        autoVersionDisabled:
+            _urlEditors[ProviderKind.claude]!.autoVersionDisabled,
+        providerType: ProviderKind.claude,
+        models: const [],
+        modelOverrides: const {},
+        proxyEnabled: false,
+        proxyHost: '',
+        proxyPort: '8080',
+        proxyUsername: '',
+        proxyPassword: '',
+        aihubmixAppCodeEnabled: promo,
+      );
+      await settings.setProviderConfig(keyName, cfg);
+      createdKey = keyName;
+      _createdProviderKey = keyName;
+      _createdProviderKind = kind;
+    }
+
+    final order = List<String>.of(settings.providersOrder);
+    order.remove(createdKey);
+    order.insert(0, createdKey);
+    await settings.setProvidersOrder(order);
+
+    if (!mounted) return;
+    Navigator.of(context).pop(createdKey);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          minWidth: 580,
+          maxWidth: 700,
+          maxHeight: 640,
+        ),
+        child: Material(
+          color: context.overlaySurface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.25)),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Header
+                Container(
+                  height: 52,
+                  color: context.overlaySurface,
+                  padding: const EdgeInsets.fromLTRB(16, 10, 8, 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          l10n.addProviderSheetTitle,
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: AppFontWeights.emphasis,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: l10n.mcpPageClose,
+                        icon: Icon(
+                          lucide.Lucide.X,
+                          size: 20,
+                          color: cs.onSurface.withValues(alpha: 0.9),
+                        ),
+                        onPressed: () => Navigator.of(context).maybePop(),
+                      ),
+                    ],
+                  ),
+                ),
+                // Tabs
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                  child: _SmallSegTabBar(
+                    controller: _tab,
+                    tabs: ['OpenAI', 'Google', 'Claude', l10n.oauthAccountsTab],
+                  ),
+                ),
+                // Body
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: AnimatedBuilder(
+                      animation: _tab,
+                      builder: (_, __) {
+                        final idx = _tab.index;
+                        return ListView(
+                          children: [
+                            if (idx == 0)
+                              _openaiForm(l10n)
+                            else if (idx == 1)
+                              _googleForm(l10n)
+                            else if (idx == 2)
+                              _claudeForm(l10n)
+                            else
+                              OAuthLoginPanel(
+                                onViewDetails: (id) =>
+                                    Navigator.of(context).pop(id),
+                              ),
+                            const SizedBox(height: 20),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                // Footer
+                if (_tab.index < 3)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                    child: Row(
+                      children: [
+                        const Spacer(),
+                        _PrimaryDeskButton(
+                          icon: lucide.Lucide.Plus,
+                          label: l10n.addProviderSheetAddButton,
+                          onTap: _onAdd,
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _openaiForm(AppLocalizations l10n) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Top switches: Enabled, then Use Responses API
+        _switchTile(
+          label: l10n.addProviderSheetEnabledLabel,
+          value: _openaiEnabled,
+          onChanged: (v) => setState(() => _openaiEnabled = v),
+        ),
+        const SizedBox(height: 8),
+        _switchTile(
+          label: 'Use Responses API',
+          value: _openaiUseResponse,
+          onChanged: (v) => setState(() => _openaiUseResponse = v),
+        ),
+        const SizedBox(height: 12),
+        // Inputs
+        _label(context, l10n.addProviderSheetNameLabel),
+        TextField(
+          controller: _openaiName,
+          decoration: _deskInputDecoration(context),
+        ),
+        const SizedBox(height: 10),
+        _label(context, 'API Key'),
+        TextField(
+          controller: _openaiKey,
+          decoration: _deskInputDecoration(context),
+        ),
+        const SizedBox(height: 10),
+        _baseUrlField(ProviderKind.openai),
+        const SizedBox(height: 10),
+        if (!_openaiUseResponse) ...[
+          _label(context, l10n.addProviderSheetApiPathLabel),
+          TextField(
+            controller: _openaiPath,
+            onChanged: (_) => setState(() {}),
+            decoration: _deskInputDecoration(
+              context,
+              hint: '/chat/completions',
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _googleForm(AppLocalizations l10n) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Top switches: Enabled, then Vertex AI
+        _switchTile(
+          label: l10n.addProviderSheetEnabledLabel,
+          value: _googleEnabled,
+          onChanged: (v) => setState(() => _googleEnabled = v),
+        ),
+        const SizedBox(height: 8),
+        _switchTile(
+          label: 'Vertex AI',
+          value: _googleVertex,
+          onChanged: (v) => setState(() => _googleVertex = v),
+        ),
+        const SizedBox(height: 12),
+        // Inputs
+        _label(context, l10n.addProviderSheetNameLabel),
+        TextField(
+          controller: _googleName,
+          decoration: _deskInputDecoration(context),
+        ),
+        const SizedBox(height: 10),
+        _baseUrlField(ProviderKind.google),
+        const SizedBox(height: 10),
+        _label(context, 'API Key'),
+        TextField(
+          controller: _googleKey,
+          enabled: !_googleVertex,
+          decoration: _deskInputDecoration(context),
+        ),
+        const SizedBox(height: 10),
+        _label(context, l10n.addProviderSheetVertexAiLocationLabel),
+        TextField(
+          controller: _googleLocation,
+          enabled: _googleVertex,
+          decoration: _deskInputDecoration(context, hint: 'us-central1'),
+        ),
+        const SizedBox(height: 10),
+        _label(context, l10n.addProviderSheetVertexAiProjectIdLabel),
+        TextField(
+          controller: _googleProject,
+          enabled: _googleVertex,
+          decoration: _deskInputDecoration(context),
+        ),
+        const SizedBox(height: 10),
+        _label(context, l10n.addProviderSheetVertexAiServiceAccountJsonLabel),
+        TextField(
+          controller: _googleSaJson,
+          enabled: _googleVertex,
+          minLines: 4,
+          maxLines: 8,
+          decoration: _deskInputDecoration(
+            context,
+            hint: '{\n  "type": "service_account", ...\n}',
+          ),
+        ),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton.icon(
+            onPressed: _googleVertex ? _importGoogleServiceAccount : null,
+            icon: const Icon(Icons.file_open, size: 16),
+            label: Text(l10n.addProviderSheetImportJsonButton),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _claudeForm(AppLocalizations l10n) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _switchTile(
+          label: l10n.addProviderSheetEnabledLabel,
+          value: _claudeEnabled,
+          onChanged: (v) => setState(() => _claudeEnabled = v),
+        ),
+        const SizedBox(height: 10),
+        _label(context, l10n.addProviderSheetNameLabel),
+        TextField(
+          controller: _claudeName,
+          decoration: _deskInputDecoration(context),
+        ),
+        const SizedBox(height: 10),
+        _label(context, 'API Key'),
+        TextField(
+          controller: _claudeKey,
+          decoration: _deskInputDecoration(context),
+        ),
+        const SizedBox(height: 10),
+        _baseUrlField(ProviderKind.claude),
+      ],
+    );
+  }
+}
+
+class _SmallSegTabBar extends StatefulWidget {
+  const _SmallSegTabBar({required this.controller, required this.tabs});
+  final TabController controller;
+  final List<String> tabs;
+  @override
+  State<_SmallSegTabBar> createState() => _SmallSegTabBarState();
+}
+
+class _SmallSegTabBarState extends State<_SmallSegTabBar> {
+  int _hover = -1;
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    const double outerHeight = 40;
+    const double innerPadding = 4;
+    const double gap = 6;
+    const double minSegWidth = 88;
+    final double pillRadius = 14;
+    final double innerRadius = ((pillRadius - innerPadding).clamp(
+      0.0,
+      pillRadius,
+    )).toDouble();
+
+    return AnimatedBuilder(
+      animation: widget.controller,
+      builder: (context, _) {
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final double availWidth = constraints.maxWidth;
+            final double innerAvailWidth = availWidth - innerPadding * 2;
+            final double segWidth =
+                (innerAvailWidth - gap * (widget.tabs.length - 1)) /
+                widget.tabs.length;
+            final double rowWidth =
+                segWidth * widget.tabs.length + gap * (widget.tabs.length - 1);
+            final Color shellBg = context.appColors.surfaceCard;
+            List<Widget> children = [];
+            for (int index = 0; index < widget.tabs.length; index++) {
+              final bool selected = widget.controller.index == index;
+              final bool hovered = _hover == index;
+              final Color bg = selected
+                  ? cs.primary.withValues(alpha: 0.14)
+                  : hovered
+                  ? (cs.onSurface.withValues(alpha: isDark ? 0.06 : 0.03))
+                  : Colors.transparent;
+              final Color fg = selected
+                  ? cs.primary
+                  : cs.onSurface.withValues(alpha: 0.82);
+              children.add(
+                SizedBox(
+                  width: segWidth < minSegWidth ? minSegWidth : segWidth,
+                  height: double.infinity,
+                  child: MouseRegion(
+                    onEnter: (_) => setState(() => _hover = index),
+                    onExit: (_) => setState(() => _hover = -1),
+                    cursor: SystemMouseCursors.click,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => widget.controller.animateTo(index),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 160),
+                        curve: Curves.easeOutCubic,
+                        decoration: BoxDecoration(
+                          color: bg,
+                          borderRadius: BorderRadius.circular(innerRadius),
+                        ),
+                        alignment: Alignment.center,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: Text(
+                            widget.tabs[index],
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: fg,
+                              fontWeight: AppFontWeights.semibold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+              if (index != widget.tabs.length - 1) {
+                children.add(const SizedBox(width: gap));
+              }
+            }
+            return Container(
+              height: outerHeight,
+              decoration: BoxDecoration(
+                color: shellBg,
+                borderRadius: BorderRadius.circular(pillRadius),
+              ),
+              clipBehavior: Clip.hardEdge,
+              child: Padding(
+                padding: const EdgeInsets.all(innerPadding),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  physics: const BouncingScrollPhysics(),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minWidth: innerAvailWidth),
+                    child: SizedBox(
+                      width: rowWidth,
+                      child: Row(children: children),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+class _PrimaryDeskButton extends StatefulWidget {
+  const _PrimaryDeskButton({
+    required this.label,
+    required this.onTap,
+    this.icon,
+  });
+  final String label;
+  final VoidCallback onTap;
+  final IconData? icon;
+  @override
+  State<_PrimaryDeskButton> createState() => _PrimaryDeskButtonState();
+}
+
+class _PrimaryDeskButtonState extends State<_PrimaryDeskButton> {
+  bool _hover = false;
+  bool _pressed = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final bg = _pressed
+        ? cs.primary.withValues(alpha: 0.85)
+        : (_hover ? cs.primary.withValues(alpha: 0.92) : cs.primary);
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.icon != null) ...[
+                Icon(widget.icon!, size: 16, color: cs.onPrimary),
+                const SizedBox(width: 8),
+              ],
+              Text(
+                widget.label,
+                style: TextStyle(
+                  color: cs.onPrimary,
+                  fontWeight: AppFontWeights.semibold,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

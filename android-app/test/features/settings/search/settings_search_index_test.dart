@@ -1,0 +1,231 @@
+import 'package:Kelivo/features/settings/search/settings_search_index.dart';
+import 'package:Kelivo/l10n/app_localizations_en.dart';
+import 'package:Kelivo/l10n/app_localizations_zh.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  final en = AppLocalizationsEn();
+  final index = SettingsSearchIndex(en, platform: TargetPlatform.iOS);
+
+  test('exact setting names rank first; all query words must match', () {
+    expect(
+      index.search(en.displaySettingsPageShowToolCardsTitle).first.id,
+      'displaySettingsPageShowToolCardsTitle',
+    );
+    expect(
+      index.search('  font   size ').first.id,
+      'displaySettingsPageChatFontSizeTitle',
+    );
+    expect(index.search('font impossiblequery'), isEmpty);
+    expect(index.search(' \n\t '), isEmpty);
+    expect(index.search('x' * 20000), isEmpty);
+  });
+
+  test('indexes English, simplified and traditional titles in any locale', () {
+    final chinese = SettingsSearchIndex(
+      AppLocalizationsZh(),
+      platform: TargetPlatform.iOS,
+    );
+    final traditional = SettingsSearchIndex(
+      AppLocalizationsZhHant(),
+      platform: TargetPlatform.iOS,
+    );
+    for (final candidate in [index, chinese, traditional]) {
+      expect(
+        candidate.search('language').map((e) => e.id),
+        contains('displaySettingsPageLanguageTitle'),
+      );
+      expect(
+        candidate.search('語言').map((e) => e.id),
+        contains('displaySettingsPageLanguageTitle'),
+      );
+      expect(
+        candidate.search('字体').map((e) => e.id),
+        contains('displaySettingsPageChatFontSizeTitle'),
+      );
+      expect(candidate.search('ａｐｉ　ｋｅｙ').first.id, 'providers');
+      expect(
+        candidate.search('毛玻璃').first.destination,
+        SettingsSearchDestination.messageStyle,
+      );
+    }
+  });
+
+  test('platform and runtime availability match the settings surfaces', () {
+    Set<String> ids(
+      TargetPlatform platform, {
+      bool logs = false,
+      bool dynamicColor = false,
+    }) => SettingsSearchIndex(
+      en,
+      platform: platform,
+      logsEnabled: logs,
+      dynamicColorSupported: dynamicColor,
+    ).entries.map((entry) => entry.id).toSet();
+    final ios = ids(TargetPlatform.iOS);
+    final android = ids(TargetPlatform.android, logs: true, dynamicColor: true);
+    final desktop = ids(TargetPlatform.macOS);
+    for (final platform in TargetPlatform.values) {
+      expect(
+        ids(
+          platform,
+        ).contains('displaySettingsPageIosNativeSelectionMenuTitle'),
+        platform == TargetPlatform.iOS,
+      );
+      expect(
+        ids(platform).contains('linuxHideTitleBarTitle'),
+        platform == TargetPlatform.linux,
+        reason: 'The title bar setting is Linux-only.',
+      );
+    }
+    expect(ios, contains('scheduledTasks'));
+    expect(ios, isNot(contains('hotkeys')));
+    expect(ios, isNot(contains('logs')));
+    expect(
+      android,
+      containsAll([
+        'scheduledTasks',
+        'logs',
+        'themeSettingsPageUseDynamicColorTitle',
+      ]),
+    );
+    expect(
+      desktop,
+      containsAll([
+        'scheduledTasks',
+        'hotkeys',
+        'displaySettingsPageTrayShowTrayTitle',
+      ]),
+    );
+    for (final id in [
+      'background',
+      'haptics',
+      'storage',
+      'sponsor',
+      'displaySettingsPageKeepSidebarOpenOnAssistantTapTitle',
+      'displaySettingsPageKeepAssistantListExpandedOnSidebarCloseTitle',
+      'displaySettingsPageMobileCodeBlockWrapTitle',
+    ]) {
+      expect(desktop, isNot(contains(id)), reason: id);
+    }
+  });
+
+  test(
+    'auto-follow is searchable on mobile and desktop without a delay entry',
+    () {
+      for (final platform in TargetPlatform.values) {
+        final candidate = SettingsSearchIndex(en, platform: platform);
+        for (final query in ['auto follow', '自动跟随底部', '自動跟隨底部']) {
+          final result = candidate.search(query).first;
+          expect(result.id, 'displaySettingsPageAutoScrollEnableTitle');
+          expect(result.destination, SettingsSearchDestination.display);
+          expect(
+            result.targetLabel,
+            en.displaySettingsPageAutoScrollEnableTitle,
+          );
+        }
+        expect(
+          candidate.entries.map((entry) => entry.id),
+          isNot(contains('displaySettingsPageAutoScrollIdleTitle')),
+        );
+      }
+    },
+  );
+
+  test('full-width chat is searchable in desktop Display settings', () {
+    for (final platform in TargetPlatform.values) {
+      final candidate = SettingsSearchIndex(en, platform: platform);
+      final desktop = switch (platform) {
+        TargetPlatform.macOS ||
+        TargetPlatform.windows ||
+        TargetPlatform.linux => true,
+        _ => false,
+      };
+      for (final query in ['full width', '聊天宽度', '全寬']) {
+        final results = candidate
+            .search(query)
+            .where(
+              (item) => item.id == 'desktopDisplaySettingsFullWidthChatTitle',
+            );
+        if (desktop) {
+          expect(results.single.destination, SettingsSearchDestination.display);
+          expect(
+            results.single.targetLabel,
+            en.desktopDisplaySettingsFullWidthChatTitle,
+          );
+        } else {
+          expect(results, isEmpty);
+        }
+      }
+    }
+  });
+
+  test(
+    'native menu rollback is searchable by its appearance and destination',
+    () {
+      for (final query in ['liquid glass', '液态玻璃', '原生選取選單']) {
+        final result = index.search(query).first;
+        expect(result.id, 'displaySettingsPageIosNativeSelectionMenuTitle');
+        expect(result.destination, SettingsSearchDestination.behavior);
+        expect(
+          result.targetLabel,
+          en.displaySettingsPageIosNativeSelectionMenuTitle,
+        );
+      }
+    },
+  );
+
+  test('legacy inline code style is searchable on every settings surface', () {
+    for (final platform in TargetPlatform.values) {
+      final candidate = SettingsSearchIndex(en, platform: platform);
+      for (final query in ['legacy inline code', '旧版行内代码', '舊版行內程式碼']) {
+        final result = candidate.search(query).first;
+        expect(result.id, 'displaySettingsPageUseLegacyInlineCodeStyleTitle');
+        expect(result.destination, SettingsSearchDestination.rendering);
+        expect(
+          result.targetLabel,
+          en.displaySettingsPageUseLegacyInlineCodeStyleTitle,
+        );
+      }
+    }
+  });
+
+  test('legacy code block style is searchable on every settings surface', () {
+    for (final platform in TargetPlatform.values) {
+      final candidate = SettingsSearchIndex(en, platform: platform);
+      for (final query in ['legacy code block', '旧版代码块', '舊版程式碼區塊']) {
+        final result = candidate.search(query).first;
+        expect(result.id, 'displaySettingsPageUseLegacyCodeBlockStyleTitle');
+        expect(result.destination, SettingsSearchDestination.rendering);
+        expect(
+          result.targetLabel,
+          en.displaySettingsPageUseLegacyCodeBlockStyleTitle,
+        );
+      }
+    }
+  });
+
+  test(
+    'entries have stable unique ids, paths and localized destination labels',
+    () {
+      for (final platform in TargetPlatform.values) {
+        final candidate = SettingsSearchIndex(en, platform: platform);
+        expect(
+          candidate.entries.map((e) => e.id).toSet().length,
+          candidate.entries.length,
+        );
+        expect(candidate.suggestions, hasLength(6));
+        final item = candidate.entries.firstWhere(
+          (e) => e.id == 'displaySettingsPageShowToolCardsTitle',
+        );
+        expect(item.path, [
+          'Settings',
+          en.settingsPageDisplay,
+          en.displaySettingsPageChatItemDisplayTitle,
+        ]);
+        expect(item.targetLabel, en.displaySettingsPageShowToolCardsTitle);
+      }
+    },
+  );
+}

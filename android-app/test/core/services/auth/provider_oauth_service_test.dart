@@ -1,0 +1,2027 @@
+import 'package:Kelivo/core/models/image_context.dart';
+import 'package:Kelivo/core/models/request_budget.dart';
+import 'package:Kelivo/core/models/native_compaction.dart';
+import 'package:Kelivo/core/services/api/providers/openai/native_compaction.dart';
+import 'package:Kelivo/core/services/api/providers/openai/responses_history.dart';
+import 'package:Kelivo/core/services/api/request_image_context.dart';
+import 'package:Kelivo/core/database/business_settings_router.dart';
+import 'package:Kelivo/core/database/business_preferences.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:Kelivo/core/models/model_spec.dart';
+import 'package:Kelivo/core/models/reasoning_request.dart';
+import 'package:Kelivo/core/providers/settings_provider.dart';
+import 'package:Kelivo/core/services/auth/codex_client_version.dart';
+import 'package:Kelivo/core/services/auth/provider_oauth_service.dart';
+import 'package:Kelivo/core/services/api/providers/openai/openai_provider.dart';
+import 'package:Kelivo/core/services/api/providers/claude_official.dart';
+import 'package:Kelivo/core/services/api/stream/stream_chunk.dart';
+import 'package:Kelivo/core/services/model_spec/model_spec_resolver.dart';
+import 'package:Kelivo/features/provider/widgets/share_provider_sheet.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+
+import '../../../support/business_test_harness.dart';
+import '../../../support/legacy_reasoning.dart';
+
+ProviderConfig config({
+  OAuthProvider provider = OAuthProvider.kimi,
+  bool expired = true,
+}) => ProviderConfig(
+  id: 'account',
+  enabled: true,
+  name: provider.displayName,
+  apiKey: '',
+  baseUrl: provider.baseUrl,
+  providerType: ProviderKind.openai,
+  oauthProvider: provider,
+  useResponseApi: provider != OAuthProvider.kimi,
+  oauthCredentials: ProviderOAuthCredentials(
+    accessToken: 'access',
+    refreshToken: 'refresh',
+    expiresAt: DateTime.now().add(
+      expired ? const Duration(seconds: -1) : const Duration(hours: 1),
+    ),
+    sessionId: 'session',
+    accountId: 'workspace',
+    deviceId: 'device',
+  ),
+);
+
+http.Response jsonResponse(Object value, [int status = 200]) =>
+    http.Response(jsonEncode(value), status);
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late SettingsProvider settings;
+  setUp(() async {
+    final harness = await createBusinessTestHarness();
+    settings = SettingsProvider(harness.preferences);
+    await settings.loaded;
+  });
+  tearDown(() => settings.dispose());
+
+  for (final provider in [
+    OAuthProvider.chatgpt,
+    OAuthProvider.claude,
+    OAuthProvider.grok,
+  ]) {
+    test('final OAuth body respects local budget: $provider', () async {
+      final original = config(provider: provider, expired: false);
+      await settings.setProviderConfig(original.id, original);
+      final service = ProviderOAuthService()..bind(settings);
+      addTearDown(service.dispose);
+      var sends = 0;
+      var wireBytes = 0;
+      final client = service.authenticatedClient(
+        MockClient((request) async {
+          sends++;
+          wireBytes = request.bodyBytes.length;
+          return http.Response('{}', 200);
+        }),
+        original,
+      );
+      addTearDown(client.close);
+      final payload = provider == OAuthProvider.claude
+          ? {
+              'model': 'claude-sonnet-4-6',
+              'messages': [
+                {'role': 'user', 'content': 'hi'},
+              ],
+              'max_tokens': 100,
+            }
+          : {
+              'model': 'plain-model',
+              'input': [
+                {'role': 'user', 'content': 'hi'},
+              ],
+            };
+      final path = provider == OAuthProvider.claude
+          ? '/messages'
+          : '/responses';
+      Future<void> send() async {
+        final request =
+            http.Request('POST', Uri.parse('${provider.baseUrl}$path'))
+              ..headers['content-type'] = 'application/json'
+              ..body = await RequestImageContext.encodeBody(payload);
+        await (await client.send(request)).stream.drain<void>();
+      }
+
+      await send();
+      final expected = wireBytes;
+      final rawSize = utf8.encode(jsonEncode(payload)).length;
+      expect(expected, greaterThan(rawSize));
+      final blocked = RequestImageContext(
+        settings: const ImageContextSettings(),
+        images: [],
+        budget: RequestBudget(bodyBytes: rawSize),
+      );
+      await expectLater(
+        blocked.run(() async* {
+          await send();
+          yield 0;
+        }).drain<void>(),
+        throwsA(
+          isA<ImageContextBudgetException>()
+              .having((e) => e.actual, 'final wire bytes', expected)
+              .having((e) => e.limit, 'body budget', rawSize),
+        ),
+      );
+      expect(sends, 1);
+      final exact = RequestImageContext(
+        settings: const ImageContextSettings(),
+        images: [],
+        budget: RequestBudget(bodyBytes: expected),
+      );
+      await exact.run(() async* {
+        await send();
+        yield 0;
+      }).drain<void>();
+      expect(sends, 2);
+    });
+  }
+
+  test(
+    'Codex sync stores service tiers scoped to the authenticated session',
+    () async {
+      var tiers = <Map<String, String>>[
+        {'id': 'fast', 'name': 'Fast', 'description': 'Faster'},
+        {'id': 'ultrafast', 'name': 'Ultrafast', 'description': 'Fastest'},
+      ];
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient(
+          (_) async => jsonResponse({
+            'models': [
+              {'slug': 'gpt-6-astra', 'service_tiers': tiers},
+            ],
+          }),
+        ),
+      )..bind(settings);
+      addTearDown(service.dispose);
+      await settings.setProviderConfig(
+        'account',
+        config(provider: OAuthProvider.chatgpt, expired: false),
+      );
+      await service.syncModels('account');
+      var saved =
+          settings.providerConfigs['account']!.modelOverrides['gpt-6-astra']
+              as Map;
+      expect(saved['oauthServiceTiers'], ['fast', 'ultrafast']);
+      expect(saved['oauthServiceTierSessionId'], 'session');
+      tiers = [];
+      await service.syncModels('account');
+      saved =
+          settings.providerConfigs['account']!.modelOverrides['gpt-6-astra']
+              as Map;
+      expect(saved['oauthServiceTiers'], isEmpty);
+    },
+  );
+
+  test(
+    'refresh errors retain sanitized diagnostics through the service',
+    () async {
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient((_) async {
+          throw const HandshakeException('private-proxy-password');
+        }),
+      )..bind(settings);
+      addTearDown(service.dispose);
+      await settings.setProviderConfig('account', config());
+      await expectLater(
+        service.resolve(config()),
+        throwsA(
+          isA<ProviderOAuthException>()
+              .having((e) => e.providerId, 'provider', 'account')
+              .having((e) => e.stage, 'stage', ProviderOAuthStage.refreshToken)
+              .having(
+                (e) => e.transportFailure,
+                'transport',
+                ProviderOAuthTransportFailure.tls,
+              )
+              .having((e) => e.message, 'raw exception', isNull),
+        ),
+      );
+      expect(
+        settings.providerConfigs['account']!.oauthCredentials!.requiresLogin,
+        false,
+      );
+    },
+  );
+
+  test(
+    'concurrent refresh is coalesced, preserves edits, and persists token rotation',
+    () async {
+      final pending = Completer<http.Response>();
+      var calls = 0;
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient((_) {
+          calls++;
+          return pending.future;
+        }),
+      )..bind(settings);
+      await settings.setProviderConfig('account', config());
+      final first = service.resolve(config());
+      final second = service.resolve(config());
+      await Future<void>.delayed(Duration.zero);
+      await settings.setProviderConfig(
+        'account',
+        settings.providerConfigs['account']!.copyWith(
+          name: 'Renamed',
+          proxyHost: 'proxy.example',
+        ),
+      );
+      pending.complete(
+        jsonResponse({
+          'access_token': 'new-access',
+          'refresh_token': 'rotated',
+          'expires_in': 3600,
+        }),
+      );
+      final results = await Future.wait([first, second]);
+      expect(calls, 1);
+      expect(results.every((e) => e.apiKey == 'new-access'), isTrue);
+      final saved = settings.providerConfigs['account']!;
+      expect(saved.name, 'Renamed');
+      expect(saved.proxyHost, 'proxy.example');
+      expect(saved.apiKey, isEmpty);
+      expect(saved.oauthCredentials!.refreshToken, 'rotated');
+    },
+  );
+
+  test(
+    'logout while refresh is in flight cannot restore credentials',
+    () async {
+      final pending = Completer<http.Response>();
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient((_) => pending.future),
+      )..bind(settings);
+      await settings.setProviderConfig('account', config());
+      final refresh = service.resolve(config());
+      final expectation = expectLater(
+        refresh,
+        throwsA(isA<ProviderOAuthException>()),
+      );
+      await service.logout('account');
+      pending.complete(
+        jsonResponse({
+          'access_token': 'new',
+          'refresh_token': 'rotated',
+          'expires_in': 3600,
+        }),
+      );
+      await expectation;
+      expect(settings.providerConfigs['account']!.oauthCredentials, isNull);
+    },
+  );
+
+  test(
+    'an old settings instance cannot invalidate a restored account',
+    () async {
+      final pending = Completer<http.Response>();
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient((_) => pending.future),
+      )..bind(settings);
+      final original = config();
+      await settings.setProviderConfig(original.id, original);
+      final refresh = service.resolve(original);
+      final expectation = expectLater(
+        refresh,
+        throwsA(isA<ProviderOAuthException>()),
+      );
+      final restoredHarness = await createBusinessTestHarness();
+      final restored = SettingsProvider(restoredHarness.preferences);
+      await restored.loaded;
+      addTearDown(restored.dispose);
+      await restored.setProviderConfig(original.id, original);
+      service.bind(restored);
+      pending.complete(
+        jsonResponse({'access_token': 'fresh', 'expires_in': 3600}),
+      );
+      await expectation;
+      expect(
+        restored.providerConfigs[original.id]!.oauthCredentials!.requiresLogin,
+        false,
+      );
+      expect(
+        restored.providerConfigs[original.id]!.oauthCredentials!.accessToken,
+        'access',
+      );
+    },
+  );
+
+  test(
+    'revoked refresh marks login required; outages retain usable credentials',
+    () async {
+      for (final status in [503, 400]) {
+        final service = ProviderOAuthService(
+          clientFactory: (_) => MockClient(
+            (_) async => jsonResponse({
+              'error': status == 400 ? 'invalid_grant' : 'server_error',
+            }, status),
+          ),
+        )..bind(settings);
+        await settings.setProviderConfig('account', config());
+        await expectLater(
+          service.resolve(config()),
+          throwsA(isA<ProviderOAuthException>()),
+        );
+        expect(
+          settings.providerConfigs['account']!.oauthCredentials!.requiresLogin,
+          status == 400,
+        );
+        expect(
+          settings.providerConfigs['account']!.oauthCredentials!.refreshToken,
+          'refresh',
+        );
+      }
+    },
+  );
+
+  test(
+    'settings, share export, and serialized restore retain OAuth credentials',
+    () async {
+      final original = config(expired: false);
+      await settings.setProviderConfig('account', original);
+      expect(original.toJson()['oauthCredentials']['expiresAt'], endsWith('Z'));
+      final restored = ProviderConfig.fromJson(
+        jsonDecode(jsonEncode(original.toJson())) as Map<String, dynamic>,
+      );
+      expect(restored.oauthProvider, OAuthProvider.kimi);
+      expect(
+        restored.oauthCredentials!.expiresAt.isAtSameMomentAs(
+          original.oauthCredentials!.expiresAt,
+        ),
+        true,
+      );
+      expect(restored.oauthCredentials!.refreshToken, 'refresh');
+      expect(
+        restored.copyWith(name: 'Other').oauthCredentials!.sessionId,
+        'session',
+      );
+      expect(
+        restored.copyWith(oauthCredentials: null).oauthCredentials,
+        isNull,
+      );
+      final shared =
+          jsonDecode(
+                utf8.decode(
+                  base64Decode(
+                    encodeProviderConfig(
+                      original,
+                    ).substring('ai-provider:v1:'.length),
+                  ),
+                ),
+              )
+              as Map;
+      expect(
+        (shared['config'] as Map)['oauthCredentials']['refreshToken'],
+        'refresh',
+      );
+    },
+  );
+
+  test(
+    'model sync refreshes first, applies metadata and keeps existing per-model settings',
+    () async {
+      var calls = 0;
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient((request) async {
+          calls++;
+          if (request.method == 'POST') {
+            return jsonResponse({'access_token': 'fresh', 'expires_in': 3600});
+          }
+          expect(request.headers['Authorization'], 'Bearer fresh');
+          return jsonResponse({
+            'data': [
+              {
+                'id': 'kimi-k2.5',
+                'display_name': 'Kimi 2.5',
+                'supports_image_in': true,
+                'protocol': 'anthropic',
+                'supports_thinking_type': 'only',
+                'think_efforts': {
+                  'support': true,
+                  'valid_efforts': ['low', 'medium', 'high'],
+                },
+              },
+            ],
+          });
+        }),
+      )..bind(settings);
+      await settings.setProviderConfig(
+        'account',
+        config().copyWith(
+          modelOverrides: {
+            'kimi-k2.5': {'temperature': .7},
+          },
+        ),
+      );
+      await service.syncModels('account');
+      final saved = settings.providerConfigs['account']!;
+      expect(calls, 2);
+      expect(saved.models, ['kimi-k2.5']);
+      expect(saved.modelOverrides['kimi-k2.5']['input'], contains('image'));
+      expect(saved.modelOverrides['kimi-k2.5']['temperature'], .7);
+      expect(saved.modelOverrides['kimi-k2.5']['oauthProtocol'], 'anthropic');
+      expect(saved.modelOverrides['kimi-k2.5']['oauthThinkingMode'], isNull);
+      expect(
+        saved.modelOverrides['kimi-k2.5']['oauthThinkingRequired'],
+        isNull,
+      );
+      expect(saved.modelOverrides['kimi-k2.5']['oauthThinkingEfforts'], isNull);
+      expect(
+        saved.modelOverrides['kimi-k2.5']['oauthThinkingDefaultEffort'],
+        isNull,
+      );
+      expect(saved.modelOverrides['kimi-k2.5']['reasoning'], {
+        'dialect': 'anthropicAdaptiveEffort',
+        'levels': ['low', 'medium', 'high'],
+        'canDisable': false,
+        'defaultLevel': 'auto',
+        'budgets': <String, int>{},
+      });
+      expect(
+        saved.modelOverrides['kimi-k2.5']['abilities'],
+        contains('reasoning'),
+      );
+      expect(saved.oauthModelsSyncedAt, isNotNull);
+    },
+  );
+
+  test(
+    'exported business settings restore OAuth credentials into a fresh database',
+    () async {
+      final source = await createBusinessTestHarness();
+      final original = config(expired: false);
+      await source.preferences.setString(
+        'provider_configs_v1',
+        jsonEncode({'account': original.toJson()}),
+      );
+      final backup = BusinessSettingsRouter.exportSnapshotWithRowIds(
+        await source.repository.readSnapshot(),
+      );
+      final target = await createBusinessTestHarness();
+      await target.repository.replaceSnapshot(
+        BusinessSettingsRouter.normalizeAndRoute(backup.settings),
+      );
+      final restored = SettingsProvider(BusinessPreferences(target.repository));
+      await restored.loaded;
+      expect(
+        restored.providerConfigs['account']!.oauthCredentials!.refreshToken,
+        'refresh',
+      );
+      expect(
+        restored.providerConfigs['account']!.oauthProvider,
+        OAuthProvider.kimi,
+      );
+      restored.dispose();
+      final invalid = original.toJson();
+      invalid['oauthCredentials'] = {
+        ...original.oauthCredentials!.toJson(),
+        'expiresAt': 'bad date',
+      };
+      expect(
+        () => BusinessSettingsRouter.normalizeAndRoute({
+          'provider_configs_v1': jsonEncode({'account': invalid}),
+        }),
+        throwsFormatException,
+      );
+    },
+  );
+
+  for (final serviceTier in [null, 'default', 'fast', 'ultrafast']) {
+    test(
+      'Codex applies subscription contract and selected tier $serviceTier after user overrides',
+      () async {
+        final service = ProviderOAuthService()..bind(settings);
+        final original = config(provider: OAuthProvider.chatgpt, expired: false)
+            .copyWith(
+              customHeaders: [
+                {'name': 'Authorization', 'value': 'Bearer wrong'},
+              ],
+              customBody: [
+                {'key': 'store', 'value': 'true'},
+                {'key': 'max_output_tokens', 'value': '10'},
+                {'key': 'top_k', 'value': '50'},
+                {'key': 'min_p', 'value': '0.1'},
+                {'key': 'presence_penalty', 'value': '0.1'},
+                {'key': 'repetition_penalty', 'value': '1.1'},
+                {'key': 'frequency_penalty', 'value': '0.1'},
+                {'key': 'stop', 'value': '["END"]'},
+                {'key': 'service_tier', 'value': 'priority'},
+              ],
+            );
+        await settings.setProviderConfig(original.id, original);
+        final resolved = await service.resolve(original);
+        final requests = <http.Request>[];
+        final client = service.authenticatedClient(
+          MockClient((request) async {
+            requests.add(request);
+            return http.Response(
+              'data: {"type":"response.output_text.delta","delta":"Hello"}\n\ndata: {"type":"response.completed","response":{"id":"resp","output":[]}}\n\n',
+              200,
+              headers: {'content-type': 'text/event-stream'},
+            );
+          }),
+          resolved,
+        );
+        final chunks = await sendOpenAIStream(
+          client,
+          resolved,
+          'gpt-5.4',
+          [
+            {'role': 'user', 'content': 'Hi'},
+          ],
+          serviceTier: serviceTier,
+          temperature: .7,
+          maxTokens: 32,
+          reasoning: legacyBudget(0),
+        ).toList();
+        expect(
+          chunks.whereType<TextDelta>().map((e) => e.text).join(),
+          'Hello',
+        );
+        final sent = requests.single;
+        expect(sent.headers['Authorization'], 'Bearer access');
+        expect(sent.headers['chatgpt-account-id'], 'workspace');
+        expect(sent.headers['version'], defaultCodexClientVersion);
+        expect(sent.headers, isNot(contains('openai-beta')));
+        expect(
+          sent.url.toString(),
+          '${OAuthProvider.chatgpt.baseUrl}/responses',
+        );
+        final body = jsonDecode(sent.body) as Map;
+        expect(body['stream'], true);
+        expect(body['store'], false);
+        expect(body['instructions'], '');
+        expect(body.containsKey('temperature'), false);
+        expect(body.containsKey('max_output_tokens'), false);
+        for (final key in [
+          'top_k',
+          'min_p',
+          'presence_penalty',
+          'repetition_penalty',
+          'frequency_penalty',
+          'stop',
+        ]) {
+          expect(
+            body.containsKey(key),
+            false,
+            reason: '$key is unsupported by Codex',
+          );
+        }
+        expect(body['reasoning'], {'effort': 'none', 'summary': 'auto'});
+        expect(
+          sent.headers['x-codex-routing-hint'],
+          serviceTier == 'default'
+              ? 'model=gpt-5.4'
+              : 'model=gpt-5.4;tier=${serviceTier ?? 'priority'}',
+        );
+        expect(
+          body['service_tier'],
+          serviceTier == 'default' ? isNull : (serviceTier ?? 'priority'),
+        );
+        expect(body['include'], contains('reasoning.encrypted_content'));
+      },
+    );
+  }
+
+  test(
+    'Codex tool continuation preserves encrypted reasoning without server item references',
+    () async {
+      final service = ProviderOAuthService()..bind(settings);
+      final original = config(provider: OAuthProvider.chatgpt, expired: false)
+          .copyWith(
+            customBody: const [
+              {'key': 'service_tier', 'value': 'priority'},
+            ],
+          );
+      await settings.setProviderConfig(original.id, original);
+      final requests = <http.Request>[];
+      final toolCalls = <String>[];
+      final call = {
+        'type': 'function_call',
+        'id': 'fc_temporary',
+        'call_id': 'call_weather',
+        'name': 'weather',
+        'arguments': '{}',
+        'status': 'completed',
+        'internal_chat_message_metadata_passthrough': {
+          'content_token_count': 7,
+        },
+      };
+      final client = service.authenticatedClient(
+        MockClient((request) async {
+          requests.add(request);
+          final events = requests.length == 1
+              ? [
+                  {
+                    'type': 'response.output_item.done',
+                    'output_index': 1,
+                    'item': call,
+                  },
+                  {
+                    'type': 'response.completed',
+                    'response': {
+                      'output': [
+                        {
+                          'type': 'reasoning',
+                          'id': 'rs_temporary',
+                          'summary': [],
+                          'encrypted_content': 'opaque',
+                          'internal_chat_message_metadata_passthrough': {
+                            'content_token_count': 3,
+                          },
+                        },
+                        call,
+                      ],
+                    },
+                  },
+                ]
+              : [
+                  {'type': 'response.output_text.delta', 'delta': 'Sunny'},
+                  {
+                    'type': 'response.completed',
+                    'response': {'output': []},
+                  },
+                ];
+          return http.Response(
+            events.map((e) => 'data: ${jsonEncode(e)}\n\n').join(),
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }),
+        await service.resolve(original),
+      );
+      final chunks = await sendOpenAIStream(
+        client,
+        await service.resolve(original),
+        'gpt-5.4',
+        [
+          {'role': 'user', 'content': 'Weather?'},
+        ],
+        serviceTier: 'ultrafast',
+        tools: [
+          {
+            'type': 'function',
+            'function': {
+              'name': 'weather',
+              'parameters': {'type': 'object', 'properties': {}},
+            },
+          },
+        ],
+        onToolCall: (name, args, {toolCallId}) async {
+          toolCalls.add(name);
+          return 'sunny';
+        },
+      ).toList();
+      expect(toolCalls, ['weather']);
+      expect(chunks.whereType<TextDelta>().map((e) => e.text).join(), 'Sunny');
+      expect(requests.length, 2);
+      for (final request in requests) {
+        expect((jsonDecode(request.body) as Map)['service_tier'], 'ultrafast');
+        expect(
+          request.headers['x-codex-routing-hint'],
+          'model=gpt-5.4;tier=ultrafast',
+        );
+      }
+      final body = jsonDecode(requests.last.body) as Map;
+      final input = (body['input'] as List).cast<Map>();
+      expect(input.any((item) => item.containsKey('id')), false);
+      expect(
+        input.any(
+          (item) =>
+              item.containsKey('internal_chat_message_metadata_passthrough'),
+        ),
+        false,
+      );
+      expect(call, contains('internal_chat_message_metadata_passthrough'));
+      expect(
+        input
+            .where((item) => item['type'] == 'reasoning')
+            .single['encrypted_content'],
+        'opaque',
+      );
+      expect(
+        input
+            .where((item) => item['type'] == 'function_call_output')
+            .single['call_id'],
+        'call_weather',
+      );
+      expect(body['store'], false);
+      expect(body['instructions'], '');
+      expect(body['include'], contains('reasoning.encrypted_content'));
+    },
+  );
+
+  test(
+    'Codex sanitizes saved history, compaction input and compacted continuation at the wire',
+    () async {
+      const model = 'gpt-5.4';
+      final original = config(provider: OAuthProvider.chatgpt, expired: false);
+      await settings.setProviderConfig(original.id, original);
+      final service = ProviderOAuthService()..bind(settings);
+      addTearDown(service.dispose);
+      final resolved = await service.resolve(original);
+      final savedItem = <String, dynamic>{
+        'type': 'message',
+        'id': 'message-id',
+        'role': 'assistant',
+        'content': [
+          {'type': 'output_text', 'text': 'answer'},
+        ],
+        'metadata': {'keep': true},
+        'internal_chat_message_metadata_passthrough': {
+          'content_token_count': 7,
+        },
+      };
+      final scope = responsesReplayScope(resolved, model);
+      final stored = ResponsesTurnRecorder(
+        scope,
+      ).record([savedItem], []).payload;
+      final history = buildResponsesHistory(
+        payload: stored,
+        scope: scope,
+        toolEvents: [],
+        content: 'answer',
+      )!;
+      final historyBefore = jsonEncode(history);
+      final compactItem = <String, dynamic>{
+        'type': 'compaction',
+        'id': 'compaction-id',
+        'encrypted_content': 'opaque-compaction',
+        'internal_chat_message_metadata_passthrough': {
+          'content_token_count': 2,
+        },
+      };
+      final requests = <http.Request>[];
+      final client = service.authenticatedClient(
+        MockClient((request) async {
+          requests.add(request);
+          return http.Response(
+            'data: ${jsonEncode({
+              'type': 'response.completed',
+              'response': {
+                'status': 'completed',
+                'output': requests.length == 1 ? [compactItem] : [],
+              },
+            })}\n\n',
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }),
+        resolved,
+      );
+      addTearDown(client.close);
+      final prepared = <String, dynamic>{
+        'model': model,
+        'input': [
+          {'role': 'user', 'content': 'earlier'},
+          savedItem,
+        ],
+      };
+      final preparedBefore = jsonEncode(prepared);
+      final compacted = await requestNativeCompaction(
+        client,
+        resolved,
+        model,
+        prepared,
+      );
+      final compactedBefore = jsonEncode(compacted.payload.toJson());
+      await sendOpenAIStream(client, resolved, model, [
+        {
+          'role': 'user',
+          'content': '',
+          nativeCompactionMessageKey: compacted.payload.toJson(),
+        },
+        {'role': 'user', 'content': 'next'},
+      ]).toList();
+      await sendOpenAIStream(client, resolved, model, [
+        {'role': 'user', 'content': 'earlier'},
+        ...history,
+        {'role': 'user', 'content': 'next'},
+      ]).toList();
+      expect(requests, hasLength(3));
+      for (final request in requests) {
+        expect(request.headers, isNot(contains('openai-beta')));
+        final input = (jsonDecode(request.body)['input'] as List).cast<Map>();
+        expect(
+          input.any(
+            (item) =>
+                item.containsKey('internal_chat_message_metadata_passthrough'),
+          ),
+          isFalse,
+        );
+      }
+      expect(
+        requests.first.headers['x-codex-beta-features'],
+        'remote_compaction_v2',
+      );
+      final continued = (jsonDecode(requests[1].body)['input'] as List)
+          .cast<Map>();
+      expect(continued.singleWhere((item) => item['type'] == 'compaction'), {
+        'type': 'compaction',
+        'id': 'compaction-id',
+        'encrypted_content': 'opaque-compaction',
+      });
+      final replayed = (jsonDecode(requests.last.body)['input'] as List)
+          .cast<Map>();
+      expect(
+        replayed.singleWhere((item) => item['role'] == 'assistant')['metadata'],
+        {'keep': true},
+      );
+      expect(jsonEncode(prepared), preparedBefore);
+      expect(jsonEncode(history), historyBefore);
+      expect(jsonEncode(compacted.payload.toJson()), compactedBefore);
+    },
+  );
+
+  test(
+    'Kimi Messages honor model thinking metadata and rotate both auth headers',
+    () async {
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient(
+          (_) async =>
+              jsonResponse({'access_token': 'fresh', 'expires_in': 3600}),
+        ),
+      )..bind(settings);
+      for (final scenario in [
+        (
+          mode: 'enabled',
+          required: false,
+          budget: 2048,
+          thinking: {'type': 'enabled', 'budget_tokens': 2048},
+          effort: null,
+        ),
+        (
+          mode: 'enabled',
+          required: false,
+          budget: 64000,
+          thinking: {'type': 'enabled', 'budget_tokens': 30976},
+          effort: null,
+        ),
+        (
+          mode: 'adaptive',
+          required: false,
+          budget: 64000,
+          thinking: {'type': 'adaptive', 'display': 'summarized'},
+          effort: 'high',
+        ),
+        (
+          mode: 'adaptive',
+          required: false,
+          budget: 0,
+          thinking: {'type': 'disabled'},
+          effort: null,
+        ),
+        (
+          mode: 'adaptive',
+          required: true,
+          budget: 0,
+          thinking: {'type': 'adaptive', 'display': 'summarized'},
+          effort: 'low',
+        ),
+      ]) {
+        final original = config(expired: false).copyWith(
+          modelOverrides: {
+            'kimi-display-id': {
+              'apiModelId': 'kimi-k2.5',
+              'oauthProtocol': 'anthropic',
+              'abilities': ['tool', 'reasoning'],
+              'reasoning': {
+                'dialect': scenario.mode == 'adaptive'
+                    ? 'anthropicAdaptiveEffort'
+                    : 'anthropicBudget',
+                'levels': ['low', 'medium', 'high'],
+                'canDisable': !scenario.required,
+              },
+            },
+          },
+        );
+        await settings.setProviderConfig(original.id, original);
+        final resolved = (await service.resolve(
+          original,
+        )).forModelProtocol('kimi-display-id');
+        final requests = <http.Request>[];
+        final client = service.authenticatedClient(
+          MockClient((request) async {
+            requests.add(request);
+            if (requests.length == 1) return http.Response('', 401);
+            return jsonResponse({
+              'type': 'message',
+              'role': 'assistant',
+              'content': [
+                {'type': 'text', 'text': 'OK'},
+              ],
+              'stop_reason': 'end_turn',
+            });
+          }),
+          resolved,
+        );
+        final chunks = await sendClaudeStream(
+          client,
+          resolved,
+          'kimi-display-id',
+          [
+            {'role': 'user', 'content': 'Hi'},
+          ],
+          stream: false,
+          reasoning: legacyBudget(scenario.budget),
+        ).toList();
+        expect(chunks.whereType<TextDelta>().map((e) => e.text).join(), 'OK');
+        expect(requests.length, 2);
+        expect(requests.last.url.path, '/coding/v1/messages');
+        expect(requests.last.headers['Authorization'], 'Bearer fresh');
+        expect(requests.last.headers['x-api-key'], 'fresh');
+        expect(requests.last.headers['X-Msh-Device-Id'], 'device');
+        final body = jsonDecode(requests.last.body) as Map;
+        expect(body['model'], 'kimi-k2.5');
+        expect(body['max_tokens'], 32000);
+        expect(body['thinking'], scenario.thinking);
+        expect((body['output_config'] as Map?)?['effort'], scenario.effort);
+      }
+    },
+  );
+
+  for (final switchDuring in ['response', 'refresh']) {
+    test(
+      '401 retry cancels if the account changes during $switchDuring',
+      () async {
+        final firstResponse = Completer<http.Response>();
+        final firstSent = Completer<void>();
+        final refreshStarted = Completer<void>();
+        final refreshResponse = Completer<http.Response>();
+        var refreshes = 0;
+        final service = ProviderOAuthService(
+          clientFactory: (_) => MockClient((request) async {
+            refreshes++;
+            if (!refreshStarted.isCompleted) refreshStarted.complete();
+            if (switchDuring == 'refresh') return refreshResponse.future;
+            return jsonResponse({
+              'access_token': 'refreshed-B',
+              'expires_in': 3600,
+            });
+          }),
+        )..bind(settings);
+        final original = config(expired: false);
+        await settings.setProviderConfig(original.id, original);
+        final requests = <http.Request>[];
+        final client = service.authenticatedClient(
+          MockClient((request) async {
+            requests.add(request);
+            if (requests.length == 1) {
+              firstSent.complete();
+              return firstResponse.future;
+            }
+            return jsonResponse({'choices': []});
+          }),
+          original,
+        );
+        final url = Uri.parse('${original.baseUrl}/chat/completions');
+        final pending = client.post(
+          url,
+          body:
+              '{"messages":[{"role":"user","content":"A private conversation"}]}',
+        );
+        final expectation = expectLater(
+          pending,
+          throwsA(
+            isA<ProviderOAuthException>().having(
+              (e) => e.kind,
+              'kind',
+              ProviderOAuthFailure.cancelled,
+            ),
+          ),
+        );
+        await firstSent.future;
+        if (switchDuring == 'refresh') {
+          firstResponse.complete(http.Response('', 401));
+          await refreshStarted.future;
+        }
+        await service.logout(original.id);
+        final accountB = original.copyWith(
+          oauthCredentials: ProviderOAuthCredentials(
+            accessToken: 'account-B-access',
+            refreshToken: 'account-B-refresh',
+            expiresAt: DateTime.now().add(const Duration(hours: 1)),
+            sessionId: 'account-B-session',
+          ),
+        );
+        await settings.setProviderConfig(original.id, accountB);
+        if (switchDuring == 'response') {
+          firstResponse.complete(http.Response('', 401));
+        } else {
+          refreshResponse.complete(
+            jsonResponse({'access_token': 'refreshed-A', 'expires_in': 3600}),
+          );
+        }
+        await expectation;
+        expect(requests.length, 1);
+        expect(requests.single.headers['Authorization'], 'Bearer access');
+        expect(refreshes, switchDuring == 'refresh' ? 1 : 0);
+        expect(
+          settings.providerConfigs[original.id]!.oauthCredentials!.accessToken,
+          'account-B-access',
+        );
+        expect(
+          settings
+              .providerConfigs[original.id]!
+              .oauthCredentials!
+              .requiresLogin,
+          false,
+        );
+        // A cancelled client must remain bound to A even when it is reused.
+        await expectLater(
+          client.post(url, body: '{}'),
+          throwsA(
+            isA<ProviderOAuthException>().having(
+              (e) => e.kind,
+              'kind',
+              ProviderOAuthFailure.cancelled,
+            ),
+          ),
+        );
+        expect(requests.length, 1);
+      },
+    );
+  }
+
+  test(
+    'Kimi OpenAI models use discovered native thinking on initial and tool requests',
+    () async {
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient(
+          (_) async => jsonResponse({
+            'data': [
+              for (final entry in [('k3', 'only'), ('optional-model', 'both')])
+                {
+                  'id': entry.$1,
+                  'protocol': null,
+                  'supports_thinking_type': entry.$2,
+                  'think_efforts': {
+                    'support': true,
+                    'valid_efforts': ['max', 'low', 'high'],
+                    'default_effort': 'max',
+                  },
+                },
+            ],
+          }),
+        ),
+      )..bind(settings);
+      final original = config(expired: false);
+      await settings.setProviderConfig(original.id, original);
+      await service.syncModels(original.id);
+      final synced = settings.providerConfigs[original.id]!;
+      expect(synced.modelOverrides['k3']['oauthProtocol'], 'openai');
+      expect(synced.modelOverrides['k3']['oauthThinkingMode'], isNull);
+      expect(synced.modelOverrides['k3']['reasoning'], {
+        'dialect': 'kimiThinking',
+        'levels': ['low', 'high', 'max'],
+        'canDisable': false,
+        'defaultLevel': 'max',
+        'budgets': <String, int>{},
+      });
+      expect(synced.modelOverrides['optional-model']['reasoning'], {
+        'dialect': 'kimiThinking',
+        'levels': ['low', 'high', 'max'],
+        'canDisable': true,
+        'defaultLevel': 'max',
+        'budgets': <String, int>{},
+      });
+      for (final scenario in [
+        (
+          model: 'k3',
+          budget: 0,
+          overrideThinking: null,
+          thinking: {'type': 'enabled', 'effort': 'low'},
+        ),
+        (
+          model: 'k3',
+          budget: 8000,
+          overrideThinking: null,
+          thinking: {'type': 'enabled', 'effort': 'low'},
+        ),
+        (
+          model: 'k3',
+          budget: 64000,
+          overrideThinking: null,
+          thinking: {'type': 'enabled', 'effort': 'high'},
+        ),
+        (
+          model: 'k3',
+          budget: 128000,
+          overrideThinking: null,
+          thinking: {'type': 'enabled', 'effort': 'max'},
+        ),
+        (model: 'k3', budget: null, overrideThinking: null, thinking: null),
+        (
+          model: 'optional-model',
+          budget: 0,
+          overrideThinking: null,
+          thinking: {'type': 'disabled'},
+        ),
+        (
+          model: 'optional-model',
+          budget: 64000,
+          overrideThinking: null,
+          thinking: {'type': 'enabled', 'effort': 'high'},
+        ),
+        (
+          model: 'k3',
+          budget: 0,
+          overrideThinking: {
+            'type': 'enabled',
+            'effort': 'high',
+            'keep': 'all',
+          },
+          // Custom body keys win over the discovered dialect.
+          thinking: {'type': 'enabled', 'effort': 'high', 'keep': 'all'},
+        ),
+      ]) {
+        final requests = <http.Request>[];
+        final client = service.authenticatedClient(
+          MockClient((request) async {
+            requests.add(request);
+            final delta = requests.length == 1
+                ? {
+                    'role': 'assistant',
+                    'tool_calls': [
+                      {
+                        'index': 0,
+                        'id': 'call_id',
+                        'type': 'function',
+                        'function': {'name': 'lookup', 'arguments': '{}'},
+                      },
+                    ],
+                  }
+                : {'content': 'OK'};
+            return http.Response(
+              'data: ${jsonEncode({
+                'choices': [
+                  {'index': 0, 'delta': delta, 'finish_reason': requests.length == 1 ? 'tool_calls' : 'stop'},
+                ],
+              })}\n\ndata: [DONE]\n\n',
+              200,
+              headers: {'content-type': 'text/event-stream'},
+            );
+          }),
+          synced,
+        );
+        final chunks = await sendOpenAIStream(
+          client,
+          await service.resolve(synced),
+          scenario.model,
+          [
+            {'role': 'user', 'content': 'Lookup'},
+          ],
+          reasoning: legacyBudget(scenario.budget),
+          extraBody: {
+            if (scenario.overrideThinking != null)
+              'thinking': scenario.overrideThinking,
+          },
+          tools: [
+            {
+              'type': 'function',
+              'function': {
+                'name': 'lookup',
+                'parameters': {'type': 'object', 'properties': {}},
+              },
+            },
+          ],
+          onToolCall: (name, args, {toolCallId}) async => 'result',
+        ).toList();
+        expect(chunks.whereType<TextDelta>().map((e) => e.text).join(), 'OK');
+        expect(requests.length, 2);
+        for (final request in requests) {
+          expect(request.url.path, '/coding/v1/chat/completions');
+          final body = jsonDecode(request.body) as Map;
+          expect(
+            body['thinking'],
+            scenario.thinking,
+            reason: '${scenario.model}, budget=${scenario.budget}',
+          );
+          expect(body.containsKey('reasoning_effort'), false);
+          expect(body.containsKey('output_config'), false);
+        }
+      }
+    },
+  );
+
+  for (final stream in [true, false]) {
+    for (final aliased in [false, true]) {
+      test(
+        'Kimi OpenAI reasoning survives history and two tool rounds (stream=$stream, alias=$aliased)',
+        () async {
+          final service = ProviderOAuthService(
+            clientFactory: (_) => MockClient(
+              (_) async => jsonResponse({
+                'data': [
+                  {
+                    'id': 'k3',
+                    'protocol': null,
+                    'supports_thinking_type': 'only',
+                    'think_efforts': {
+                      'support': true,
+                      'valid_efforts': ['low', 'high', 'max'],
+                      'default_effort': 'max',
+                    },
+                  },
+                ],
+              }),
+            ),
+          )..bind(settings);
+          final original = config(expired: false);
+          await settings.setProviderConfig(original.id, original);
+          await service.syncModels(original.id);
+          var synced = settings.providerConfigs[original.id]!;
+          final modelId = aliased ? 'my-model-label' : 'k3';
+          if (aliased) {
+            synced = synced.copyWith(
+              modelOverrides: {
+                ...synced.modelOverrides,
+                modelId: {
+                  ...(synced.modelOverrides['k3'] as Map),
+                  'apiModelId': 'k3',
+                },
+              },
+            );
+            await settings.setProviderConfig(synced.id, synced);
+          }
+          final requests = <Map<String, dynamic>>[];
+          final calls = <String>[];
+          final client = service.authenticatedClient(
+            MockClient((request) async {
+              requests.add(
+                (jsonDecode(request.body) as Map).cast<String, dynamic>(),
+              );
+              final round = requests.length;
+              final message = <String, dynamic>{
+                'role': 'assistant',
+                'content': round < 3 ? 'Step $round' : 'OK',
+                'reasoning_content': 'Thought $round\nContinue $round',
+                if (round < 3)
+                  'tool_calls': [
+                    {
+                      if (stream) 'index': 0,
+                      'id': 'call_$round',
+                      'type': 'function',
+                      'function': {'name': 'lookup', 'arguments': '{}'},
+                    },
+                  ],
+              };
+              final body = {
+                'choices': [
+                  {
+                    'index': 0,
+                    stream ? 'delta' : 'message': message,
+                    'finish_reason': round < 3 ? 'tool_calls' : 'stop',
+                  },
+                ],
+              };
+              return stream
+                  ? http.Response(
+                      'data: ${jsonEncode(body)}\n\ndata: [DONE]\n\n',
+                      200,
+                      headers: {'content-type': 'text/event-stream'},
+                    )
+                  : jsonResponse(body);
+            }),
+            synced,
+          );
+          final chunks = await sendOpenAIStream(
+            client,
+            await service.resolve(synced),
+            modelId,
+            [
+              {'role': 'user', 'content': 'Previous question'},
+              {
+                'role': 'assistant',
+                'content': 'Previous answer',
+                'reasoning_content': 'Previous thought\nKeep exactly',
+              },
+              {'role': 'user', 'content': 'Continue with two lookups'},
+            ],
+            stream: stream,
+            reasoning: legacyBudget(0),
+            tools: [
+              {
+                'type': 'function',
+                'function': {
+                  'name': 'lookup',
+                  'parameters': {'type': 'object', 'properties': {}},
+                },
+              },
+            ],
+            onToolCall: (name, args, {toolCallId}) async {
+              calls.add(toolCallId!);
+              return 'result';
+            },
+          ).toList();
+          expect(
+            chunks.whereType<TextDelta>().map((e) => e.text).join(),
+            contains('OK'),
+          );
+          expect(calls, ['call_1', 'call_2']);
+          expect(requests.length, 3);
+          // Fresh tool results must retain their matching, unmodified reasoning.
+          for (
+            var requestIndex = 1;
+            requestIndex < requests.length;
+            requestIndex++
+          ) {
+            final messages = (requests[requestIndex]['messages'] as List)
+                .cast<Map>();
+            final assistants = messages
+                .where((message) => message['tool_calls'] is List)
+                .toList();
+            expect(assistants.length, requestIndex);
+            for (var round = 1; round <= requestIndex; round++) {
+              expect(
+                assistants[round - 1]['reasoning_content'],
+                'Thought $round\nContinue $round',
+              );
+              expect(assistants[round - 1]['content'], 'Step $round');
+            }
+          }
+          // Preserved Thinking also retains earlier non-tool assistant turns.
+          for (final request in requests) {
+            expect(request['model'], 'k3');
+            final history = (request['messages'] as List)
+                .cast<Map>()
+                .singleWhere(
+                  (message) => message['content'] == 'Previous answer',
+                );
+            expect(
+              history['reasoning_content'],
+              'Previous thought\nKeep exactly',
+            );
+          }
+        },
+      );
+    }
+  }
+
+  test(
+    '401 refreshes and retries once; logout prevents a tool follow-up',
+    () async {
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient(
+          (_) async => jsonResponse({
+            'access_token': 'fresh',
+            'refresh_token': 'next',
+            'expires_in': 3600,
+          }),
+        ),
+      )..bind(settings);
+      final original = config(expired: false);
+      await settings.setProviderConfig(original.id, original);
+      var calls = 0;
+      final client = service.authenticatedClient(
+        MockClient((request) async {
+          calls++;
+          if (calls == 1) return http.Response('', 401);
+          expect(request.headers['Authorization'], 'Bearer fresh');
+          return jsonResponse({'choices': []});
+        }),
+        await service.resolve(original),
+      );
+      final result = await client.post(
+        Uri.parse('${original.baseUrl}/chat/completions'),
+        body: '{"messages":[]}',
+      );
+      expect(result.statusCode, 200);
+      expect(calls, 2);
+      await service.logout(original.id);
+      await expectLater(
+        client.post(
+          Uri.parse('${original.baseUrl}/chat/completions'),
+          body: '{}',
+        ),
+        throwsA(isA<ProviderOAuthException>()),
+      );
+      expect(calls, 2);
+    },
+  );
+
+  for (final protocol in [null, 'anthropic']) {
+    test(
+      'Kimi sync removes retired effort controls on $protocol transport',
+      () async {
+        const model = 'kimi-for-coding-highspeed';
+        final service = ProviderOAuthService(
+          clientFactory: (_) => MockClient(
+            (_) async => jsonResponse({
+              'data': [
+                {
+                  'id': model,
+                  'protocol': protocol,
+                  'supports_thinking_type': 'only',
+                  'supports_reasoning': false,
+                },
+              ],
+            }),
+          ),
+        )..bind(settings);
+        final original = config(expired: false).copyWith(
+          models: [model, 'retired-model'],
+          modelOverrides: {
+            model: {
+              'temperature': 0.2,
+              'reasoning': {
+                'dialect': 'anthropicBudget',
+                'levels': ['low', 'high'],
+                'defaultLevel': 'high',
+                'budgets': {'low': 1024, 'high': 64000},
+              },
+            },
+          },
+        );
+        await settings.setProviderConfig(original.id, original);
+        await service.syncModels(original.id);
+        final synced = settings.providerConfigs[original.id]!;
+        expect(synced.models, [model]);
+        expect(synced.modelOverrides[model]['temperature'], 0.2);
+        final spec = ModelSpecResolver.instance.spec(synced, model);
+        expect(spec.reasoning.levels, isEmpty);
+        expect(spec.reasoning.budgets, isEmpty);
+        expect(spec.reasoning.defaultLevel, ReasoningLevel.auto);
+        expect(spec.reasoning.canDisable, isFalse);
+        late Map body;
+        final client = service.authenticatedClient(
+          MockClient((request) async {
+            body = jsonDecode(request.body) as Map;
+            expect(
+              request.url.path,
+              protocol == 'anthropic'
+                  ? '/coding/v1/messages'
+                  : '/coding/v1/chat/completions',
+            );
+            return protocol == 'anthropic'
+                ? jsonResponse({
+                    'content': [
+                      {'type': 'text', 'text': 'OK'},
+                    ],
+                    'stop_reason': 'end_turn',
+                  })
+                : jsonResponse({
+                    'choices': [
+                      {
+                        'message': {'role': 'assistant', 'content': 'OK'},
+                        'finish_reason': 'stop',
+                      },
+                    ],
+                  });
+          }),
+          synced,
+        );
+        final effective = synced.forModelProtocol(model);
+        for (final budget in [0, 64000]) {
+          final send = protocol == 'anthropic'
+              ? sendClaudeStream
+              : sendOpenAIStream;
+          await send(
+            client,
+            effective,
+            model,
+            [
+              {'role': 'user', 'content': 'Hello'},
+            ],
+            stream: false,
+            reasoning: legacyBudget(budget),
+          ).toList();
+          if (protocol == 'anthropic') {
+            expect(body['thinking']['type'], 'enabled');
+            expect(
+              body['thinking']['budget_tokens'],
+              greaterThanOrEqualTo(1024),
+            );
+            expect(
+              body['thinking']['budget_tokens'],
+              lessThan(body['max_tokens'] as int),
+            );
+          } else {
+            expect(body['thinking'], {'type': 'enabled'});
+          }
+          expect(body['reasoning_effort'], isNull);
+          expect(body['output_config'], isNull);
+        }
+        client.close();
+        service.dispose();
+      },
+    );
+  }
+
+  test('Kimi accepts only advertised efforts and defaults', () {
+    for (final protocol in [null, 'anthropic']) {
+      final override = oauthDiscoveredReasoning(OAuthProvider.kimi, {
+        'protocol': protocol,
+        'supports_thinking_type': 'only',
+        'think_efforts': {
+          'support': true,
+          'valid_efforts': ['low', 'max', 'unknown'],
+          'default_effort': 'high',
+        },
+      })!;
+      expect(override.levels, [ReasoningLevel.low, ReasoningLevel.max]);
+      expect(override.defaultLevel, ReasoningLevel.auto);
+    }
+  });
+
+  test('OAuth catalog rows map onto ReasoningSpecOverride', () {
+    expect(
+      oauthDiscoveredReasoning(OAuthProvider.kimi, {
+        'protocol': 'anthropic',
+        'supports_thinking_type': 'only',
+        'think_efforts': {
+          'support': true,
+          'valid_efforts': ['low', 'medium', 'high'],
+        },
+      }),
+      ReasoningSpecOverride.fromJson({
+        'dialect': 'anthropicAdaptiveEffort',
+        'levels': ['low', 'medium', 'high'],
+        'canDisable': false,
+        'defaultLevel': 'auto',
+        'budgets': <String, int>{},
+      }),
+    );
+    expect(
+      oauthDiscoveredReasoning(OAuthProvider.kimi, {
+        'protocol': 'anthropic',
+        'supports_thinking_type': 'both',
+      }),
+      ReasoningSpecOverride.fromJson({
+        'dialect': 'anthropicBudget',
+        'levels': <String>[],
+        'canDisable': true,
+        'defaultLevel': 'auto',
+        'budgets': <String, int>{},
+      }),
+    );
+    expect(
+      oauthDiscoveredReasoning(OAuthProvider.kimi, {
+        'protocol': null,
+        'supports_thinking_type': 'only',
+        'think_efforts': {
+          'support': true,
+          'valid_efforts': ['max', 'low', 'high'],
+          'default_effort': 'max',
+        },
+      }),
+      ReasoningSpecOverride.fromJson({
+        'dialect': 'kimiThinking',
+        'levels': ['low', 'high', 'max'],
+        'canDisable': false,
+        'defaultLevel': 'max',
+        'budgets': <String, int>{},
+      }),
+    );
+    expect(
+      oauthDiscoveredReasoning(OAuthProvider.grok, {
+        'supports_reasoning': false,
+        'supported_reasoning_levels': <String>[],
+      }),
+      isNull,
+    );
+    expect(
+      oauthDiscoveredReasoning(OAuthProvider.grok, {
+        'supports_reasoning': true,
+        'supported_reasoning_levels': ['low', 'high'],
+      }),
+      ReasoningSpecOverride.fromJson({
+        'dialect': 'openaiResponsesReasoning',
+        'levels': ['low', 'high'],
+      }),
+    );
+    expect(
+      oauthDiscoveredReasoning(OAuthProvider.chatgpt, {
+        'supports_reasoning': true,
+        'supported_reasoning_efforts': ['none', 'medium', 'high'],
+      }),
+      ReasoningSpecOverride.fromJson({
+        'dialect': 'openaiResponsesReasoning',
+        'levels': ['medium', 'high'],
+        'canDisable': true,
+      }),
+    );
+    expect(
+      oauthDiscoveredReasoning(OAuthProvider.chatgpt, {'id': 'gpt-5.4'}),
+      isNull,
+    );
+
+    final merged = mergeOAuthModelOverride(
+      existing: {
+        'temperature': 0.7,
+        'oauthThinkingMode': 'enabled',
+        'oauthThinkingRequired': true,
+        'body': [
+          {'key': 'keep', 'value': 'user'},
+        ],
+      },
+      model: ModelSpec(
+        id: 'kimi-k2.5',
+        displayName: 'Kimi 2.5',
+        input: const [Modality.text, Modality.image],
+        abilities: const [ModelAbility.tool, ModelAbility.reasoning],
+      ),
+      reasoning: oauthDiscoveredReasoning(OAuthProvider.kimi, {
+        'protocol': 'anthropic',
+        'supports_thinking_type': 'only',
+        'think_efforts': {
+          'support': true,
+          'valid_efforts': ['low', 'medium', 'high'],
+        },
+      }),
+      extra: const {'oauthProtocol': 'anthropic'},
+    );
+    expect(merged['temperature'], 0.7);
+    expect(merged['oauthThinkingMode'], isNull);
+    expect(merged['oauthProtocol'], 'anthropic');
+    expect(merged['body'], [
+      {'key': 'keep', 'value': 'user'},
+    ]);
+    expect(merged['reasoning']['dialect'], 'anthropicAdaptiveEffort');
+    expect(merged['reasoning']['canDisable'], false);
+  });
+
+  test(
+    'Grok sync keeps API models alongside Fast and sends its inference id',
+    () async {
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient((request) async {
+          if (request.url.host == 'api.x.ai') {
+            expect(request.url.path, '/v1/models');
+            return jsonResponse({
+              'data': [
+                {
+                  'id': 'grok-4.7',
+                  'supported_reasoning_levels': ['low', 'medium', 'high'],
+                  'context_length': 262144,
+                  'max_output': 32768,
+                  'cost': {'input': 0.25},
+                },
+                {'id': 'grok-build', 'supports_reasoning': false},
+                {'id': 'grok-4.20-0309-reasoning'},
+                {'id': 'grok-imagine-image'},
+              ],
+            });
+          }
+          expect(
+            request.url.toString(),
+            'https://cli-chat-proxy.grok.com/v1/models-v2',
+          );
+          return jsonResponse({
+            'data': [
+              {
+                'id': 'grok-4.7',
+                'reasoningEfforts': ['low', 'high'],
+              },
+              {
+                'id': 'fast-picker-key',
+                'model': 'grok-4.7-build-fast',
+                'name': 'Grok 4.7 Fast',
+                'contextWindow': 500000,
+                'reasoningEfforts': [
+                  {'value': 'low'},
+                  {'value': 'medium'},
+                  {'value': 'high', 'default': true},
+                  {'value': 'xhigh'},
+                ],
+              },
+            ],
+          });
+        }),
+      )..bind(settings);
+      final original = config(provider: OAuthProvider.grok, expired: false);
+      await settings.setProviderConfig(original.id, original);
+      final discovered = await service.models(original);
+      final standard = discovered.singleWhere(
+        (model) => model.id == 'grok-4.7',
+      );
+      expect(standard.contextWindow, 262144);
+      expect(standard.maxOutput, 32768);
+      expect(standard.pricing, const ModelPricing(input: 0.25));
+      expect(
+        discovered
+            .singleWhere((m) => m.id == 'grok-4.7-build-fast')
+            .contextWindow,
+        500000,
+      );
+      await service.syncModels(original.id);
+      final synced = settings.providerConfigs[original.id]!;
+      expect(synced.models, [
+        'grok-4.7',
+        'grok-4.7-build-fast',
+        'grok-build',
+        'grok-4.20-0309-reasoning',
+      ]);
+      expect(synced.modelOverrides['grok-4.7']['reasoning'], {
+        'levels': ['low', 'high'],
+        'dialect': 'openaiResponsesReasoning',
+      });
+      expect(
+        synced.modelOverrides['grok-4.7-build-fast']['name'],
+        'Grok 4.7 Fast',
+      );
+      expect(synced.modelOverrides['grok-4.7-build-fast']['reasoning'], {
+        'levels': ['low', 'medium', 'high', 'xhigh'],
+        'dialect': 'openaiResponsesReasoning',
+      });
+      expect(
+        synced.modelOverrides['grok-4.7-build-fast']['contextWindow'],
+        isNull,
+      );
+      final fastSpec = ModelSpecResolver.instance.spec(
+        synced,
+        'grok-4.7-build-fast',
+      );
+      expect(fastSpec.contextWindow, 500000);
+      expect(
+        synced.modelOverrides['grok-4.7-build-fast']['abilities'],
+        contains('reasoning'),
+      );
+      expect(
+        synced.modelOverrides['grok-build']['abilities'],
+        isNot(contains('reasoning')),
+      );
+      expect(synced.modelOverrides['grok-build']['reasoning'], isNull);
+
+      final requests = <http.Request>[];
+      final client = service.authenticatedClient(
+        MockClient((request) async {
+          requests.add(request);
+          return http.Response(
+            'data: {"type":"response.output_text.delta","delta":"Hi"}\n\ndata: {"type":"response.completed","response":{"id":"resp","output":[]}}\n\n',
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }),
+        await service.resolve(synced),
+      );
+      await sendOpenAIStream(
+        client,
+        await service.resolve(synced),
+        'grok-4.7-build-fast',
+        [
+          {'role': 'user', 'content': 'Hi'},
+        ],
+        reasoning: legacyBudget(64000),
+      ).toList();
+      expect(requests.single.url.toString(), 'https://api.x.ai/v1/responses');
+      expect(requests.single.headers['Authorization'], 'Bearer access');
+      final body = jsonDecode(requests.single.body) as Map;
+      expect(body['model'], 'grok-4.7-build-fast');
+      expect(body['reasoning'], {'effort': 'xhigh'});
+      expect(body['store'], false);
+      expect(body['include'], contains('reasoning.encrypted_content'));
+    },
+  );
+
+  test(
+    'Grok Composer refreshes stored capabilities and sends supported efforts',
+    () async {
+      const id = 'grok-composer-2.5-fast';
+      const expectedLevels = [
+        ReasoningLevel.minimal,
+        ReasoningLevel.low,
+        ReasoningLevel.medium,
+        ReasoningLevel.high,
+        ReasoningLevel.xhigh,
+      ];
+      int? apiContext;
+      var catalogEfforts = <String>[];
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient((request) async {
+          if (request.url.host == 'api.x.ai') {
+            return jsonResponse({
+              'data': [
+                if (apiContext != null)
+                  {'id': id, 'context_length': apiContext},
+              ],
+            });
+          }
+          return jsonResponse({
+            'data': [
+              {
+                'id': 'composer-picker-key',
+                'model': id,
+                'supports_reasoning': false,
+                'supports_image_in': true,
+                'reasoningEfforts': catalogEfforts,
+              },
+            ],
+          });
+        }),
+      )..bind(settings);
+      addTearDown(service.dispose);
+      final original = config(provider: OAuthProvider.grok, expired: false)
+          .copyWith(
+            models: [id],
+            modelOverrides: {
+              id: {
+                'input': ['text', 'image'],
+                'abilities': ['tool'],
+                'reasoning': {
+                  'levels': ['max'],
+                  'canDisable': true,
+                },
+                'temperature': 0.7,
+              },
+            },
+          );
+      await settings.setProviderConfig(original.id, original);
+
+      final discovered = (await service.models(original)).single;
+      expect(discovered.id, id);
+      expect(discovered.displayName, 'Grok Composer 2.5 Fast');
+      expect(discovered.contextWindow, 200000);
+      expect(discovered.input, [Modality.text]);
+      expect(discovered.supportsReasoning, isTrue);
+      expect(discovered.reasoning.levels, expectedLevels);
+
+      await service.syncModels(original.id);
+      final synced = settings.providerConfigs[original.id]!;
+      final spec = ModelSpecResolver.instance.spec(synced, id);
+      expect(synced.models, [id]);
+      expect(synced.modelOverrides[id]['temperature'], 0.7);
+      expect(spec.contextWindow, 200000);
+      expect(spec.input, [Modality.text]);
+      expect(spec.abilities, [ModelAbility.tool, ModelAbility.reasoning]);
+      expect(spec.reasoning.dialect, ReasoningDialect.openaiResponsesReasoning);
+      expect(spec.reasoning.levels, expectedLevels);
+      expect(spec.reasoning.canDisable, isFalse);
+
+      apiContext = 256000;
+      catalogEfforts = ['max', 'low', 'xhigh'];
+      await service.syncModels(original.id);
+      final refreshed = settings.providerConfigs[original.id]!;
+      final refreshedSpec = ModelSpecResolver.instance.spec(refreshed, id);
+      expect(refreshedSpec.contextWindow, 256000);
+      expect(refreshedSpec.reasoning.levels, expectedLevels);
+
+      final requests = <http.Request>[];
+      final client = service.authenticatedClient(
+        MockClient((request) async {
+          requests.add(request);
+          return http.Response(
+            'data: {"type":"response.output_text.delta","delta":"Hi"}\n\ndata: {"type":"response.completed","response":{"id":"resp","output":[]}}\n\n',
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }),
+        refreshed,
+      );
+      addTearDown(client.close);
+      for (final level in [
+        ReasoningLevel.minimal,
+        ReasoningLevel.xhigh,
+        ReasoningLevel.max,
+      ]) {
+        await sendOpenAIStream(client, refreshed, id, [
+          {'role': 'user', 'content': 'Hi'},
+        ], reasoning: ReasoningRequest(level)).drain<void>();
+      }
+      for (final request in requests) {
+        expect(request.url.toString(), 'https://api.x.ai/v1/responses');
+        expect(jsonDecode(request.body)['model'], id);
+      }
+      expect(requests.map((request) => jsonDecode(request.body)['reasoning']), [
+        {'effort': 'minimal'},
+        {'effort': 'xhigh'},
+        {'effort': 'xhigh'},
+      ]);
+
+      apiContext = null;
+      await settings.setProviderConfig(
+        original.id,
+        refreshed.copyWith(
+          modelOverrides: {
+            id: {
+              'apiModelId': 'grok-4.7',
+              'input': ['text', 'image'],
+              'abilities': ['tool'],
+            },
+          },
+        ),
+      );
+      await service.syncModels(original.id);
+      final aliased = ModelSpecResolver.instance.spec(
+        settings.providerConfigs[original.id]!,
+        id,
+      );
+      expect(aliased.upstreamId, 'grok-4.7');
+      expect(aliased.contextWindow, isNull);
+      expect(aliased.input, [Modality.text, Modality.image]);
+      expect(aliased.supportsReasoning, isFalse);
+    },
+  );
+
+  test(
+    'OAuth numeric metadata survives a failed refresh and user edits stay in charge',
+    () async {
+      const id = 'relay/[tag] ExampleModel';
+      var status = 200;
+      final service = ProviderOAuthService(
+        clientFactory: (_) => MockClient(
+          (request) async => jsonResponse({
+            'data': [
+              {
+                'id': id,
+                'context_length': 262144,
+                'max_output': 32768,
+                'cost': {'input': 1},
+                'supports_image_in': true,
+                'supports_reasoning': true,
+              },
+            ],
+          }, status),
+        ),
+      )..bind(settings);
+      addTearDown(service.dispose);
+      final original = config(expired: false).copyWith(
+        modelOverrides: {
+          id: {
+            'contextWindow': 128000,
+            'input': ['text'],
+            'abilities': [],
+          },
+        },
+      );
+      await settings.setProviderConfig(original.id, original);
+      final discovered = (await service.models(original)).single;
+      expect(discovered.contextWindow, 128000);
+      expect(discovered.maxOutput, 32768);
+      expect(discovered.pricing, const ModelPricing(input: 1));
+      expect(discovered.input, [Modality.text]);
+      expect(discovered.abilities, isEmpty);
+
+      await service.syncModels(original.id);
+      final synced = settings.providerConfigs[original.id]!;
+      final saved = synced.modelOverrides[id] as Map;
+      expect(saved['contextWindow'], 128000);
+      expect(saved['input'], ['text']);
+      expect(saved['abilities'], isEmpty);
+      expect(saved, isNot(contains('maxOutput')));
+      expect(saved, isNot(contains('pricing')));
+
+      final reset = synced.copyWith(
+        modelOverrides: {
+          id: Map<String, dynamic>.from(saved)..remove('contextWindow'),
+        },
+      );
+      await settings.setProviderConfig(original.id, reset);
+      status = 503;
+      await expectLater(
+        service.models(reset),
+        throwsA(isA<ProviderOAuthException>()),
+      );
+      expect(ModelSpecResolver.instance.spec(reset, id).contextWindow, 262144);
+
+      await settings.removeProviderConfig(original.id);
+      expect(ModelSpecResolver.instance.spec(reset, id).contextWindow, isNull);
+    },
+  );
+
+  test(
+    'Grok sync preserves limits when the catalog omits valid context metadata',
+    () async {
+      for (final value in [null, 0, -1, 0.5, 'invalid']) {
+        final service = ProviderOAuthService(
+          clientFactory: (_) => MockClient(
+            (request) async => jsonResponse({
+              'data': request.url.path.endsWith('models-v2')
+                  ? [
+                      {
+                        'model': 'grok-4.7-build-fast',
+                        if (value != null) 'contextWindow': value,
+                      },
+                    ]
+                  : [],
+            }),
+          ),
+        )..bind(settings);
+        addTearDown(service.dispose);
+        final original = config(provider: OAuthProvider.grok, expired: false)
+            .copyWith(
+              modelOverrides: {
+                'grok-4.7-build-fast': {'contextWindow': 64000},
+              },
+            );
+        await settings.setProviderConfig(original.id, original);
+        final discovered = await service.models(original);
+        expect(discovered.single.contextWindow, 64000, reason: '$value');
+        await service.syncModels(original.id);
+        expect(
+          settings
+              .providerConfigs[original.id]!
+              .modelOverrides['grok-4.7-build-fast']['contextWindow'],
+          64000,
+          reason: '$value',
+        );
+      }
+    },
+  );
+}

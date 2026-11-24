@@ -1,0 +1,569 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+
+import '../../../core/models/message_part.dart';
+import '../../../core/models/message_part_snapshot.dart';
+
+/// Lightweight notifier for streaming message content updates.
+///
+/// This class provides a way to update streaming message content without
+/// triggering a full page rebuild. Instead of using ChangeNotifier.notifyListeners()
+/// which causes the entire HomePage to rebuild, this uses ValueNotifier
+/// so only the specific message widget that's listening will rebuild.
+///
+/// Usage:
+/// 1. StreamController updates content via updateContent()
+/// 2. ChatMessageWidget uses ValueListenableBuilder to listen to contentNotifier
+/// 3. Only the streaming message widget rebuilds, not the entire page
+/// Lightweight tool-height signal for [MessageListView] extent invalidation.
+///
+/// The list must not compare [oldWidget.toolParts] — that map is mutated in
+/// place. This event is the streaming path; a stored signature snapshot covers
+/// non-streaming rebuilds.
+@immutable
+class ToolHeightEvent {
+  const ToolHeightEvent({required this.messageId, required this.version});
+
+  final String messageId;
+  final int version;
+}
+
+/// In-bubble countdown while auto-retry waits for the next attempt.
+@immutable
+class RetryStatus {
+  const RetryStatus({
+    required this.attempt,
+    required this.maxRetries,
+    required this.retryAt,
+  });
+
+  final int attempt;
+  final int maxRetries;
+  final DateTime retryAt;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RetryStatus &&
+          attempt == other.attempt &&
+          maxRetries == other.maxRetries &&
+          retryAt == other.retryAt;
+
+  @override
+  int get hashCode => Object.hash(attempt, maxRetries, retryAt);
+}
+
+class StreamingContentNotifier {
+  /// Map of message ID to its content notifier.
+  /// Each streaming message has its own `ValueNotifier<String>`.
+  final Map<String, ValueNotifier<StreamingContentData>> _notifiers =
+      <String, ValueNotifier<StreamingContentData>>{};
+
+  /// Incremented tool-height events. Listeners must not rebuild the page.
+  final ValueNotifier<ToolHeightEvent?> toolHeightEvents =
+      ValueNotifier<ToolHeightEvent?>(null);
+
+  int _toolHeightVersion = 0;
+  final Set<String> _pendingHeightIds = <String>{};
+  var _heightFlushScheduled = false;
+  var _disposed = false;
+
+  /// Get or create a notifier for a message.
+  ValueNotifier<StreamingContentData> getNotifier(String messageId) {
+    return _notifiers.putIfAbsent(
+      messageId,
+      () => ValueNotifier<StreamingContentData>(
+        StreamingContentData(content: '', totalTokens: 0),
+      ),
+    );
+  }
+
+  /// Check if a notifier exists for a message.
+  bool hasNotifier(String messageId) => _notifiers.containsKey(messageId);
+
+  /// Update content for a streaming message.
+  /// This will only notify the specific widget listening to this message's notifier.
+  void updateContent(
+    String messageId,
+    String content,
+    int totalTokens, {
+    List<MessagePart>? parts,
+    String? reasoningText,
+    DateTime? reasoningStartAt,
+    bool forceRebuild = false,
+    List<int>? contentSplitOffsets,
+    List<int>? reasoningCountAtSplit,
+    List<int>? toolCountAtSplit,
+    int? promptTokens,
+    int? completionTokens,
+    int? cachedTokens,
+    int? durationMs,
+  }) {
+    final notifier = _notifiers[messageId];
+    if (notifier != null) {
+      final current = notifier.value;
+      final next = current.copyWith(
+        content: content,
+        totalTokens: totalTokens,
+        parts: parts ?? current.parts,
+        reasoningText: reasoningText,
+        reasoningStartAt: reasoningStartAt,
+        uiVersion: current.uiVersion + (forceRebuild ? 1 : 0),
+        contentSplitOffsets: contentSplitOffsets ?? current.contentSplitOffsets,
+        reasoningCountAtSplit:
+            reasoningCountAtSplit ?? current.reasoningCountAtSplit,
+        toolCountAtSplit: toolCountAtSplit ?? current.toolCountAtSplit,
+        promptTokens: promptTokens ?? current.promptTokens,
+        completionTokens: completionTokens ?? current.completionTokens,
+        cachedTokens: cachedTokens ?? current.cachedTokens,
+        durationMs: durationMs ?? current.durationMs,
+      );
+      notifier.value = next;
+      if (current.timelineStructureSignature !=
+          next.timelineStructureSignature) {
+        notifyToolHeightChanged(messageId);
+      }
+    }
+  }
+
+  /// Update reasoning content for a streaming message.
+  void updateReasoning(
+    String messageId, {
+    String? reasoningText,
+    DateTime? reasoningStartAt,
+    DateTime? reasoningFinishedAt,
+    List<int>? contentSplitOffsets,
+    List<int>? reasoningCountAtSplit,
+    List<int>? toolCountAtSplit,
+  }) {
+    final notifier = _notifiers[messageId];
+    if (notifier != null) {
+      final current = notifier.value;
+      final next = current.copyWith(
+        reasoningText: reasoningText ?? current.reasoningText,
+        reasoningStartAt: reasoningStartAt ?? current.reasoningStartAt,
+        reasoningFinishedAt: reasoningFinishedAt ?? current.reasoningFinishedAt,
+        contentSplitOffsets: contentSplitOffsets ?? current.contentSplitOffsets,
+        reasoningCountAtSplit:
+            reasoningCountAtSplit ?? current.reasoningCountAtSplit,
+        toolCountAtSplit: toolCountAtSplit ?? current.toolCountAtSplit,
+      );
+      notifier.value = next;
+      if (current.timelineStructureSignature !=
+          next.timelineStructureSignature) {
+        notifyToolHeightChanged(messageId);
+      }
+    }
+  }
+
+  /// Notify that tool parts have been updated.
+  /// Uses a version counter to trigger rebuild without copying tool data.
+  void notifyToolPartsUpdated(
+    String messageId, {
+    List<int>? contentSplitOffsets,
+    List<int>? reasoningCountAtSplit,
+    List<int>? toolCountAtSplit,
+  }) {
+    final notifier = _notifiers[messageId];
+    if (notifier != null) {
+      final current = notifier.value;
+      notifier.value = current.copyWith(
+        contentSplitOffsets: contentSplitOffsets ?? current.contentSplitOffsets,
+        reasoningCountAtSplit:
+            reasoningCountAtSplit ?? current.reasoningCountAtSplit,
+        toolCountAtSplit: toolCountAtSplit ?? current.toolCountAtSplit,
+        toolPartsVersion: current.toolPartsVersion + 1,
+      );
+    }
+    notifyToolHeightChanged(messageId);
+  }
+
+  /// Emit a coalesced tool-height event. Safe to call without a content notifier.
+  void notifyToolHeightChanged(String messageId) {
+    if (_disposed) return;
+    if (!_pendingHeightIds.add(messageId)) return;
+    if (_heightFlushScheduled) return;
+    _heightFlushScheduled = true;
+    scheduleMicrotask(_flushToolHeightEvents);
+  }
+
+  void _flushToolHeightEvents() {
+    _heightFlushScheduled = false;
+    if (_disposed) return;
+    final ids = List<String>.of(_pendingHeightIds);
+    _pendingHeightIds.clear();
+    for (final id in ids) {
+      _toolHeightVersion += 1;
+      toolHeightEvents.value = ToolHeightEvent(
+        messageId: id,
+        version: _toolHeightVersion,
+      );
+    }
+  }
+
+  /// Force a rebuild of the streaming message widget.
+  /// Used when external state like reasoning expanded changes.
+  void forceRebuild(String messageId) {
+    final notifier = _notifiers[messageId];
+    if (notifier != null) {
+      final current = notifier.value;
+      notifier.value = current.copyWith(uiVersion: current.uiVersion + 1);
+    }
+  }
+
+  void updateRetryStatus(String messageId, RetryStatus? status) {
+    final notifier = getNotifier(messageId);
+    final current = notifier.value;
+    if (current.retryStatus == status) return;
+    notifier.value = current.copyWith(
+      retryStatus: status,
+      clearRetryStatus: status == null,
+    );
+  }
+
+  /// Remove notifier when streaming is complete.
+  void removeNotifier(String messageId) {
+    final notifier = _notifiers.remove(messageId);
+    notifier?.dispose();
+  }
+
+  /// Dispose notifiers except those belonging to retained generation runs.
+  void clear({Set<String> keepMessageIds = const {}}) {
+    _notifiers.removeWhere((id, notifier) {
+      if (keepMessageIds.contains(id)) return false;
+      notifier.dispose();
+      return true;
+    });
+    _pendingHeightIds.removeWhere((id) => !keepMessageIds.contains(id));
+  }
+
+  /// Dispose all resources.
+  void dispose() {
+    _disposed = true;
+    _pendingHeightIds.clear();
+    clear();
+    toolHeightEvents.dispose();
+  }
+}
+
+/// Data class for streaming content.
+@immutable
+class StreamingContentData {
+  factory StreamingContentData({
+    required String content,
+    required int totalTokens,
+    List<MessagePart>? parts,
+    String? reasoningText,
+    DateTime? reasoningStartAt,
+    DateTime? reasoningFinishedAt,
+    List<int>? contentSplitOffsets,
+    List<int>? reasoningCountAtSplit,
+    List<int>? toolCountAtSplit,
+    int toolPartsVersion = 0,
+    int uiVersion = 0,
+    int? promptTokens,
+    int? completionTokens,
+    int? cachedTokens,
+    int? durationMs,
+    RetryStatus? retryStatus,
+    int? timelineStructureSignature,
+    List<int>? partStructureTokens,
+  }) {
+    final tokens = partStructureTokens ?? _partStructureTokensFor(parts);
+    return StreamingContentData._(
+      content: content,
+      totalTokens: totalTokens,
+      parts: parts,
+      reasoningText: reasoningText,
+      reasoningStartAt: reasoningStartAt,
+      reasoningFinishedAt: reasoningFinishedAt,
+      contentSplitOffsets: contentSplitOffsets,
+      reasoningCountAtSplit: reasoningCountAtSplit,
+      toolCountAtSplit: toolCountAtSplit,
+      toolPartsVersion: toolPartsVersion,
+      uiVersion: uiVersion,
+      promptTokens: promptTokens,
+      completionTokens: completionTokens,
+      cachedTokens: cachedTokens,
+      durationMs: durationMs,
+      retryStatus: retryStatus,
+      partStructureTokens: tokens,
+      timelineStructureSignature:
+          timelineStructureSignature ??
+          _timelineStructureSignatureFor(
+            partTokens: tokens,
+            partsLength: parts?.length ?? 0,
+            contentSplitOffsets: contentSplitOffsets,
+            reasoningCountAtSplit: reasoningCountAtSplit,
+            toolCountAtSplit: toolCountAtSplit,
+            toolPartsVersion: toolPartsVersion,
+          ),
+    );
+  }
+
+  const StreamingContentData._({
+    required this.content,
+    required this.totalTokens,
+    this.parts,
+    this.reasoningText,
+    this.reasoningStartAt,
+    this.reasoningFinishedAt,
+    this.contentSplitOffsets,
+    this.reasoningCountAtSplit,
+    this.toolCountAtSplit,
+    this.toolPartsVersion = 0,
+    this.uiVersion = 0,
+    this.promptTokens,
+    this.completionTokens,
+    this.cachedTokens,
+    this.durationMs,
+    this.retryStatus,
+    required this.partStructureTokens,
+    required this.timelineStructureSignature,
+  });
+
+  final String content;
+  final int totalTokens;
+  final List<MessagePart>? parts;
+  final String? reasoningText;
+  final DateTime? reasoningStartAt;
+  final DateTime? reasoningFinishedAt;
+  final List<int>? contentSplitOffsets;
+  final List<int>? reasoningCountAtSplit;
+  final List<int>? toolCountAtSplit;
+
+  /// Version counter for tool parts updates. Incrementing this triggers rebuild.
+  final int toolPartsVersion;
+
+  /// Version counter for UI state changes (e.g., reasoning expanded toggle).
+  final int uiVersion;
+
+  /// Per-part structure tokens. Reused when only text/token fields change.
+  final List<int> partStructureTokens;
+
+  /// Identity of parts/splits/tool version that change timeline height.
+  ///
+  /// TextPart and ReasoningPart content is ignored so token growth does not
+  /// look like a new block. ToolCallPart uses id+name only. Computed once
+  /// when those inputs change — not on every read.
+  final int timelineStructureSignature;
+
+  /// Detailed token usage fields.
+  final int? promptTokens;
+  final int? completionTokens;
+  final int? cachedTokens;
+  final int? durationMs;
+  final RetryStatus? retryStatus;
+
+  StreamingContentData copyWith({
+    String? content,
+    int? totalTokens,
+    List<MessagePart>? parts,
+    String? reasoningText,
+    DateTime? reasoningStartAt,
+    DateTime? reasoningFinishedAt,
+    List<int>? contentSplitOffsets,
+    List<int>? reasoningCountAtSplit,
+    List<int>? toolCountAtSplit,
+    int? toolPartsVersion,
+    int? uiVersion,
+    int? promptTokens,
+    int? completionTokens,
+    int? cachedTokens,
+    int? durationMs,
+    RetryStatus? retryStatus,
+    bool clearRetryStatus = false,
+  }) {
+    final nextParts = parts ?? this.parts;
+    final nextSplits = contentSplitOffsets ?? this.contentSplitOffsets;
+    final nextReasoningCounts =
+        reasoningCountAtSplit ?? this.reasoningCountAtSplit;
+    final nextToolCounts = toolCountAtSplit ?? this.toolCountAtSplit;
+    final nextToolVersion = toolPartsVersion ?? this.toolPartsVersion;
+    final nextPartTokens = _reuseOrComputePartTokens(
+      nextParts,
+      previousParts: this.parts,
+      previousTokens: partStructureTokens,
+    );
+    final structureUnchanged =
+        identical(nextPartTokens, partStructureTokens) &&
+        identical(nextSplits, this.contentSplitOffsets) &&
+        identical(nextReasoningCounts, this.reasoningCountAtSplit) &&
+        identical(nextToolCounts, this.toolCountAtSplit) &&
+        nextToolVersion == this.toolPartsVersion;
+    return StreamingContentData(
+      content: content ?? this.content,
+      totalTokens: totalTokens ?? this.totalTokens,
+      parts: nextParts,
+      reasoningText: reasoningText ?? this.reasoningText,
+      reasoningStartAt: reasoningStartAt ?? this.reasoningStartAt,
+      reasoningFinishedAt: reasoningFinishedAt ?? this.reasoningFinishedAt,
+      contentSplitOffsets: nextSplits,
+      reasoningCountAtSplit: nextReasoningCounts,
+      toolCountAtSplit: nextToolCounts,
+      toolPartsVersion: nextToolVersion,
+      uiVersion: uiVersion ?? this.uiVersion,
+      promptTokens: promptTokens ?? this.promptTokens,
+      completionTokens: completionTokens ?? this.completionTokens,
+      cachedTokens: cachedTokens ?? this.cachedTokens,
+      durationMs: durationMs ?? this.durationMs,
+      retryStatus: clearRetryStatus ? null : (retryStatus ?? this.retryStatus),
+      partStructureTokens: nextPartTokens,
+      timelineStructureSignature: structureUnchanged
+          ? timelineStructureSignature
+          : _timelineStructureSignatureFor(
+              partTokens: nextPartTokens,
+              partsLength: nextParts?.length ?? 0,
+              contentSplitOffsets: nextSplits,
+              reasoningCountAtSplit: nextReasoningCounts,
+              toolCountAtSplit: nextToolCounts,
+              toolPartsVersion: nextToolVersion,
+            ),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StreamingContentData &&
+          runtimeType == other.runtimeType &&
+          content == other.content &&
+          totalTokens == other.totalTokens &&
+          listEquals(parts, other.parts) &&
+          reasoningText == other.reasoningText &&
+          reasoningStartAt == other.reasoningStartAt &&
+          reasoningFinishedAt == other.reasoningFinishedAt &&
+          listEquals(contentSplitOffsets, other.contentSplitOffsets) &&
+          listEquals(reasoningCountAtSplit, other.reasoningCountAtSplit) &&
+          listEquals(toolCountAtSplit, other.toolCountAtSplit) &&
+          toolPartsVersion == other.toolPartsVersion &&
+          uiVersion == other.uiVersion &&
+          promptTokens == other.promptTokens &&
+          completionTokens == other.completionTokens &&
+          cachedTokens == other.cachedTokens &&
+          durationMs == other.durationMs &&
+          retryStatus == other.retryStatus;
+
+  @override
+  int get hashCode =>
+      content.hashCode ^
+      totalTokens.hashCode ^
+      Object.hashAll(parts ?? const <MessagePart>[]) ^
+      reasoningText.hashCode ^
+      reasoningStartAt.hashCode ^
+      reasoningFinishedAt.hashCode ^
+      Object.hashAll(contentSplitOffsets ?? const <int>[]) ^
+      Object.hashAll(reasoningCountAtSplit ?? const <int>[]) ^
+      Object.hashAll(toolCountAtSplit ?? const <int>[]) ^
+      toolPartsVersion.hashCode ^
+      uiVersion.hashCode ^
+      promptTokens.hashCode ^
+      completionTokens.hashCode ^
+      cachedTokens.hashCode ^
+      durationMs.hashCode ^
+      retryStatus.hashCode;
+}
+
+/// Incremented only when a ToolCallPart payload is actually jsonDecoded.
+@visibleForTesting
+int debugToolIdentityDecodeCount = 0;
+
+List<int> _partStructureTokensFor(List<MessagePart>? parts) {
+  if (parts == null || parts.isEmpty) return const <int>[];
+  return [for (final part in parts) _partStructureToken(part)];
+}
+
+List<int> _reuseOrComputePartTokens(
+  List<MessagePart>? parts, {
+  required List<MessagePart>? previousParts,
+  required List<int> previousTokens,
+}) {
+  if (parts == null || parts.isEmpty) return const <int>[];
+  if (identical(parts, previousParts)) return previousTokens;
+  if (parts is MessagePartSnapshot &&
+      previousParts is MessagePartSnapshot &&
+      parts.length == previousParts.length &&
+      previousTokens.length == parts.length) {
+    final changed = parts.changesSince(previousParts);
+    if (changed != null &&
+        changed.every(
+          (i) =>
+              i < parts.length &&
+              _canReusePartToken(parts[i], previousParts[i]),
+        )) {
+      return previousTokens;
+    }
+  }
+  return [
+    for (var i = 0; i < parts.length; i++)
+      if (previousParts != null &&
+          i < previousParts.length &&
+          i < previousTokens.length &&
+          _canReusePartToken(parts[i], previousParts[i]))
+        previousTokens[i]
+      else
+        _partStructureToken(parts[i]),
+  ];
+}
+
+bool _canReusePartToken(MessagePart next, MessagePart previous) {
+  if (identical(next, previous)) return true;
+  if (next.runtimeType != previous.runtimeType) return false;
+  if (next is ToolCallPart && previous is ToolCallPart) {
+    return next.payloadJson == previous.payloadJson;
+  }
+  if (next is ImagePart && previous is ImagePart) {
+    return next.unavailable == previous.unavailable &&
+        next.uri.trim().isEmpty == previous.uri.trim().isEmpty &&
+        next.assetId == previous.assetId &&
+        next.id == previous.id;
+  }
+  return true;
+}
+
+int _timelineStructureSignatureFor({
+  required List<int> partTokens,
+  required int partsLength,
+  required List<int>? contentSplitOffsets,
+  required List<int>? reasoningCountAtSplit,
+  required List<int>? toolCountAtSplit,
+  required int toolPartsVersion,
+}) {
+  return Object.hash(
+    partsLength,
+    Object.hashAll(partTokens),
+    Object.hashAll(contentSplitOffsets ?? const <int>[]),
+    Object.hashAll(reasoningCountAtSplit ?? const <int>[]),
+    Object.hashAll(toolCountAtSplit ?? const <int>[]),
+    toolPartsVersion,
+  );
+}
+
+int _partStructureToken(MessagePart part) {
+  if (part is ToolCallPart) {
+    return Object.hash(3, _toolCallIdentity(part.payloadJson));
+  }
+  if (part is ImagePart) {
+    return Object.hash(
+      4,
+      part.unavailable,
+      part.uri.trim().isNotEmpty,
+      part.assetId,
+      part.id,
+    );
+  }
+  return part.runtimeType.hashCode;
+}
+
+String _toolCallIdentity(String payloadJson) {
+  debugToolIdentityDecodeCount++;
+  try {
+    final decoded = jsonDecode(payloadJson);
+    if (decoded is Map) {
+      return '${decoded['id']}|${decoded['name']}';
+    }
+  } catch (_) {}
+  return '';
+}

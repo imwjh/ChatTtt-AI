@@ -1,0 +1,6638 @@
+import 'package:Kelivo/features/home/controllers/stream_controller.dart'
+    show ReasoningSegmentData;
+import 'package:Kelivo/core/database/app_database.dart';
+import 'package:Kelivo/core/database/compression_repository.dart';
+import 'package:Kelivo/core/database/generation_run.dart';
+import 'package:Kelivo/shared/widgets/snackbar.dart';
+import 'package:Kelivo/core/models/compression_config.dart';
+import 'package:Kelivo/core/models/instruction_injection.dart';
+import 'package:Kelivo/core/services/api/generation/text_generation_result.dart';
+import 'package:Kelivo/core/models/context_operation.dart';
+import 'package:Kelivo/l10n/app_localizations_en.dart';
+import 'package:Kelivo/core/models/quote_ref.dart';
+import 'package:Kelivo/features/intelligent_ui/host/ui_context_submission.dart';
+import 'package:Kelivo/features/intelligent_ui/host/ui_user_context_parts.dart';
+import 'package:Kelivo/features/intelligent_ui/models/ui_context_attachment.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:drift/drift.dart' show driftRuntimeOptions;
+import 'package:flutter/foundation.dart'
+    show debugDefaultTargetPlatformOverride;
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+// ignore: depend_on_referenced_packages
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:provider/provider.dart';
+
+import '../../../support/business_test_harness.dart';
+import '../../../support/gated_xfile.dart';
+import 'package:Kelivo/core/database/chat_database_repository.dart';
+import 'package:Kelivo/core/database/business_preferences.dart';
+import 'package:Kelivo/core/models/chat_input_data.dart';
+import 'package:Kelivo/core/models/chat_message.dart';
+import 'package:Kelivo/core/models/composer_draft.dart';
+import 'package:Kelivo/core/models/conversation.dart';
+import 'package:Kelivo/core/models/compress_context_options.dart';
+import 'package:Kelivo/core/services/chat/context_compression_service.dart';
+import 'package:Kelivo/core/models/message_part.dart';
+import 'package:Kelivo/core/models/preset_message.dart';
+import 'package:Kelivo/core/providers/assistant_provider.dart';
+import 'package:Kelivo/core/providers/instruction_injection_provider.dart';
+import 'package:Kelivo/core/providers/mcp_provider.dart';
+import 'package:Kelivo/core/providers/settings_provider.dart';
+import 'package:Kelivo/core/services/chat/chat_service.dart';
+import 'package:Kelivo/core/services/app_exit_flush.dart';
+import 'package:Kelivo/core/services/api/providers/openai/responses_history.dart';
+import 'package:Kelivo/core/services/api/providers/claude/claude_history.dart';
+import 'package:Kelivo/core/services/api/providers/google_gemini.dart';
+import 'package:Kelivo/core/services/api/stream/stream_chunk_emit.dart';
+import 'package:Kelivo/core/services/mcp/mcp_tool_service.dart';
+import 'package:Kelivo/features/chat/widgets/chat_message_widget.dart'
+    show ToolUIPart;
+import 'package:Kelivo/features/home/controllers/home_page_controller.dart';
+import 'package:Kelivo/features/home/controllers/chat_actions.dart';
+import 'package:Kelivo/features/home/controllers/scroll_controller.dart';
+import 'package:Kelivo/features/home/services/ask_user_interaction_service.dart';
+import 'package:Kelivo/features/home/services/chat_suggestion_service.dart';
+import 'package:Kelivo/features/home/utils/model_display_helper.dart';
+import 'package:Kelivo/features/home/widgets/chat_input_bar.dart';
+import 'package:Kelivo/features/search/services/global_session_search_service.dart';
+import 'package:Kelivo/l10n/app_localizations.dart';
+import 'package:Kelivo/icons/lucide_adapter.dart';
+
+class _GatedCompressionRepository extends CompressionRepository {
+  _GatedCompressionRepository(super.store);
+  Completer<void>? readHold;
+  final readEntered = Completer<void>();
+  int readsToSkip = 0;
+
+  @override
+  Future<Map<String, dynamic>> overrides(String id) async {
+    final values = await super.overrides(id);
+    if (readHold != null && readsToSkip-- <= 0 && !readEntered.isCompleted) {
+      readEntered.complete();
+      await readHold!.future;
+    }
+    return values;
+  }
+}
+
+class _GatedChatRepository extends ChatDatabaseRepository {
+  _GatedChatRepository(this.database, File file)
+    : super(database, databaseFile: file);
+  final AppDatabase database;
+  bool failAssetGc = false;
+  int assetGcFailures = 0;
+
+  @override
+  Future<bool> hasDueAssetGc() async {
+    if (failAssetGc) {
+      assetGcFailures++;
+      throw StateError('asset cleanup unavailable');
+    }
+    return super.hasDueAssetGc();
+  }
+
+  String? holdMessageReadFor;
+  final messageRead = Completer<ChatMessage>();
+  final releaseMessageRead = Completer<void>();
+
+  @override
+  Future<List<ChatMessage>> getMessagesByIds(
+    List<String> ids, {
+    bool background = false,
+  }) {
+    final result = super.getMessagesByIds(ids, background: background);
+    final id = holdMessageReadFor;
+    if (id == null || !ids.contains(id)) return result;
+    holdMessageReadFor = null;
+    return result.then((messages) async {
+      messageRead.complete(messages.singleWhere((message) => message.id == id));
+      await releaseMessageRead.future;
+      return messages;
+    });
+  }
+
+  String? holdResumeWriteFor;
+  final resumeWriteStarted = Completer<void>();
+  final releaseResumeWrite = Completer<void>();
+
+  @override
+  Future<ChatMessage?> updateMessageFields(
+    String messageId, {
+    String? content,
+    List<MessagePart>? parts,
+    int? totalTokens,
+    bool? isStreaming,
+    String? reasoningText,
+    DateTime? reasoningStartAt,
+    DateTime? reasoningFinishedAt,
+    String? translation,
+    String? reasoningSegmentsJson,
+    int? promptTokens,
+    int? completionTokens,
+    int? cachedTokens,
+    int? durationMs,
+    int? reasoningTokens,
+    int? cacheWriteTokens,
+  }) async {
+    if (messageId == holdResumeWriteFor && isStreaming == true) {
+      holdResumeWriteFor = null;
+      resumeWriteStarted.complete();
+      await releaseResumeWrite.future;
+    }
+    return super.updateMessageFields(
+      messageId,
+      content: content,
+      parts: parts,
+      totalTokens: totalTokens,
+      isStreaming: isStreaming,
+      reasoningText: reasoningText,
+      reasoningStartAt: reasoningStartAt,
+      reasoningFinishedAt: reasoningFinishedAt,
+      translation: translation,
+      reasoningSegmentsJson: reasoningSegmentsJson,
+      promptTokens: promptTokens,
+      completionTokens: completionTokens,
+      cachedTokens: cachedTokens,
+      durationMs: durationMs,
+      reasoningTokens: reasoningTokens,
+      cacheWriteTokens: cacheWriteTokens,
+    );
+  }
+
+  String? holdToolEventsFor;
+  final toolEventsRead = Completer<List<Map<String, dynamic>>>();
+  final releaseToolEvents = Completer<void>();
+
+  @override
+  Future<Map<String, List<Map<String, dynamic>>>> getToolEventsForMessages(
+    Iterable<String> messageIds,
+  ) {
+    final result = super.getToolEventsForMessages(messageIds);
+    final id = holdToolEventsFor;
+    if (id == null || !messageIds.contains(id)) return result;
+    holdToolEventsFor = null;
+    return result.then((events) async {
+      toolEventsRead.complete(events[id] ?? const []);
+      await releaseToolEvents.future;
+      return events;
+    });
+  }
+
+  late final _gatedCompression = _GatedCompressionRepository(
+    super.compression.store,
+  );
+  @override
+  _GatedCompressionRepository get compression => _gatedCompression;
+}
+
+class _GatedChatService extends ChatService {
+  _GatedChatService({required super.existingRepository});
+  Completer<void>? versionSaveHold;
+  bool versionSaveEntered = false;
+  bool holdAfterVersionSave = false;
+  Completer<void>? regenerationHold;
+  bool regenerationEntered = false;
+  bool failAfterVersionSave = false;
+  Completer<void>? presetHold;
+  String? presetConversationId;
+  Completer<void>? checkpointHold;
+  final checkpointEntered = Completer<void>();
+  GenerationRunState? holdTransition;
+  final transitionCommitted = Completer<GenerationRun>();
+  final releaseTransition = Completer<void>();
+  GenerationRunState? holdTerminal;
+  final terminalCommitted = Completer<GenerationRun>();
+  final releaseTerminal = Completer<void>();
+  final terminalWrites = <GenerationRunState>[];
+  bool holdBeforeFailedWrite = false;
+  final beforeFailedWrite = Completer<String>();
+  bool failContextRead = false;
+
+  String? holdTimelineFor;
+  final timelineRead = Completer<LoadedTimelinePage?>();
+  final releaseTimeline = Completer<void>();
+
+  @override
+  Future<LoadedTimelinePage?> loadTimelinePage(
+    String conversationId, {
+    String? beforeRevisionId,
+    String? afterRevisionId,
+    String? aroundRevisionId,
+    bool fromStart = false,
+    int limit = 40,
+  }) {
+    final result = super.loadTimelinePage(
+      conversationId,
+      beforeRevisionId: beforeRevisionId,
+      afterRevisionId: afterRevisionId,
+      aroundRevisionId: aroundRevisionId,
+      fromStart: fromStart,
+      limit: limit,
+    );
+    if (conversationId != holdTimelineFor) return result;
+    holdTimelineFor = null;
+    return result.then((page) async {
+      timelineRead.complete(page);
+      await releaseTimeline.future;
+      return page;
+    });
+  }
+
+  @override
+  Future<List<ChatMessage>> loadSelectedContextMessages(
+    String conversationId, {
+    required int limit,
+    String? throughRevisionId,
+    bool includeFollowingAssistant = false,
+  }) async {
+    if (failContextRead) throw StateError('preparation failed');
+    return super.loadSelectedContextMessages(
+      conversationId,
+      limit: limit,
+      throughRevisionId: throughRevisionId,
+      includeFollowingAssistant: includeFollowingAssistant,
+    );
+  }
+
+  @override
+  Future<GenerationRun> transitionGenerationRun({
+    required String id,
+    required GenerationRunState expectedState,
+    required int expectedStateRevision,
+    required GenerationRunState nextState,
+    String? errorCode,
+  }) async {
+    final run = await super.transitionGenerationRun(
+      id: id,
+      expectedState: expectedState,
+      expectedStateRevision: expectedStateRevision,
+      nextState: nextState,
+      errorCode: errorCode,
+    );
+    if (nextState == holdTransition && !transitionCommitted.isCompleted) {
+      transitionCommitted.complete(run);
+      await releaseTransition.future;
+    }
+    return run;
+  }
+
+  @override
+  Future<GenerationRun?> finalizeGenerationRunSilent({
+    required ChatMessage message,
+    required List<Map<String, dynamic>> toolEvents,
+    required String? generationRunId,
+    required GenerationRunState? expectedState,
+    required int? expectedStateRevision,
+    required GenerationRunState terminalState,
+    int? checkpointSeq,
+    String? errorCode,
+  }) async {
+    terminalWrites.add(terminalState);
+    if (holdBeforeFailedWrite && terminalState == GenerationRunState.failed) {
+      beforeFailedWrite.complete(generationRunId!);
+      await releaseTerminal.future;
+    }
+    final run = await super.finalizeGenerationRunSilent(
+      message: message,
+      toolEvents: toolEvents,
+      generationRunId: generationRunId,
+      expectedState: expectedState,
+      expectedStateRevision: expectedStateRevision,
+      terminalState: terminalState,
+      checkpointSeq: checkpointSeq,
+      errorCode: errorCode,
+    );
+    if (terminalState == holdTerminal &&
+        run != null &&
+        !terminalCommitted.isCompleted) {
+      terminalCommitted.complete(run);
+      await releaseTerminal.future;
+    }
+    return run;
+  }
+
+  @override
+  Future<void> updateStreamingCheckpointSilent(
+    ChatMessage message,
+    List<Map<String, dynamic>> toolEvents, {
+    String? generationRunId,
+    int? checkpointSeq,
+  }) async {
+    if (checkpointHold != null &&
+        toolEvents.any(
+          (event) =>
+              event['arguments'] is Map &&
+              (event['arguments'] as Map).isNotEmpty,
+        )) {
+      if (!checkpointEntered.isCompleted) checkpointEntered.complete();
+      await checkpointHold!.future;
+    }
+    await super.updateStreamingCheckpointSilent(
+      message,
+      toolEvents,
+      generationRunId: generationRunId,
+      checkpointSeq: checkpointSeq,
+    );
+  }
+
+  @override
+  Future<ChatMessage> addMessage({
+    required String conversationId,
+    required String role,
+    String content = '',
+    List<MessagePart>? parts,
+    List<QuoteRef> quotes = const [],
+    String? modelId,
+    String? providerId,
+    int? totalTokens,
+    bool isStreaming = false,
+    String? reasoningText,
+    DateTime? reasoningStartAt,
+    DateTime? reasoningFinishedAt,
+    String? groupId,
+    int? version,
+    bool selectVersion = false,
+    String? temporaryAfterGroupId,
+    UiContextSubmission? uiContext,
+  }) async {
+    if (content == 'preset question' && presetHold != null) {
+      presetConversationId = conversationId;
+      await presetHold!.future;
+    }
+    return super.addMessage(
+      conversationId: conversationId,
+      role: role,
+      content: content,
+      parts: parts,
+      quotes: quotes,
+      modelId: modelId,
+      providerId: providerId,
+      totalTokens: totalTokens,
+      isStreaming: isStreaming,
+      reasoningText: reasoningText,
+      reasoningStartAt: reasoningStartAt,
+      reasoningFinishedAt: reasoningFinishedAt,
+      groupId: groupId,
+      version: version,
+      selectVersion: selectVersion,
+      temporaryAfterGroupId: temporaryAfterGroupId,
+      uiContext: uiContext,
+    );
+  }
+
+  @override
+  Future<GenerationBeginResult> beginAssistantGeneration({
+    required String conversationId,
+    required String modelId,
+    required String providerId,
+    required String anchorGroupId,
+    required bool truncateFuture,
+    String? expectedContextState,
+  }) async {
+    regenerationEntered = true;
+    await regenerationHold?.future;
+    return super.beginAssistantGeneration(
+      conversationId: conversationId,
+      modelId: modelId,
+      providerId: providerId,
+      anchorGroupId: anchorGroupId,
+      truncateFuture: truncateFuture,
+    );
+  }
+
+  @override
+  Future<ChatMessage?> appendMessageVersion({
+    required String messageId,
+    String content = '',
+    List<MessagePart>? parts,
+    List<QuoteRef>? quotes,
+    DraftSubmission? draftSubmission,
+    UiContextSubmission? uiContext,
+    String? expectedContextState,
+  }) async {
+    if (!holdAfterVersionSave) {
+      versionSaveEntered = true;
+      await versionSaveHold?.future;
+    }
+    final message = await super.appendMessageVersion(
+      messageId: messageId,
+      content: content,
+      parts: parts,
+      quotes: quotes,
+      draftSubmission: draftSubmission,
+      uiContext: uiContext,
+      expectedContextState: expectedContextState,
+    );
+    if (holdAfterVersionSave) {
+      versionSaveEntered = true;
+      await versionSaveHold?.future;
+    }
+    if (failAfterVersionSave) throw StateError('post-commit callback failed');
+    return message;
+  }
+}
+
+class _FakePathProviderPlatform extends PathProviderPlatform {
+  _FakePathProviderPlatform(this.path);
+
+  final String path;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => path;
+
+  @override
+  Future<String?> getApplicationSupportPath() async => path;
+
+  @override
+  Future<String?> getApplicationCachePath() async => '$path/cache';
+
+  @override
+  Future<String?> getTemporaryPath() async => '$path/tmp';
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
+
+  late Directory directory;
+  late PathProviderPlatform previousPathProvider;
+  late _GatedChatRepository repository;
+  late _GatedChatService service;
+  late HttpServer server;
+  late SettingsProvider settings;
+  late AssistantProvider assistantProvider;
+  var streamRequestCount = 0;
+  final streamRequests = <Map<String, dynamic>>[];
+  Completer<void>? streamHold;
+  Completer<void>? suggestionHold;
+  final suggestionRequests = <Map<String, dynamic>>[];
+  var suggestionResponse =
+      '{"suggestions":["suggestion one","suggestion two"]}';
+  var suggestionResponsesSent = 0;
+  late AskUserInteractionService questions;
+  Future<void> Function(HttpRequest, Map<String, dynamic>)? apiOverride;
+
+  Future<void> handleApiRequest(HttpRequest request) async {
+    final body =
+        jsonDecode(await utf8.decoder.bind(request).join())
+            as Map<String, dynamic>;
+    if (apiOverride != null) return apiOverride!(request, body);
+    if (body['model'] == 'gpt-4o' &&
+        body['stream'] != true &&
+        !(body['messages'] as List).any((m) => m['role'] == 'tool')) {
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'role': 'assistant',
+                'content': null,
+                'tool_calls': [
+                  {
+                    'id': 'scheduled-ask',
+                    'type': 'function',
+                    'function': {
+                      'name': AskUserToolNames.askUser,
+                      'arguments': jsonEncode({
+                        'questions': [
+                          {'id': 'q1', 'question': 'Which option?'},
+                        ],
+                      }),
+                    },
+                  },
+                ],
+              },
+              'finish_reason': 'tool_calls',
+            },
+          ],
+        }),
+      );
+      await request.response.close();
+      return;
+    }
+    if (body['stream'] == true) {
+      streamRequestCount++;
+      streamRequests.add(body);
+      final hold = streamHold;
+      if (hold != null) await hold.future;
+      request.response.statusCode = HttpStatus.ok;
+      request.response.headers.contentType = ContentType(
+        'text',
+        'event-stream',
+        charset: 'utf-8',
+      );
+      request.response.write(
+        'data: ${jsonEncode({
+          'id': 'cmpl-race',
+          'object': 'chat.completion.chunk',
+          'created': 0,
+          'model': 'test-model',
+          'choices': [
+            {
+              'index': 0,
+              'delta': {'role': 'assistant', 'content': 'ok'},
+              'finish_reason': 'stop',
+            },
+          ],
+        })}\n\n',
+      );
+      request.response.write('data: [DONE]\n\n');
+      await request.response.close();
+      return;
+    }
+    final isSuggestion = (body['messages'] as List).any(
+      (m) =>
+          m['role'] == 'system' &&
+          (m['content'] as String).contains('candidate next messages'),
+    );
+    final response = suggestionResponse;
+    if (isSuggestion) {
+      suggestionRequests.add(body);
+      final hold = suggestionHold;
+      if (hold != null) await hold.future;
+    }
+    request.response.statusCode = HttpStatus.ok;
+    request.response.headers.contentType = ContentType.json;
+    request.response.write(
+      jsonEncode({
+        'choices': [
+          {
+            'message': {'content': isSuggestion ? response : 'Test title'},
+          },
+        ],
+      }),
+    );
+    await request.response.close();
+    if (isSuggestion) suggestionResponsesSent++;
+  }
+
+  setUp(() async {
+    directory = await Directory.systemTemp.createTemp('kelivo_send_race_');
+    previousPathProvider = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = _FakePathProviderPlatform(directory.path);
+    // The widget-test binding replaces HttpClient with a 400-only mock; the
+    // loopback API server below needs real networking.
+    HttpOverrides.global = null;
+    final dbFile = File('${directory.path}/kelivo.db');
+    repository = _GatedChatRepository(AppDatabase.open(file: dbFile), dbFile);
+    await repository.ensureReady();
+    service = _GatedChatService(existingRepository: repository);
+    await service.init();
+    streamRequestCount = 0;
+    apiOverride = null;
+    streamRequests.clear();
+    streamHold = null;
+    suggestionHold = null;
+    suggestionRequests.clear();
+    suggestionResponsesSent = 0;
+    suggestionResponse = '{"suggestions":["suggestion one","suggestion two"]}';
+    questions = AskUserInteractionService();
+    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen(handleApiRequest);
+  });
+
+  tearDown(() async {
+    AppExitFlush.debugReset();
+    PathProviderPlatform.instance = previousPathProvider;
+    try {
+      await server.close(force: true);
+    } catch (_) {}
+    try {
+      await service.close().timeout(const Duration(seconds: 10));
+    } catch (_) {}
+    try {
+      await repository.close().timeout(const Duration(seconds: 10));
+    } catch (_) {}
+    if (await directory.exists()) await directory.delete(recursive: true);
+  });
+
+  Future<HomePageController> pumpHarness(
+    WidgetTester tester, {
+    bool withSuggestions = false,
+    bool withComposer = false,
+    List<dynamic>? storedAssistants,
+    BusinessPreferences? assistantPreferences,
+    bool withInstructionInjections = false,
+  }) async {
+    HomePageController? controller;
+    InstructionInjectionProvider? injections;
+    late Zone sendZone;
+    final baseUrl = 'http://${server.address.address}:${server.port}/v1';
+    // Futures only complete for awaits on the zone that created them, and the
+    // send path runs inside runAsync: build and fully configure every provider
+    // there so its loaded/write futures belong to the real-async zone.
+    await tester.runAsync(() async {
+      sendZone = Zone.current;
+      final settingsPrefs = createBusinessTestPreferences();
+      await settingsPrefs.load();
+      settings = SettingsProvider(settingsPrefs);
+      await settings.loaded;
+      await settings.setProviderConfig(
+        'SiliconFlow',
+        ProviderConfig(
+          id: 'SiliconFlow',
+          enabled: true,
+          name: 'SiliconFlow',
+          apiKey: 'race-test-key',
+          baseUrl: baseUrl,
+          providerType: ProviderKind.openai,
+        ),
+      );
+      await settings.setCurrentModel('SiliconFlow', 'test-model');
+      if (withSuggestions) {
+        await settings.resetSuggestionModel();
+      }
+
+      final assistantPrefs =
+          assistantPreferences ?? createBusinessTestPreferences();
+      await assistantPrefs.load();
+      if (storedAssistants != null) {
+        await assistantPrefs.setString(
+          'assistants_v1',
+          jsonEncode(storedAssistants),
+        );
+        await assistantPrefs.setString(
+          'current_assistant_id_v1',
+          (storedAssistants.first as Map)['id'] as String,
+        );
+      }
+      assistantProvider = AssistantProvider(preferences: assistantPrefs);
+      await assistantProvider.loaded;
+      if (withInstructionInjections) {
+        final provider = InstructionInjectionProvider(
+          preferences: assistantPrefs,
+        );
+        await provider.initialize();
+        addTearDown(provider.dispose);
+        injections = provider;
+      }
+      if (storedAssistants == null && assistantPreferences == null) {
+        final assistantId = await assistantProvider.addAssistant(
+          name: 'Test Assistant',
+        );
+        await assistantProvider.setCurrentAssistant(assistantId);
+      }
+    });
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<AskUserInteractionService>.value(
+            value: questions,
+          ),
+          ChangeNotifierProvider<SettingsProvider>.value(value: settings),
+          ChangeNotifierProvider<ChatService>.value(value: service),
+          ChangeNotifierProvider<AssistantProvider>.value(
+            value: assistantProvider,
+          ),
+          if (injections != null)
+            ChangeNotifierProvider<InstructionInjectionProvider>.value(
+              value: injections!,
+            ),
+          ChangeNotifierProvider<McpProvider>(
+            create: (_) =>
+                McpProvider(preferences: createBusinessTestPreferences()),
+          ),
+          ChangeNotifierProvider<McpToolService>(
+            create: (_) => McpToolService(),
+          ),
+        ],
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: _ControllerHarness(
+            onCreated: (value) => controller = value,
+            withComposer: withComposer,
+            onSend: (input) =>
+                sendZone.run(() => controller!.sendMessage(input)),
+          ),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    return controller!;
+  }
+
+  Future<Conversation> openConversation(HomePageController controller) async {
+    final convo = await service.createConversation(title: 'Race test');
+    await controller.chatController.setCurrentConversationAndLoad(convo);
+    return convo;
+  }
+
+  Future<void> waitFor(bool Function() condition, String description) async {
+    for (var i = 0; i < 200; i++) {
+      if (condition()) return;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    fail('timed out waiting for $description');
+  }
+
+  Future<void> waitForWidget(
+    WidgetTester tester,
+    bool Function() condition,
+    String description,
+  ) async {
+    for (var i = 0; i < 300 && !condition(); i++) {
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+    }
+    expect(condition(), isTrue, reason: 'timed out waiting for $description');
+  }
+
+  Future<void> finishWidget(WidgetTester tester, Future<void> future) async {
+    var done = false;
+    Object? failure;
+    future.then<void>(
+      (_) {
+        done = true;
+      },
+      onError: (Object error) {
+        failure = error;
+        done = true;
+      },
+    );
+    await waitForWidget(tester, () => done, 'asynchronous operation');
+    if (failure != null) throw failure!;
+  }
+
+  Future<ProviderConfig> configureNative({
+    required bool claude,
+    required bool stream,
+  }) async {
+    final config = settings
+        .getProviderConfig('SiliconFlow')
+        .copyWith(
+          providerType: claude ? ProviderKind.claude : ProviderKind.openai,
+          useResponseApi: !claude,
+        );
+    await settings.setProviderConfig(config.id, config);
+    await settings.setCurrentModel(
+      config.id,
+      claude ? 'claude-sonnet-4-6' : 'gpt-5.4',
+    );
+    await settings.disableTitleGeneration();
+    await settings.disableSuggestionGeneration();
+    await assistantProvider.updateAssistant(
+      assistantProvider.currentAssistant!.copyWith(
+        streamOutput: stream,
+        localToolIds: [AskUserToolNames.askUser],
+      ),
+    );
+    return config;
+  }
+
+  for (final resumes in [false, true]) {
+    test(
+      'timeline body read retries when a reply ${resumes ? 'resumes' : 'finishes'}',
+      () async {
+        final conversation = await service.createConversation(title: 'Chat');
+        final reply = await service.addMessage(
+          conversationId: conversation.id,
+          role: 'assistant',
+          content: 'partial',
+          isStreaming: !resumes,
+        );
+        final contextRevision = service.contextRevision(conversation.id);
+        repository.holdMessageReadFor = reply.id;
+        final loading = service.loadTimelinePage(
+          conversation.id,
+          aroundRevisionId: reply.id,
+        );
+        try {
+          final oldReply = await repository.messageRead.future.timeout(
+            const Duration(seconds: 5),
+          );
+          expect(oldReply.isStreaming, !resumes);
+          if (resumes) {
+            await service.updateMessage(reply.id, isStreaming: true);
+          } else {
+            await service.finalizeGenerationRunSilent(
+              message: reply.copyWith(content: 'complete', isStreaming: false),
+              toolEvents: const [],
+              generationRunId: null,
+              expectedState: null,
+              expectedStateRevision: null,
+              terminalState: GenerationRunState.completed,
+            );
+          }
+        } finally {
+          repository.releaseMessageRead.complete();
+        }
+
+        final page = (await loading)!;
+        final content = resumes ? 'partial' : 'complete';
+        expect(service.isTimelinePageCurrent(page), isTrue);
+        expect(page.slots.single.message.isStreaming, resumes);
+        expect(page.slots.single.message.content, content);
+        final cached = service.getMessages(conversation.id).single;
+        expect(cached.isStreaming, resumes);
+        expect(cached.content, content);
+        expect(service.contextRevision(conversation.id), contextRevision);
+      },
+    );
+  }
+
+  test(
+    'timeline artifact read preserves a tool result saved during the read',
+    () async {
+      final conversation = await service.createConversation(
+        title: 'Chat',
+        activate: false,
+      );
+      await service.addMessage(
+        conversationId: conversation.id,
+        role: 'user',
+        content: 'Question',
+      );
+      await service.loadMessages(conversation.id);
+      service.releaseInactiveMessageCaches(const {});
+      expect(service.getMessages(conversation.id), isEmpty);
+
+      final reply = await service.addMessage(
+        conversationId: conversation.id,
+        role: 'assistant',
+        content: 'partial',
+        isStreaming: true,
+      );
+      final runningTool = <String, dynamic>{
+        'id': 'tool',
+        'name': 'lookup',
+        'arguments': <String, dynamic>{},
+        'content': null,
+      };
+      await service.updateStreamingCheckpointSilent(reply, [runningTool]);
+      repository.holdToolEventsFor = reply.id;
+      final loading = service.loadTimelinePage(conversation.id);
+      try {
+        final stale = await repository.toolEventsRead.future.timeout(
+          const Duration(seconds: 5),
+        );
+        expect(stale.single['content'], isNull);
+        await service.finalizeGenerationRunSilent(
+          message: reply.copyWith(content: 'complete', isStreaming: false),
+          toolEvents: [
+            {...runningTool, 'content': 'result'},
+          ],
+          generationRunId: null,
+          expectedState: null,
+          expectedStateRevision: null,
+          terminalState: GenerationRunState.completed,
+        );
+        expect(service.getToolEvents(reply.id).single['content'], 'result');
+      } finally {
+        repository.releaseToolEvents.complete();
+      }
+
+      final finished = (await loading)!.slots.last.message;
+      expect(finished.id, reply.id);
+      expect(finished.isStreaming, isFalse);
+      expect(
+        service.getToolEventsForMessage(finished).single['content'],
+        'result',
+      );
+    },
+  );
+
+  test(
+    'an empty timeline can use the tail cache after deleting its last message',
+    () async {
+      final conversation = await service.createConversation(title: 'Chat');
+      final user = await service.addMessage(
+        conversationId: conversation.id,
+        role: 'user',
+        content: 'Question',
+      );
+      await service.deleteMessage(user.id);
+      final cacheHits = service.debugTimelineFastPathHitCount;
+
+      expect((await service.loadTimelinePage(conversation.id))!.slots, isEmpty);
+      expect((await service.loadTimelinePage(conversation.id))!.slots, isEmpty);
+      expect(service.debugTimelineFastPathHitCount, cacheHits + 1);
+    },
+  );
+
+  testWidgets(
+    'conversation switch uses a reply that finished after the window read',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.disableSuggestionGeneration();
+          final generating = await openConversation(controller);
+          final other = await service.createConversation(title: 'Other');
+          final finishReply = Completer<void>();
+          streamHold = finishReply;
+          try {
+            expect(
+              await controller.sendMessage(const ChatInputData(text: 'Start')),
+              ChatInputSubmissionResult.sent,
+            );
+            await waitFor(() => streamRequestCount == 1, 'held reply');
+            final replyId = controller.messages.last.id;
+            await controller.switchConversationAnimated(other.id);
+            service.holdTimelineFor = generating.id;
+            final reopen = controller.switchConversationAnimated(generating.id);
+
+            final oldWindow = await service.timelineRead.future.timeout(
+              const Duration(seconds: 5),
+            );
+            expect(oldWindow!.slots.last.message.id, replyId);
+            expect(oldWindow.slots.last.message.isStreaming, isTrue);
+
+            finishReply.complete();
+            await waitFor(
+              () => !controller.chatController.isConversationLoading(
+                generating.id,
+              ),
+              'reply finishing before the window is installed',
+            );
+            expect(controller.currentConversation!.id, other.id);
+            service.releaseTimeline.complete();
+            await reopen;
+
+            final reply = controller.messages.last;
+            expect(reply.id, replyId);
+            expect(reply.isStreaming, isFalse);
+            expect(reply.content, 'ok');
+            expect(reply.generationState, GenerationRunState.completed);
+          } finally {
+            if (!finishReply.isCompleted) finishReply.complete();
+            if (!service.releaseTimeline.isCompleted) {
+              service.releaseTimeline.complete();
+            }
+          }
+        });
+        final exception = tester.takeException();
+        if (exception != null) throw exception;
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  testWidgets('an already prepared switch skips a deleted conversation', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final current = await openConversation(controller);
+      final target = await service.createConversation(
+        title: 'Target',
+        activate: false,
+      );
+      final prepared = (await controller.debugViewModel
+          .prepareConversationSwitch(target.id))!;
+      expect(prepared.window.page!.stateRevision, 0);
+
+      await service.deleteConversation(target.id);
+
+      expect(
+        await controller.debugViewModel.commitConversationSwitch(
+          prepared,
+          isCurrent: () => true,
+        ),
+        isFalse,
+      );
+      expect(service.currentConversationId, current.id);
+      expect(controller.currentConversation?.id, current.id);
+    });
+    final exception = tester.takeException();
+    if (exception != null) throw exception;
+  });
+
+  for (final claude in [false, true]) {
+    testWidgets(
+      'nonstream cancel during checkpoint never starts the pending tool: claude=$claude',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await configureNative(claude: claude, stream: false);
+          final hold = Completer<void>();
+          service.checkpointHold = hold;
+          const arguments = {
+            'questions': [
+              {'id': 'q1', 'question': 'Continue?'},
+            ],
+          };
+          apiOverride = (request, body) async {
+            if (claude) {
+              request.response.headers.contentType = ContentType.json;
+              request.response.write(
+                jsonEncode({
+                  'content': [
+                    {'type': 'text', 'text': 'Before tool.'},
+                    {
+                      'type': 'tool_use',
+                      'id': 'cancel-probe',
+                      'name': AskUserToolNames.askUser,
+                      'input': arguments,
+                    },
+                  ],
+                  'stop_reason': 'tool_use',
+                }),
+              );
+              await request.response.close();
+            } else {
+              await _writeResponses(request, body, [
+                _nativeText('Before tool.'),
+                {
+                  'type': 'function_call',
+                  'call_id': 'cancel-probe',
+                  'name': AskUserToolNames.askUser,
+                  'arguments': jsonEncode(arguments),
+                },
+              ]);
+            }
+          };
+          final conversation = await openConversation(controller);
+          final sending = controller.sendMessage(ChatInputData(text: 'Ask me'));
+          try {
+            await service.checkpointEntered.future.timeout(
+              const Duration(seconds: 10),
+            );
+            expect(questions.pendingRequests, isEmpty);
+            final cancelling = controller.cancelStreaming();
+            await waitFor(
+              () => !controller.chatController.messages.last.isStreaming,
+              'cancellation published before checkpoint release',
+            );
+            hold.complete();
+            await cancelling;
+            // Let the tool closure finish too. A regression creates a new
+            // prompt after cancellation and leaves this generation waiting.
+            var completed = false;
+            final completion = sending.then((_) => completed = true);
+            await waitFor(
+              () => completed || questions.pendingRequests.isNotEmpty,
+              'cancelled generation to settle',
+            );
+            final pendingAfterCancel = List<String>.of(
+              questions.pendingRequests.keys,
+            );
+            questions.cancelForConversation(conversation.id);
+            await completion;
+            expect(pendingAfterCancel, isEmpty);
+          } finally {
+            if (!hold.isCompleted) hold.complete();
+            questions.cancelForConversation(conversation.id);
+            await ChatActions.cancelActiveGenerationFor(conversation.id);
+            await sending.timeout(const Duration(seconds: 10));
+          }
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'nonstream completed exchange is durable before next tool starts claude=$claude',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await configureNative(claude: claude, stream: false);
+          final requests = <Map<String, dynamic>>[];
+          const args = {
+            'questions': [
+              {'id': 'q1', 'question': 'Continue?'},
+            ],
+          };
+          apiOverride = (request, body) async {
+            requests.add(body);
+            final first = requests.length <= 2;
+            final callId = requests.length == 1 ? 'probe-first' : 'probe-ask';
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(
+              jsonEncode(
+                claude
+                    ? {
+                        'content': [
+                          {
+                            'type': 'thinking',
+                            'thinking': 'Plan',
+                            'signature': 'signed-plan',
+                          },
+                          {
+                            'type': 'text',
+                            'text': first ? 'Before asking. ' : 'Done',
+                          },
+                          if (first)
+                            {
+                              'type': 'tool_use',
+                              'id': callId,
+                              'name': AskUserToolNames.askUser,
+                              'input': args,
+                            },
+                        ],
+                        'stop_reason': first ? 'tool_use' : 'end_turn',
+                      }
+                    : {
+                        'output': [
+                          _nativeReasoning('probe-plan'),
+                          _nativeText(first ? 'Before asking. ' : 'Done'),
+                          if (first)
+                            {
+                              'type': 'function_call',
+                              'call_id': callId,
+                              'name': AskUserToolNames.askUser,
+                              'arguments': jsonEncode(args),
+                            },
+                        ],
+                      },
+              ),
+            );
+            await request.response.close();
+          };
+          final conversation = await openConversation(controller);
+          final sending = controller.sendMessage(
+            ChatInputData(text: 'Ask before continuing'),
+          );
+          await waitFor(
+            () => questions.pendingRequests.containsKey('probe-first'),
+            'first probe tool pending',
+          );
+          questions.answer('probe-first', {
+            'q1': const AskUserAnswerValue.single(
+              value: 'First completed answer',
+              custom: true,
+            ),
+          });
+          await waitFor(
+            () => questions.pendingRequests.containsKey('probe-ask'),
+            'second probe tool pending',
+          );
+          final reloadedRepository = ChatDatabaseRepository.open(
+            file: File('${directory.path}/kelivo.db'),
+          );
+          await reloadedRepository.ensureReady();
+          final messages = await reloadedRepository.getMessagesRange(
+            conversation.id,
+            start: 0,
+            limit: 20,
+          );
+          final waiting = messages.last;
+          final artifact = await reloadedRepository
+              .getProviderArtifactsForMessages([
+                waiting.id,
+              ], claude ? claudeTurnArtifactKind : responsesTurnArtifactKind);
+          await reloadedRepository.close();
+          questions.answer('probe-ask', {
+            'q1': const AskUserAnswerValue.single(value: 'Yes', custom: true),
+          });
+          await sending;
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(
+              conversation.id,
+            ),
+            'probe generation finish',
+          );
+          expect(
+            artifact[waiting.id],
+            contains(claude ? 'signed-plan' : 'opaque-probe-plan'),
+          );
+          final pending = waiting.parts
+              .whereType<ToolCallPart>()
+              .map((p) => jsonDecode(p.payloadJson) as Map)
+              .singleWhere((event) => event['id'] == 'probe-ask');
+          expect(pending['content'], isNull);
+          final completed = waiting.parts
+              .whereType<ToolCallPart>()
+              .map((p) => jsonDecode(p.payloadJson) as Map)
+              .where((event) => event['id'] == 'probe-first');
+          expect(
+            completed,
+            hasLength(1),
+            reason:
+                'The previous call and its answered result must survive a new database connection',
+          );
+          expect(
+            completed.single['content'],
+            contains('First completed answer'),
+          );
+          expect(waiting.content, 'Before asking. Before asking. ');
+          final finished = (await service.loadMessages(conversation.id)).last;
+          expect(finished.content, 'Before asking. Before asking. Done');
+          expect(finished.parts.whereType<ToolCallPart>(), hasLength(2));
+          expect(finished.firstTokenMs, isNull);
+          if (claude) expect(finished.reasoningText, 'PlanPlanPlan');
+        });
+      },
+    );
+  }
+
+  for (final claude in [false, true]) {
+    testWidgets(
+      'nonstream native state is persisted and sent on next question: claude=$claude',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await configureNative(claude: claude, stream: false);
+          final requests = <Map<String, dynamic>>[];
+          const thinking = {
+            'type': 'thinking',
+            'thinking': '',
+            'signature': 'opaque-claude',
+          };
+          apiOverride = (request, body) async {
+            requests.add(body);
+            expect(body['stream'], isFalse);
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(
+              jsonEncode(
+                claude
+                    ? {
+                        'content': [
+                          thinking,
+                          {'type': 'text', 'text': 'Answer'},
+                        ],
+                        'stop_reason': 'end_turn',
+                      }
+                    : {
+                        'output': [
+                          _nativeReasoning('first'),
+                          _nativeText('Answer'),
+                        ],
+                      },
+              ),
+            );
+            await request.response.close();
+          };
+          final convo = await openConversation(controller);
+          await controller.sendMessage(ChatInputData(text: 'Question'));
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(convo.id),
+            'nonstream finish',
+          );
+          final reply = (await service.loadMessages(convo.id)).last;
+          final kind = claude
+              ? claudeTurnArtifactKind
+              : responsesTurnArtifactKind;
+          final persisted = await repository.getProviderArtifactsForMessages([
+            reply.id,
+          ], kind);
+          expect(
+            persisted[reply.id],
+            contains(claude ? 'opaque-claude' : 'opaque-first'),
+          );
+          expect(
+            service.getProviderArtifact(reply.id, kind),
+            persisted[reply.id],
+          );
+          await controller.sendMessage(ChatInputData(text: 'Next'));
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(convo.id),
+            'next finish',
+          );
+          expect(requests, hasLength(2));
+          final history = requests.last[claude ? 'messages' : 'input'] as List;
+          if (claude) {
+            final assistant = history.singleWhere(
+              (m) => m['role'] == 'assistant',
+            );
+            expect(assistant['content'], [
+              thinking,
+              {'type': 'text', 'text': 'Answer'},
+            ]);
+          } else {
+            expect(history.where((m) => m['type'] == 'reasoning'), [
+              _nativeReasoning('first'),
+            ]);
+          }
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  Future<void> evictConversationMessages(String conversationId) async {
+    final pressure = await service.createConversation(
+      title: 'Cache pressure',
+      activate: false,
+    );
+    for (var i = 0; i < 12; i++) {
+      await service.addMessage(
+        conversationId: pressure.id,
+        role: 'user',
+        content: '$i${'x' * (512 * 1024)}',
+      );
+    }
+    expect(service.getMessages(conversationId), isEmpty);
+  }
+
+  for (final evicted in [false, true]) {
+    testWidgets(
+      'Claude recovered native history retains both signed responses: evicted=$evicted',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          final config = await configureNative(claude: true, stream: false);
+          final convo = await openConversation(controller);
+          const arguments = {
+            'questions': [
+              {'id': 'q1', 'question': 'Which option?'},
+            ],
+          };
+          const oldBlocks = [
+            {'type': 'thinking', 'thinking': '', 'signature': 'opaque-old'},
+            {'type': 'text', 'text': 'Before asking. '},
+            {
+              'type': 'tool_use',
+              'id': 'old-ask',
+              'name': AskUserToolNames.askUser,
+              'input': arguments,
+            },
+          ];
+          const freshBlocks = [
+            {'type': 'thinking', 'thinking': '', 'signature': 'opaque-fresh'},
+            {'type': 'text', 'text': 'Answer'},
+          ];
+          await service.addMessage(
+            conversationId: convo.id,
+            role: 'user',
+            content: 'Ask me',
+          );
+          final reply = await service.addMessage(
+            conversationId: convo.id,
+            role: 'assistant',
+            providerId: config.id,
+            modelId: 'claude-sonnet-4-6',
+            parts: [
+              const TextPart('Before asking. '),
+              ToolCallPart(
+                jsonEncode({
+                  'id': 'old-ask',
+                  'name': AskUserToolNames.askUser,
+                  'arguments': arguments,
+                  'content': null,
+                }),
+              ),
+            ],
+          );
+          await service.setProviderArtifact(
+            reply.id,
+            claudeTurnArtifactKind,
+            encodeClaudeTurn([oldBlocks]),
+          );
+          final requests = <Map<String, dynamic>>[];
+          apiOverride = (request, body) async {
+            requests.add(body);
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(
+              jsonEncode({'content': freshBlocks, 'stop_reason': 'end_turn'}),
+            );
+            await request.response.close();
+          };
+          await controller.chatController.setCurrentConversationAndLoad(convo);
+          if (evicted) await evictConversationMessages(convo.id);
+          await controller.submitRecoveredAskUserAnswer(
+            reply,
+            const ToolUIPart(
+              id: 'old-ask',
+              toolName: AskUserToolNames.askUser,
+              arguments: arguments,
+              loading: true,
+            ),
+            const AskUserResult.answer({
+              'q1': AskUserAnswerValue.single(value: 'approved', custom: true),
+            }),
+          );
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(convo.id),
+            'Claude recovery finish',
+          );
+          expect(
+            decodeClaudeTurn(
+              service.getProviderArtifact(reply.id, claudeTurnArtifactKind),
+            ),
+            [oldBlocks, freshBlocks],
+          );
+          await controller.sendMessage(ChatInputData(text: 'Next'));
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(convo.id),
+            'Claude next finish',
+          );
+          expect(requests, hasLength(2));
+          final messages = requests.last['messages'] as List;
+          final assistants = messages
+              .where((m) => m['role'] == 'assistant')
+              .toList();
+          expect(assistants.map((m) => m['content']), [oldBlocks, freshBlocks]);
+          final results = messages.where(
+            (m) => m['role'] == 'user' && m['content'] is List,
+          );
+          expect(jsonEncode(results.toList()), contains('approved'));
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final stream in [false, true]) {
+    for (final temporary in [false, true]) {
+      for (final preamble in ['', 'Before asking. ']) {
+        for (final evicted in [false, if (!temporary) true]) {
+          testWidgets(
+            'native Responses recovery keeps all rounds: stream=$stream, temporary=$temporary, evicted=$evicted, preamble="$preamble"',
+            (tester) async {
+              final controller = await pumpHarness(tester);
+              await tester.runAsync(() async {
+                final config = await configureNative(
+                  claude: false,
+                  stream: stream,
+                );
+                final convo = temporary
+                    ? await service.createDraftConversation(
+                        title: 'Recovery',
+                        temporary: true,
+                      )
+                    : await service.createConversation(title: 'Recovery');
+                const arguments = {
+                  'questions': [
+                    {'id': 'q1', 'question': 'Which option?'},
+                  ],
+                };
+                Map<String, dynamic> call(String id) => {
+                  'type': 'function_call',
+                  'id': 'fc-$id',
+                  'call_id': id,
+                  'name': AskUserToolNames.askUser,
+                  'arguments': jsonEncode(arguments),
+                };
+                final oldOutput = [
+                  _nativeReasoning('old'),
+                  if (preamble.isNotEmpty) _nativeText(preamble),
+                  call('old-ask'),
+                ];
+                await service.addMessage(
+                  conversationId: convo.id,
+                  role: 'user',
+                  content: 'Ask me',
+                );
+                final reply = await service.addMessage(
+                  conversationId: convo.id,
+                  role: 'assistant',
+                  providerId: config.id,
+                  modelId: 'gpt-5.4',
+                  parts: [
+                    if (preamble.isNotEmpty) TextPart(preamble),
+                    ToolCallPart(
+                      jsonEncode({
+                        'id': 'old-ask',
+                        'name': AskUserToolNames.askUser,
+                        'arguments': arguments,
+                        'content': null,
+                      }),
+                    ),
+                    const AssistantRoundEndPart(),
+                  ],
+                );
+                await service.setProviderArtifact(
+                  reply.id,
+                  responsesTurnArtifactKind,
+                  ResponsesTurnRecorder(
+                    responsesReplayScope(config, 'gpt-5.4'),
+                  ).record(oldOutput, [
+                    emitToolCall(
+                      id: 'old-ask',
+                      name: AskUserToolNames.askUser,
+                      arguments: arguments,
+                    ),
+                  ]).payload,
+                );
+                final requests = <Map<String, dynamic>>[];
+                final middle = [
+                  _nativeReasoning('middle'),
+                  _nativeText('During recovery. '),
+                  call('live-ask'),
+                ];
+                final finalOutput = [
+                  _nativeReasoning('final'),
+                  _nativeText('Answer'),
+                ];
+                apiOverride = (request, body) async {
+                  requests.add(body);
+                  await _writeResponses(
+                    request,
+                    body,
+                    requests.length == 1 ? middle : finalOutput,
+                  );
+                };
+                await controller.chatController.setCurrentConversationAndLoad(
+                  convo,
+                );
+                if (evicted) await evictConversationMessages(convo.id);
+                final resumed = controller.submitRecoveredAskUserAnswer(
+                  reply,
+                  const ToolUIPart(
+                    id: 'old-ask',
+                    toolName: AskUserToolNames.askUser,
+                    arguments: arguments,
+                    loading: true,
+                  ),
+                  const AskUserResult.answer({
+                    'q1': AskUserAnswerValue.single(
+                      value: 'original answer',
+                      custom: true,
+                    ),
+                  }),
+                );
+                await waitFor(
+                  () => questions.pendingRequests.containsKey('live-ask'),
+                  'second ask',
+                );
+                questions.answer('live-ask', {
+                  'q1': const AskUserAnswerValue.single(
+                    value: 'follow-up answer',
+                    custom: true,
+                  ),
+                });
+                await resumed;
+                await waitFor(
+                  () => !controller.chatController.isConversationLoading(
+                    convo.id,
+                  ),
+                  'recovery finish',
+                );
+                expect(requests, hasLength(2));
+                final firstInput = requests.first['input'] as List;
+                expect(
+                  firstInput.where(
+                    (m) =>
+                        m['type'] != null &&
+                        m['type'] != 'function_call_output',
+                  ),
+                  oldOutput,
+                );
+                final artifact = service.getProviderArtifact(
+                  reply.id,
+                  responsesTurnArtifactKind,
+                )!;
+                final rounds = (jsonDecode(artifact) as Map)['rounds'] as List;
+                expect(rounds.map((round) => round['output']), [
+                  oldOutput,
+                  middle,
+                  finalOutput,
+                ]);
+                if (!temporary) {
+                  expect(
+                    (await repository.getProviderArtifactsForMessages([
+                      reply.id,
+                    ], responsesTurnArtifactKind))[reply.id],
+                    artifact,
+                  );
+                }
+                await controller.sendMessage(ChatInputData(text: 'Next'));
+                await waitFor(
+                  () => !controller.chatController.isConversationLoading(
+                    convo.id,
+                  ),
+                  'next finish',
+                );
+                expect(requests, hasLength(3));
+                final next = requests.last['input'] as List;
+                expect(
+                  next
+                      .where((m) => m['type'] == 'reasoning')
+                      .map((m) => m['encrypted_content']),
+                  ['opaque-old', 'opaque-middle', 'opaque-final'],
+                );
+                expect(
+                  next
+                      .where((m) => m['type'] == 'function_call')
+                      .map((m) => m['call_id']),
+                  ['old-ask', 'live-ask'],
+                );
+                final answers = next
+                    .where((m) => m['type'] == 'function_call_output')
+                    .toList();
+                expect(answers.map((m) => m['call_id']), [
+                  'old-ask',
+                  'live-ask',
+                ]);
+                expect(answers.first['output'], contains('original answer'));
+                expect(answers.last['output'], contains('follow-up answer'));
+                final latest = (await service.loadMessages(convo.id)).last;
+                expect(
+                  (jsonDecode(
+                        service.getProviderArtifact(
+                          latest.id,
+                          responsesTurnArtifactKind,
+                        )!,
+                      )
+                      as Map)['rounds'],
+                  hasLength(1),
+                );
+              });
+              expect(tester.takeException(), isNull);
+            },
+          );
+        }
+      }
+    }
+  }
+
+  for (final temporary in [false, true]) {
+    for (final stream in [false, true]) {
+      for (final change in ['none', 'provider', 'model']) {
+        testWidgets(
+          'Gemini recovery owns its signatures: temporary=$temporary, stream=$stream, change=$change',
+          (tester) async {
+            final controller = await pumpHarness(tester);
+            await tester.runAsync(() async {
+              const sourceProvider = 'GeminiSource';
+              const sourceModel = 'gemini-4-argon';
+              final targetProvider = change == 'provider'
+                  ? 'GeminiOther'
+                  : sourceProvider;
+              final targetModel = change == 'model'
+                  ? 'gemini-3.8-flash'
+                  : sourceModel;
+              for (final id in {sourceProvider, targetProvider}) {
+                await settings.setProviderConfig(
+                  id,
+                  ProviderConfig(
+                    id: id,
+                    enabled: true,
+                    name: id,
+                    apiKey: 'test',
+                    baseUrl:
+                        'http://${server.address.address}:${server.port}/v1beta',
+                    providerType: ProviderKind.google,
+                  ),
+                );
+              }
+              await settings.disableTitleGeneration();
+              await settings.disableSuggestionGeneration();
+              await settings.setPerChatModelEnabled(true);
+              await settings.setRegenerateDeleteTrailingMessages(true);
+              await assistantProvider.updateAssistant(
+                assistantProvider.currentAssistant!.copyWith(
+                  streamOutput: stream,
+                ),
+              );
+              final convo = temporary
+                  ? await service.createDraftConversation(
+                      title: 'Gemini recovery',
+                      temporary: true,
+                    )
+                  : await service.createConversation(title: 'Gemini recovery');
+              await service.addMessage(
+                conversationId: convo.id,
+                role: 'user',
+                content: 'Ask me',
+              );
+              const arguments = {
+                'questions': [
+                  {'id': 'q1', 'question': 'Continue?'},
+                ],
+              };
+              final reply = await service.addMessage(
+                conversationId: convo.id,
+                role: 'assistant',
+                providerId: sourceProvider,
+                modelId: sourceModel,
+                parts: [
+                  const TextPart('Before asking. '),
+                  ToolCallPart(
+                    jsonEncode({
+                      'id': 'gemini-ask',
+                      'name': AskUserToolNames.askUser,
+                      'arguments': arguments,
+                      'content': null,
+                      'metadata': {
+                        'google': {
+                          'part': {
+                            'functionCall': {
+                              'id': 'gemini-ask',
+                              'name': AskUserToolNames.askUser,
+                              'args': arguments,
+                            },
+                            'thoughtSignature': 'source-tool-signature',
+                          },
+                        },
+                      },
+                    }),
+                  ),
+                  const AssistantRoundEndPart(),
+                ],
+              );
+              final originalSignature = encodeGeminiThoughtSignature(
+                textKey: 'thoughtSignature',
+                textValue: 'source-text-signature',
+              );
+              await service.setGeminiThoughtSignature(
+                reply.id,
+                originalSignature,
+              );
+              final following = await service.addMessage(
+                conversationId: convo.id,
+                role: 'user',
+                content: 'Keep this later message',
+              );
+              final requests = <Map<String, dynamic>>[];
+              apiOverride = (request, body) async {
+                expect(body['contents'], isA<List>());
+                requests.add(body);
+                final response = jsonEncode({
+                  'candidates': [
+                    {
+                      'content': {
+                        'role': 'model',
+                        'parts': [
+                          {
+                            'text': 'Continued.',
+                            'thoughtSignature': 'target-signature',
+                          },
+                        ],
+                      },
+                      'finishReason': 'STOP',
+                    },
+                  ],
+                });
+                request.response.headers.contentType = stream
+                    ? ContentType('text', 'event-stream')
+                    : ContentType.json;
+                request.response.write(
+                  stream ? 'data: $response\n\n' : response,
+                );
+                await request.response.close();
+              };
+              await controller.chatController.setCurrentConversationAndLoad(
+                convo,
+              );
+              await controller.setConversationModel(
+                providerKey: targetProvider,
+                modelId: targetModel,
+              );
+              await controller.submitRecoveredAskUserAnswer(
+                reply,
+                const ToolUIPart(
+                  id: 'gemini-ask',
+                  toolName: AskUserToolNames.askUser,
+                  arguments: arguments,
+                  loading: true,
+                ),
+                const AskUserResult.answer({
+                  'q1': AskUserAnswerValue.single(
+                    value: 'approved',
+                    custom: true,
+                  ),
+                }),
+              );
+              await waitFor(
+                () =>
+                    !controller.chatController.isConversationLoading(convo.id),
+                'Gemini recovery finish',
+              );
+              expect(requests, hasLength(1));
+              expect(jsonEncode(requests.single), contains('approved'));
+              expect(
+                jsonEncode(requests.single),
+                isNot(contains(following.content)),
+              );
+              final saved = await service.loadMessages(convo.id);
+              final replies = saved
+                  .where((m) => m.role == 'assistant')
+                  .toList();
+              final changedSource = change != 'none';
+              expect(replies, hasLength(changedSource ? 2 : 1));
+              expect(saved.last.id, following.id);
+              final continued = replies.last;
+              expect(continued.providerId, targetProvider);
+              expect(continued.modelId, targetModel);
+              expect(
+                service.getGeminiThoughtSignature(continued.id),
+                contains('target-signature'),
+              );
+              if (changedSource) {
+                expect(continued.id, isNot(reply.id));
+                expect(replies.first.content, reply.content);
+                expect(replies.first.providerId, sourceProvider);
+                expect(replies.first.modelId, sourceModel);
+                expect(continued.content, 'Continued.');
+                expect(continued.parts.whereType<ToolCallPart>(), isEmpty);
+                expect(
+                  service.getGeminiThoughtSignature(reply.id),
+                  originalSignature,
+                );
+              }
+              await controller.setConversationModel(
+                providerKey: sourceProvider,
+                modelId: sourceModel,
+              );
+              await controller.sendMessage(ChatInputData(text: 'Next'));
+              await waitFor(
+                () =>
+                    !controller.chatController.isConversationLoading(convo.id),
+                'Gemini return to source finish',
+              );
+              expect(requests, hasLength(2));
+              expect(
+                jsonEncode(requests.last),
+                contains('source-tool-signature'),
+              );
+              expect(
+                jsonEncode(requests.last),
+                change == 'provider'
+                    ? isNot(contains('target-signature'))
+                    : contains('target-signature'),
+              );
+            });
+            expect(tester.takeException(), isNull);
+          },
+        );
+      }
+    }
+  }
+
+  for (final temporary in [false, true]) {
+    testWidgets('recovered ask answer reaches request: temporary=$temporary', (
+      tester,
+    ) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final convo = temporary
+            ? await service.createDraftConversation(
+                title: 'Recovered ask',
+                temporary: true,
+              )
+            : await service.createConversation(title: 'Recovered ask');
+        await service.addMessage(
+          conversationId: convo.id,
+          role: 'user',
+          content: 'Ask me what to do',
+        );
+        final arguments = <String, dynamic>{
+          'questions': [
+            {'id': 'q1', 'question': 'Which option?'},
+          ],
+        };
+        final reply = await service.addMessage(
+          conversationId: convo.id,
+          role: 'assistant',
+          providerId: 'SiliconFlow',
+          modelId: 'test-model',
+          parts: [
+            const ReasoningPart('Need user choice'),
+            ToolCallPart(
+              jsonEncode({
+                'id': 'recovered-ask',
+                'name': AskUserToolNames.askUser,
+                'arguments': arguments,
+                'content': null,
+              }),
+            ),
+            const AssistantRoundEndPart(),
+          ],
+        );
+        await controller.chatController.setCurrentConversationAndLoad(convo);
+        final other = temporary
+            ? null
+            : await service.createConversation(title: 'Other', activate: false);
+        final releaseResponse = Completer<void>();
+        if (other != null) {
+          repository.holdResumeWriteFor = reply.id;
+          streamHold = releaseResponse;
+        }
+        final resume = controller.submitRecoveredAskUserAnswer(
+          reply,
+          ToolUIPart(
+            id: 'recovered-ask',
+            toolName: AskUserToolNames.askUser,
+            arguments: arguments,
+            loading: true,
+          ),
+          const AskUserResult.answer({
+            'q1': AskUserAnswerValue.single(
+              value: 'Only review; do not modify files',
+              custom: true,
+            ),
+          }),
+        );
+        try {
+          if (other != null) {
+            await repository.resumeWriteStarted.future.timeout(
+              const Duration(seconds: 5),
+            );
+            final viewModel = controller.debugViewModel;
+            await viewModel.switchConversation(other.id);
+            final reopening = await viewModel.prepareConversationSwitch(
+              convo.id,
+            );
+            expect(
+              await viewModel.commitConversationSwitch(
+                reopening,
+                isCurrent: () => true,
+              ),
+              isTrue,
+            );
+            expect(controller.messages.last.isStreaming, isFalse);
+            repository.releaseResumeWrite.complete();
+          }
+          await resume;
+          await waitFor(() => streamRequestCount == 1, 'recovered request');
+          if (other != null) {
+            expect(controller.messages.last.id, reply.id);
+            expect(controller.messages.last.isStreaming, isTrue);
+          }
+        } finally {
+          if (!repository.releaseResumeWrite.isCompleted) {
+            repository.releaseResumeWrite.complete();
+          }
+          releaseResponse.complete();
+        }
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(convo.id),
+          'recovered streaming to finish',
+        );
+        final continued = (await service.loadMessages(
+          convo.id,
+        )).singleWhere((message) => message.id == reply.id);
+        expect(continued.firstResponseMs, isNull);
+        expect(continued.firstTokenMs, isNull);
+        final requestMessages = (streamRequests.single['messages'] as List)
+            .cast<Map>();
+        final result = requestMessages.singleWhere((m) => m['role'] == 'tool');
+        expect(result['tool_call_id'], 'recovered-ask');
+        final answer = jsonDecode(result['content'] as String) as Map;
+        expect(answer['type'], 'ask_user_answer');
+        expect(
+          answer['answers']['q1']['value'],
+          'Only review; do not modify files',
+        );
+        final assistant = requestMessages.singleWhere(
+          (m) => m['role'] == 'assistant',
+        );
+        expect(assistant['tool_calls'].single['id'], 'recovered-ask');
+      });
+      final exception = tester.takeException();
+      if (exception != null) throw exception;
+    });
+  }
+
+  testWidgets('orphaned assistant history still accepts a composer send', (
+    tester,
+  ) async {
+    // The assistant JSON is a real old writer's output. Only the topic's
+    // ownership is stale, as older deletion/import paths could leave it;
+    // this regression must not depend on malformed assistant fields.
+    final fixtures =
+        jsonDecode(
+              File(
+                'test/fixtures/assistants/historical_writers.json',
+              ).readAsStringSync(),
+            )
+            as List;
+    final fixture = fixtures.firstWhere(
+      (value) => ((value as Map)['writers'] as List).any(
+        (writer) => ((writer as Map)['refs'] as List).contains('v1.3.0'),
+      ),
+    );
+    final storedAssistants = (fixture as Map)['assistants'] as List;
+    final originalIds = storedAssistants
+        .map((value) => (value as Map)['id'] as String)
+        .toList();
+    final controller = await pumpHarness(
+      tester,
+      storedAssistants: storedAssistants,
+    );
+    await tester.runAsync(() async {
+      await settings.disableTitleGeneration();
+      await settings.setNewChatOnLaunch(false);
+      final displayedAssistant = assistantProvider.currentAssistant!;
+      await assistantProvider.updateAssistant(
+        displayedAssistant.copyWith(
+          chatModelProvider: 'SiliconFlow',
+          chatModelId: 'assistant-model',
+        ),
+      );
+      final conversation = await service.createConversation(
+        title: 'Existing topic',
+        assistantId: 'missing-assistant',
+      );
+      final original = await service.addMessage(
+        conversationId: conversation.id,
+        role: 'user',
+        content: 'preserved history',
+      );
+      expect(
+        await GlobalSessionSearchService.search(
+          chatService: service,
+          query: 'preserved history',
+        ),
+        hasLength(1),
+      );
+      await controller.initChat();
+      expect(controller.currentConversation!.id, conversation.id);
+      // Startup used to install the topic's missing owner as the selection,
+      // while currentAssistant silently displayed the first valid assistant.
+      // That leaked the invalid ID into every subsequent new conversation.
+      expect(assistantProvider.currentAssistantId, displayedAssistant.id);
+      final firstNewConversation = await controller.debugViewModel
+          .createNewConversation();
+      expect(firstNewConversation!.assistantId, displayedAssistant.id);
+      await controller.debugViewModel.switchConversation(conversation.id);
+      final drafts = service.composerDrafts!;
+      await drafts.load(conversation.id, assistantId: conversation.assistantId);
+      const input = ComposerDraftInput(text: 'continue this topic');
+      final submission = await drafts.beginSubmission(conversation.id, input);
+      final result = await controller.sendMessage(
+        input.toInput(submission: submission),
+      );
+      expect(result, ChatInputSubmissionResult.sent);
+      await waitFor(() => streamRequestCount == 1, 'orphaned topic request');
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(conversation.id),
+        'orphaned topic reply',
+      );
+      expect(streamRequests.single['model'], 'assistant-model');
+      expect(assistantProvider.currentAssistantId, displayedAssistant.id);
+      expect(
+        assistantProvider.assistants.map((assistant) => assistant.id),
+        originalIds,
+      );
+      final messages = await service.loadMessages(conversation.id);
+      expect(messages.first.id, original.id);
+      expect(messages.first.content, 'preserved history');
+      expect(messages.last.content, 'ok');
+      expect(
+        (await repository.getMessage(original.id))!.content,
+        'preserved history',
+      );
+      expect(
+        service.getConversation(conversation.id)!.assistantId,
+        'missing-assistant',
+      );
+      expect(drafts.peek(conversation.id)!.pending, isNull);
+
+      expect(
+        await controller.debugViewModel.regenerateAtMessage(messages.last),
+        isTrue,
+      );
+      await waitFor(
+        () => streamRequestCount == 2,
+        'orphaned topic regeneration',
+      );
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(conversation.id),
+        'regenerated reply',
+      );
+      expect(streamRequests.last['model'], 'assistant-model');
+
+      final otherId = await assistantProvider.addAssistant(name: 'Other');
+      await assistantProvider.setCurrentAssistant(otherId);
+      await controller.debugViewModel.createNewConversation();
+      await controller.debugViewModel.switchConversation(conversation.id);
+      expect(assistantProvider.currentAssistantId, displayedAssistant.id);
+      expect(controller.messages.first.id, original.id);
+      final newConversation = await controller.debugViewModel
+          .createNewConversation();
+      expect(newConversation!.assistantId, displayedAssistant.id);
+
+      await assistantProvider.setCurrentAssistant(otherId);
+      final prepared = await controller.debugViewModel
+          .prepareConversationSwitch(conversation.id);
+      expect(assistantProvider.currentAssistantId, otherId);
+      await controller.debugViewModel.commitConversationSwitch(
+        prepared!,
+        isCurrent: () => true,
+      );
+      await waitFor(
+        () => assistantProvider.currentAssistantId == displayedAssistant.id,
+        'assistant selection after opening a search result',
+      );
+      expect(controller.messages.first.id, original.id);
+      expect(assistantProvider.assistants.map((assistant) => assistant.id), [
+        ...originalIds,
+        otherId,
+      ]);
+    });
+    await tester.pumpWidget(const SizedBox());
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final newChatOnLaunch in [false, true]) {
+    testWidgets(
+      'recovered model survives reorder and restart: newChat=$newChatOnLaunch',
+      (tester) async {
+        final business = (await tester.runAsync(
+          () => createBusinessTestHarness(
+            initial: {
+              'assistants_v1': jsonEncode(const [
+                {
+                  'id': 'recovery-a',
+                  'name': 'A',
+                  'chatModelProvider': 'SiliconFlow',
+                  'chatModelId': 'model-a',
+                },
+                {
+                  'id': 'recovery-b',
+                  'name': 'B',
+                  'chatModelProvider': 'SiliconFlow',
+                  'chatModelId': 'model-b',
+                },
+              ]),
+              'current_assistant_id_v1': 'recovery-a',
+            },
+          ),
+        ))!;
+        var controller = await pumpHarness(
+          tester,
+          assistantPreferences: business.preferences,
+        );
+        late Conversation conversation;
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          conversation = await service.createConversation(
+            title: 'Recovered topic',
+            assistantId: 'missing-assistant',
+          );
+          await controller.debugViewModel.switchConversation(conversation.id);
+          await assistantProvider.reorderAssistants(1, 0);
+          expect(assistantProvider.currentAssistantId, 'recovery-a');
+          final display = getModelDisplayInfo(
+            settings,
+            conversation: controller.currentConversation,
+            assistant: assistantProvider.currentAssistant,
+          );
+          expect(display.modelDisplay, 'model-a');
+          expect(
+            await controller.sendMessage(ChatInputData(text: 'after reorder')),
+            ChatInputSubmissionResult.sent,
+          );
+          await waitFor(
+            () =>
+                streamRequestCount == 1 &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'reply after reorder',
+          );
+          expect(streamRequests.single['model'], display.modelId);
+        });
+        await tester.pumpWidget(const SizedBox());
+        controller = await pumpHarness(
+          tester,
+          assistantPreferences: BusinessPreferences(business.repository),
+        );
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.setNewChatOnLaunch(newChatOnLaunch);
+          await controller.initChat();
+          expect(assistantProvider.assistants.first.id, 'recovery-b');
+          expect(assistantProvider.currentAssistantId, 'recovery-a');
+          if (newChatOnLaunch) {
+            expect(controller.currentConversation!.assistantId, 'recovery-a');
+            await controller.debugViewModel.switchConversation(conversation.id);
+          } else {
+            expect(controller.currentConversation!.id, conversation.id);
+          }
+          final display = getModelDisplayInfo(
+            settings,
+            conversation: controller.currentConversation,
+            assistant: assistantProvider.currentAssistant,
+          );
+          expect(display.modelDisplay, 'model-a');
+          expect(
+            await controller.sendMessage(ChatInputData(text: 'after restart')),
+            ChatInputSubmissionResult.sent,
+          );
+          await waitFor(
+            () =>
+                streamRequestCount == 2 &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'reply after restart',
+          );
+          expect(streamRequests.last['model'], display.modelId);
+          final messages = await service.loadMessages(conversation.id);
+          expect(
+            await controller.debugViewModel.regenerateAtMessage(messages.last),
+            isTrue,
+          );
+          await waitFor(
+            () =>
+                streamRequestCount == 3 &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'regeneration after restart',
+          );
+          expect(streamRequests.last['model'], display.modelId);
+          expect(
+            service.getConversation(conversation.id)!.assistantId,
+            'missing-assistant',
+          );
+        });
+        await tester.pumpWidget(const SizedBox());
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final temporary in [false, true]) {
+    testWidgets(
+      'chip-only real send and edit reach storage and provider: temporary=$temporary',
+      (tester) async {
+        final controller = await pumpHarness(tester, withComposer: true);
+        final frozen = UiContextText(
+          title: 'Line',
+          body: 'Slope: 3.1\nIntercept: 1',
+        );
+        final input = ChatInputData(
+          text: '',
+          uiContext: UiContextAttachment.history(frozen),
+        );
+        await tester.runAsync(() async {
+          final convo = temporary
+              ? await service.createDraftConversation(
+                  title: 'Temporary',
+                  temporary: true,
+                )
+              : await openConversation(controller);
+          if (temporary) controller.chatController.setDraftConversation(convo);
+          expect(
+            await controller.sendMessage(input),
+            ChatInputSubmissionResult.sent,
+          );
+          await waitFor(() => streamRequestCount == 1, 'chip-only request');
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(convo.id),
+            'chip-only finish',
+          );
+          final messages = temporary
+              ? service.getMessages(convo.id)
+              : await service.loadMessages(convo.id);
+          final user = messages.firstWhere((message) => message.role == 'user');
+          expect(UiUserContextParts.read(user.parts).context, frozen);
+          expect(
+            (streamRequests.single['messages'] as List)
+                .where((m) => m['role'] == 'user')
+                .any((m) => m['content'].toString().contains(frozen.exactText)),
+            isTrue,
+          );
+          await controller.startUserMessageEdit(user);
+          expect(
+            await controller.sendMessage(input),
+            ChatInputSubmissionResult.sent,
+          );
+          await waitFor(
+            () => streamRequestCount == 2,
+            'chip-only edited request',
+          );
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(convo.id),
+            'edited chip finish',
+          );
+          final edited = service
+              .getMessages(convo.id)
+              .where(
+                (message) => message.role == 'user' && message.version == 1,
+              )
+              .single;
+          expect(UiUserContextParts.read(edited.parts).context, frozen);
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'queued chip-only input retains its frozen state after model selection changes',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      final frozen = UiContextText(title: 'Queued', body: 'value: 73');
+      await tester.runAsync(() async {
+        final convo = await openConversation(controller);
+        streamHold = Completer<void>();
+        expect(
+          await controller.sendMessage(const ChatInputData(text: 'Start')),
+          ChatInputSubmissionResult.sent,
+        );
+        await waitFor(() => streamRequestCount == 1, 'first held request');
+        expect(
+          await controller.sendMessage(
+            ChatInputData(
+              text: '',
+              uiContext: UiContextAttachment.history(frozen),
+            ),
+          ),
+          ChatInputSubmissionResult.queued,
+        );
+        await settings.setCurrentModel('SiliconFlow', 'other-model');
+        streamHold!.complete();
+        streamHold = null;
+        await waitFor(() => streamRequestCount == 2, 'queued request');
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(convo.id),
+          'queue finish',
+        );
+        final users = (await service.loadMessages(
+          convo.id,
+        )).where((m) => m.role == 'user').toList();
+        expect(UiUserContextParts.read(users.last.parts).context, frozen);
+        expect(
+          (streamRequests.last['messages'] as List)
+              .where((m) => m['role'] == 'user')
+              .any((m) => m['content'].toString().contains(frozen.exactText)),
+          isTrue,
+        );
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final stale in [false, true]) {
+    testWidgets(
+      'compression budgets the frozen queued UI payload before applying: stale=$stale',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        final omitted = AppLocalizations.of(
+          tester.element(find.byType(_ControllerHarness)),
+        )!.genuiChipOmitted;
+        await tester.runAsync(() async {
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(maxTokens: 32),
+          );
+          final conversation = await openConversation(controller);
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'user',
+            content: 'Old context to compress. ' * 200,
+          );
+          final frozen = UiContextText(title: 'Budget', body: 'value ' * 450);
+          final attachment = stale
+              ? UiContextAttachment.attached(
+                  source: UiContextSource(
+                    conversationId: conversation.id,
+                    revisionId: 'missing-source',
+                    surfaceKey: '0:0',
+                    sourceHash: 'a' * 64,
+                  ),
+                  text: frozen,
+                )
+              : UiContextAttachment.history(frozen);
+          final summary = ChatMessage(
+            id: 'context-summary:estimate',
+            role: 'user',
+            conversationId: conversation.id,
+            content: 'Budget summary',
+          );
+          final estimate = service.contextCompression.estimateCandidate!;
+          final bare = await estimate(conversation.id, [summary]);
+          final full = await estimate(conversation.id, [
+            summary,
+            ChatMessage(
+              role: 'user',
+              conversationId: conversation.id,
+              parts: UiUserContextParts.attach([const TextPart('')], frozen),
+            ),
+          ]);
+          expect(full.usedTokens, greaterThan(bare.usedTokens + 10));
+          final window = (bare.usedTokens + full.usedTokens) ~/ 2;
+          final config = settings.getProviderConfig('SiliconFlow');
+          await settings.setProviderConfig(
+            config.id,
+            config.copyWith(
+              modelOverrides: {
+                'test-model': {'contextWindow': window},
+              },
+            ),
+          );
+          final expected = await estimate(conversation.id, [
+            summary,
+            ChatMessage(
+              role: 'user',
+              conversationId: conversation.id,
+              parts: UiContextSubmission(
+                attachment,
+                omittedText: omitted,
+              ).resolve([const TextPart('')], sourceIsCurrent: false),
+            ),
+          ]);
+          final hold = Completer<String>();
+          var entered = false;
+          await service.contextCompression.start(
+            conversation.id,
+            CompressionRequest(
+              options: const CompressContextOptions(
+                mode: CompressContextLimitMode.unlimited,
+              ),
+              model: 'test-model',
+              generate: (_, _, _, _) async {
+                entered = true;
+                return TextGenerationResult(
+                  parts: [TextPart(await hold.future)],
+                );
+              },
+              quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+            ),
+          );
+          await waitFor(() => entered, 'compression generation');
+          expect(
+            await controller.sendMessage(
+              ChatInputData(text: '', uiContext: attachment),
+            ),
+            ChatInputSubmissionResult.queued,
+          );
+          final queued = await estimate(conversation.id, [summary]);
+          expect(queued, expected);
+          hold.complete('Budget summary');
+          await waitFor(
+            () =>
+                service.contextCompression.taskFor(conversation.id)!.phase ==
+                (stale ? CompressionPhase.completed : CompressionPhase.review),
+            'budget decision',
+          );
+          final task = service.contextCompression.taskFor(conversation.id)!;
+          if (stale) {
+            expect(task.budget!.usedTokens, lessThan(window));
+            await waitFor(
+              () => streamRequestCount == 1,
+              'stale chip notice sent',
+            );
+            await waitFor(
+              () => !controller.chatController.isConversationLoading(
+                conversation.id,
+              ),
+              'stale chip reply finished',
+            );
+            final payload = jsonEncode(streamRequests.single);
+            expect(payload, contains(omitted));
+            expect(payload, isNot(contains(frozen.exactText)));
+          } else {
+            expect(task.error, 'context_budget_exceeded');
+            expect(task.budget!.usedTokens, greaterThan(window));
+            expect(service.contextOperationsFor(conversation.id), isEmpty);
+            expect(controller.currentQueuedInputPaused, isTrue);
+            expect(controller.currentQueuedInput!.input.uiContext, attachment);
+            expect(streamRequestCount, 0);
+          }
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('compression reuses one existing queued input per conversation', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final a = await openConversation(controller);
+      await service.addMessage(
+        conversationId: a.id,
+        role: 'user',
+        content: 'A history ' * 100,
+      );
+      final aHold = Completer<String>();
+      var aEntered = false;
+      await service.contextCompression.start(
+        a.id,
+        CompressionRequest(
+          options: const CompressContextOptions(
+            mode: CompressContextLimitMode.unlimited,
+          ),
+          model: 'test',
+          generate: (_, _, _, _) async {
+            aEntered = true;
+            return TextGenerationResult(parts: [TextPart(await aHold.future)]);
+          },
+          quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+        ),
+      );
+      await waitFor(() => aEntered, 'A compression');
+      expect(
+        await controller.sendMessage(ChatInputData(text: 'queued A')),
+        ChatInputSubmissionResult.queued,
+      );
+      expect(
+        await controller.sendMessage(ChatInputData(text: 'second A')),
+        ChatInputSubmissionResult.rejected,
+      );
+      expect(controller.currentQueuedInput!.input.text, 'queued A');
+      final b = await openConversation(controller);
+      await service.addMessage(
+        conversationId: b.id,
+        role: 'user',
+        content: 'B history ' * 100,
+      );
+      final bHold = Completer<String>();
+      var bEntered = false;
+      await service.contextCompression.start(
+        b.id,
+        CompressionRequest(
+          options: const CompressContextOptions(
+            mode: CompressContextLimitMode.unlimited,
+          ),
+          model: 'test',
+          generate: (_, _, _, _) async {
+            bEntered = true;
+            return TextGenerationResult(parts: [TextPart(await bHold.future)]);
+          },
+          quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+        ),
+      );
+      await waitFor(() => bEntered, 'B compression');
+      expect(
+        await controller.sendMessage(ChatInputData(text: 'queued B')),
+        ChatInputSubmissionResult.queued,
+      );
+      expect(streamRequestCount, 0);
+      bHold.complete('B summary');
+      await waitFor(() => streamRequestCount == 1, 'only B released');
+      expect(jsonEncode(streamRequests.single), contains('queued B'));
+      expect(jsonEncode(streamRequests.single), contains('B summary'));
+      expect(jsonEncode(streamRequests.single), isNot(contains('B history')));
+      expect(service.contextCompression.taskFor(a.id)!.active, isTrue);
+      aHold.complete('A summary');
+      await waitFor(() => streamRequestCount == 2, 'A released in background');
+      expect(controller.currentConversation!.id, b.id);
+      expect(jsonEncode(streamRequests.last), contains('queued A'));
+      expect(jsonEncode(streamRequests.last), contains('A summary'));
+      expect(
+        jsonEncode(streamRequests.last),
+        isNot(contains('context-summary:')),
+      );
+      await waitFor(
+        () =>
+            !controller.chatController.isConversationLoading(a.id) &&
+            !controller.chatController.isConversationLoading(b.id),
+        'both replies finish',
+      );
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final newConversation in [false, true]) {
+    testWidgets(
+      'reviewed compression resumes only the original conversation queue: fork=$newConversation',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          final conversation = await openConversation(controller);
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'user',
+            content: 'history ' * 100,
+          );
+          final hold = Completer<String>();
+          service.contextCompression.estimateCandidate =
+              (_, _, {bool? fixedContextStart}) async =>
+                  (usedTokens: 100, contextWindow: 4000);
+          await service.contextCompression.start(
+            conversation.id,
+            CompressionRequest(
+              options: CompressContextOptions(
+                mode: CompressContextLimitMode.unlimited,
+                previewOnly: true,
+                newConversation: newConversation,
+              ),
+              model: 'test',
+              generate: (_, _, _, _) async =>
+                  TextGenerationResult(parts: [TextPart(await hold.future)]),
+              quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+            ),
+          );
+          expect(
+            await controller.sendMessage(
+              ChatInputData(text: 'send after approval'),
+            ),
+            ChatInputSubmissionResult.queued,
+          );
+          hold.complete('summary');
+          await waitFor(
+            () => controller.currentQueuedInputPaused,
+            'review pauses queued input',
+          );
+          final task = service.contextCompression.taskFor(conversation.id)!;
+          expect(task.phase, CompressionPhase.review);
+          if (!newConversation) {
+            service.contextCompression.estimateCandidate =
+                (_, _, {bool? fixedContextStart}) async =>
+                    (usedTokens: 5000, contextWindow: 4000);
+          }
+          await service.contextCompression.applyReviewed(
+            conversation.id,
+            'approved summary',
+          );
+          expect(task.phase, CompressionPhase.completed);
+          if (newConversation) {
+            expect(task.resultConversationId, isNotNull);
+            expect(controller.currentQueuedInputPaused, isTrue);
+            expect(
+              controller.currentQueuedInput!.input.text,
+              'send after approval',
+            );
+            expect(streamRequestCount, 0);
+          } else {
+            expect(task.budget!.usedTokens, 5000);
+            await waitFor(
+              () =>
+                  streamRequestCount == 1 &&
+                  !controller.chatController.isConversationLoading(
+                    conversation.id,
+                  ),
+              'reviewed queue sends once',
+            );
+            expect(controller.currentQueuedInput, isNull);
+            expect(controller.currentQueuedInputPaused, isFalse);
+            expect(
+              jsonEncode(streamRequests.single),
+              contains('approved summary'),
+            );
+            expect(
+              jsonEncode(streamRequests.single),
+              contains('send after approval'),
+            );
+            expect(
+              (await service.loadMessages(
+                conversation.id,
+              )).where((message) => message.content == 'send after approval'),
+              hasLength(1),
+            );
+          }
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'failed compression pauses queued input until existing cancellation restores it',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final a = await openConversation(controller);
+        await service.addMessage(
+          conversationId: a.id,
+          role: 'user',
+          content: 'history ' * 100,
+        );
+        final hold = Completer<String>();
+        var entered = false;
+        await service.contextCompression.start(
+          a.id,
+          CompressionRequest(
+            options: const CompressContextOptions(
+              mode: CompressContextLimitMode.unlimited,
+            ),
+            model: 'test',
+            generate: (_, _, _, _) async {
+              entered = true;
+              return TextGenerationResult(parts: [TextPart(await hold.future)]);
+            },
+            quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+          ),
+        );
+        await waitFor(() => entered, 'compression started');
+        expect(
+          await controller.sendMessage(ChatInputData(text: 'keep this draft')),
+          ChatInputSubmissionResult.queued,
+        );
+        hold.completeError(StateError('test network failure'));
+        await waitFor(
+          () => controller.currentQueuedInputPaused,
+          'queue paused',
+        );
+        expect(controller.currentQueuedInput!.input.text, 'keep this draft');
+        expect(streamRequestCount, 0);
+        await controller.cancelQueuedMessage();
+        expect(controller.currentQueuedInput, isNull);
+        expect(streamRequestCount, 0);
+      });
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'queued input waits for the full reply then compression then sends once',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final conversation = await openConversation(controller);
+        streamHold = Completer<void>();
+        await controller.sendMessage(ChatInputData(text: 'old history ' * 100));
+        await waitFor(() => streamRequestCount == 1, 'first request');
+        final generated = Completer<String>();
+        var entered = false;
+        await service.contextCompression.start(
+          conversation.id,
+          CompressionRequest(
+            options: const CompressContextOptions(
+              mode: CompressContextLimitMode.unlimited,
+            ),
+            model: 'test',
+            generate: (text, _, _, _) async {
+              expect(
+                controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+                isFalse,
+              );
+              expect(text, contains('Assistant: ok'));
+              entered = true;
+              return TextGenerationResult(
+                parts: [TextPart(await generated.future)],
+              );
+            },
+            quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+          ),
+        );
+        expect(
+          service.contextCompression.taskFor(conversation.id)!.phase,
+          CompressionPhase.waiting,
+        );
+        expect(
+          await controller.sendMessage(
+            ChatInputData(text: 'after compression'),
+          ),
+          ChatInputSubmissionResult.queued,
+        );
+        expect(entered, isFalse);
+        streamHold!.complete();
+        streamHold = null;
+        await waitFor(() => entered, 'compression after persistence');
+        expect(streamRequestCount, 1);
+        generated.complete('summary');
+        await waitFor(() => streamRequestCount == 2, 'queued request');
+        expect(jsonEncode(streamRequests.last), contains('summary'));
+        expect(jsonEncode(streamRequests.last), contains('after compression'));
+        expect(jsonEncode(streamRequests.last), isNot(contains('old history')));
+        await waitFor(
+          () =>
+              !controller.chatController.isConversationLoading(conversation.id),
+          'final reply',
+        );
+        expect(controller.currentQueuedInput, isNull);
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'withdrawing existing queued attachments is not undone by compression completion',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final conversation = await openConversation(controller);
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'user',
+          content: 'old context ' * 100,
+        );
+        final generated = Completer<String>();
+        var entered = false;
+        await service.contextCompression.start(
+          conversation.id,
+          CompressionRequest(
+            options: const CompressContextOptions(
+              mode: CompressContextLimitMode.unlimited,
+            ),
+            model: 'test',
+            generate: (_, _, _, _) async {
+              entered = true;
+              return TextGenerationResult(
+                parts: [TextPart(await generated.future)],
+              );
+            },
+            quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+          ),
+        );
+        await waitFor(() => entered, 'compression');
+        final input = ChatInputData(
+          text: 'keep draft',
+          imagePaths: ['/not-read-image.png'],
+        );
+        expect(
+          await controller.sendMessage(input),
+          ChatInputSubmissionResult.queued,
+        );
+        final restored = controller.debugViewModel.cancelCurrentQueuedInput();
+        expect(restored!.text, input.text);
+        expect(restored.imagePaths, input.imagePaths);
+        generated.complete('summary');
+        await waitFor(
+          () =>
+              service.contextCompression.taskFor(conversation.id)!.phase ==
+              CompressionPhase.completed,
+          'completion',
+        );
+        expect(streamRequestCount, 0);
+        expect(controller.currentQueuedInput, isNull);
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'compression guard does not consume a recovered tool answer before continuation',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final conversation = await openConversation(controller);
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'user',
+          content: 'old context ' * 100,
+        );
+        final arguments = <String, dynamic>{
+          'questions': [
+            {'id': 'q', 'question': 'Choose'},
+          ],
+        };
+        final reply = await service.addMessage(
+          conversationId: conversation.id,
+          role: 'assistant',
+          parts: [
+            ToolCallPart(
+              jsonEncode({
+                'id': 'pending',
+                'name': AskUserToolNames.askUser,
+                'arguments': arguments,
+                'content': null,
+              }),
+            ),
+            const AssistantRoundEndPart(),
+          ],
+        );
+        final generated = Completer<String>();
+        var entered = false;
+        await service.contextCompression.start(
+          conversation.id,
+          CompressionRequest(
+            options: const CompressContextOptions(
+              mode: CompressContextLimitMode.unlimited,
+            ),
+            model: 'test',
+            generate: (_, _, _, _) async {
+              entered = true;
+              return TextGenerationResult(
+                parts: [TextPart(await generated.future)],
+              );
+            },
+            quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+          ),
+        );
+        await waitFor(() => entered, 'compression');
+        final before = List<Map<String, dynamic>>.of(
+          service.getToolEvents(reply.id),
+        );
+        await controller.submitRecoveredAskUserAnswer(
+          reply,
+          ToolUIPart(
+            id: 'pending',
+            toolName: AskUserToolNames.askUser,
+            arguments: arguments,
+            loading: true,
+          ),
+          const AskUserResult.answer({
+            'q': AskUserAnswerValue.single(value: 'keep pending', custom: true),
+          }),
+        );
+        expect(service.getToolEvents(reply.id), before);
+        expect(streamRequestCount, 0);
+        await service.contextCompression.cancel(conversation.id);
+        generated.complete('late summary');
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final scheduledRegeneration in [false, true]) {
+    testWidgets(
+      'exit waits for detached preparation: regeneration=$scheduledRegeneration',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.disableSuggestionGeneration();
+          final conversation = await openConversation(controller);
+          final actions = controller.debugViewModel.debugChatActions;
+          ChatMessage? user;
+          if (scheduledRegeneration) {
+            user = await service.addMessage(
+              conversationId: conversation.id,
+              role: 'user',
+              content: 'question',
+            );
+            await controller.chatController.setCurrentConversationAndLoad(
+              conversation,
+            );
+          }
+          final hold = Completer<void>();
+          repository.compression.readHold = hold;
+          final result = scheduledRegeneration
+              ? await actions.regenerateAtMessage(
+                  message: user!,
+                  conversation: conversation,
+                  scheduled: true,
+                )
+              : await actions.sendMessage(
+                  input: ChatInputData(text: 'question'),
+                  conversation: conversation,
+                );
+          expect(result.success, isTrue);
+          await repository.compression.readEntered.future;
+          var closed = false;
+          AppExitFlush.configureShutdown(
+            prepare: ChatActions.prepareForExit,
+            close: () async {
+              await service.close();
+              await repository.close();
+              closed = true;
+            },
+          );
+          final exit = AppExitFlush.shutdown();
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          expect(closed, isFalse);
+          final rejected = await actions.sendMessage(
+            input: ChatInputData(text: 'too late'),
+            conversation: conversation,
+          );
+          expect(rejected.success, isFalse);
+          expect(rejected.errorMessage, 'in_flight');
+          hold.complete();
+          await exit;
+          expect(closed, isTrue);
+          expect(streamRequestCount, 0);
+          expect(actions.activeStreamingMessageIds, isEmpty);
+          await expectLater(repository.ensureReady(), throwsStateError);
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('concurrent sends persist a single user/assistant pair', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final convo = await openConversation(controller);
+      final first = controller.sendMessage(ChatInputData(text: 'hello')).then((
+        r,
+      ) {
+        return r;
+      });
+      final second = controller.sendMessage(ChatInputData(text: 'hello')).then((
+        r,
+      ) {
+        return r;
+      });
+      await Future.wait([first, second]);
+      // sendMessage resolves once the pair is persisted; the streamed reply
+      // keeps running in the background, so wait for it to finish.
+      await waitFor(() => streamRequestCount == 1, 'stream request to fire');
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'streaming to finish',
+      );
+
+      final messages = await service.loadMessages(convo.id);
+      expect(messages.where((m) => m.role == 'user'), hasLength(1));
+      expect(messages.where((m) => m.role == 'assistant'), hasLength(1));
+      expect(
+        messages.where((m) => m.role == 'assistant').single.isStreaming,
+        isFalse,
+      );
+      expect(streamRequestCount, 1);
+      expect(
+        controller.chatController.isConversationLoading(convo.id),
+        isFalse,
+      );
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final nextState in [
+    GenerationRunState.requesting,
+    GenerationRunState.streaming,
+  ]) {
+    testWidgets(
+      'stop during committed ${nextState.name} transition persists cancellation',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          final convo = await openConversation(controller);
+          service.holdTransition = nextState;
+          // JSON output has no subscription barrier. Stop must synchronize with
+          // the committed transition even when no stream subscription can help.
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(streamOutput: false),
+          );
+          await controller.sendMessage(
+            ChatInputData(text: 'stop during transition'),
+          );
+          final run = await service.transitionCommitted.future.timeout(
+            const Duration(seconds: 5),
+          );
+          final stop = controller.cancelStreaming();
+          try {
+            await waitFor(
+              () => !controller.isCurrentConversationLoading,
+              'visible stop',
+            );
+            expect(service.terminalWrites, isEmpty);
+          } finally {
+            service.releaseTransition.complete();
+            await stop;
+          }
+          final saved = (await repository.getGenerationRun(run.id))!;
+          expect(saved.state, GenerationRunState.cancelled);
+          expect(saved.stateRevision, run.stateRevision + 1);
+          expect(saved.checkpointSeq, greaterThan(run.checkpointSeq));
+          final message = (await repository.getMessage(run.targetRevisionId))!;
+          expect(message.isStreaming, isFalse);
+          expect(
+            controller.chatController.isConversationLoading(convo.id),
+            isFalse,
+          );
+          expect(service.terminalWrites, [GenerationRunState.cancelled]);
+          await controller.sendMessage(ChatInputData(text: 'next turn'));
+          await waitFor(
+            () =>
+                service.terminalWrites.length == 2 &&
+                !controller.chatController.isConversationLoading(convo.id),
+            'next turn to finish',
+          );
+          expect(service.terminalWrites, [
+            GenerationRunState.cancelled,
+            GenerationRunState.completed,
+          ]);
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final terminal in [
+    GenerationRunState.completed,
+    GenerationRunState.failed,
+  ]) {
+    testWidgets('stop preserves an already committed ${terminal.name} result', (
+      tester,
+    ) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final convo = await openConversation(controller);
+        await assistantProvider.updateAssistant(
+          assistantProvider.currentAssistant!.copyWith(streamOutput: false),
+        );
+        service.holdTerminal = terminal;
+        repository.failAssetGc = true;
+        final errors = <String>[];
+        controller.debugViewModel.onError = errors.add;
+        if (terminal == GenerationRunState.failed) {
+          apiOverride = (request, _) async {
+            request.response.statusCode = HttpStatus.badRequest;
+            request.response.write('{"error":{"message":"generation failed"}}');
+            await request.response.close();
+          };
+        }
+        await controller.sendMessage(ChatInputData(text: 'finish before stop'));
+        final run = await service.terminalCommitted.future.timeout(
+          const Duration(seconds: 5),
+        );
+        final stop = controller.cancelStreaming();
+        try {
+          await waitFor(
+            () => !controller.isCurrentConversationLoading,
+            'visible stop',
+          );
+        } finally {
+          service.releaseTerminal.complete();
+          await stop;
+        }
+        expect((await repository.getGenerationRun(run.id))!.state, terminal);
+        expect(
+          (await repository.getMessage(run.targetRevisionId))!.isStreaming,
+          isFalse,
+        );
+        expect(
+          controller.chatController.isConversationLoading(convo.id),
+          isFalse,
+        );
+        expect(service.terminalWrites, [terminal]);
+        expect(repository.assetGcFailures, greaterThan(0));
+        expect(
+          errors,
+          hasLength(terminal == GenerationRunState.failed ? 1 : 0),
+        );
+      });
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final preparation in [false, true]) {
+    testWidgets(
+      'stop takes over a rolled back terminal write, preparation=$preparation',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          final convo = await openConversation(controller);
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(streamOutput: false),
+          );
+          service.failContextRead = preparation;
+          service.holdBeforeFailedWrite = true;
+          // Abort inside the real transaction after the final message snapshot
+          // has been written. The next cancelled transition remains writable.
+          await repository.database.customStatement('''
+CREATE TRIGGER reject_failed_terminal BEFORE UPDATE OF state ON generation_run_rows
+WHEN NEW.state = 'failed' BEGIN SELECT RAISE(ABORT, 'terminal write failed'); END
+''');
+          if (!preparation) {
+            apiOverride = (request, _) async {
+              request.response.statusCode = HttpStatus.badRequest;
+              request.response.write(
+                '{"error":{"message":"generation failed"}}',
+              );
+              await request.response.close();
+            };
+          }
+          final errors = <String>[];
+          controller.debugViewModel.onError = errors.add;
+          await controller.sendMessage(
+            ChatInputData(text: 'stop during failed save'),
+          );
+          final id = await service.beforeFailedWrite.future.timeout(
+            const Duration(seconds: 5),
+          );
+          final stop = controller.cancelStreaming();
+          try {
+            await waitFor(
+              () => !controller.isCurrentConversationLoading,
+              'visible stop',
+            );
+          } finally {
+            service.releaseTerminal.complete();
+            await stop;
+          }
+          final run = (await repository.getGenerationRun(id))!;
+          expect(run.state, GenerationRunState.cancelled);
+          expect(
+            (await repository.getMessage(run.targetRevisionId))!.isStreaming,
+            isFalse,
+          );
+          expect(service.terminalWrites, [
+            GenerationRunState.failed,
+            GenerationRunState.cancelled,
+          ]);
+          expect(
+            controller.chatController.isConversationLoading(convo.id),
+            isFalse,
+          );
+          expect(errors, isEmpty);
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final temporary in [false, true]) {
+    test(
+      'a late progress snapshot preserves terminal cache and tool results, temporary=$temporary',
+      () async {
+        final convo = temporary
+            ? await service.createDraftConversation(
+                title: 'stopped',
+                temporary: true,
+              )
+            : await service.createConversation(title: 'stopped');
+        final partial = await service.addMessage(
+          conversationId: convo.id,
+          role: 'assistant',
+          content: 'partial',
+          isStreaming: true,
+        );
+        final finished = partial.copyWith(
+          content: 'final answer',
+          isStreaming: false,
+        );
+        const tools = [
+          {'id': 'one', 'name': 'lookup', 'arguments': {}, 'content': 'done'},
+        ];
+        await service.finalizeGenerationRunSilent(
+          message: finished,
+          toolEvents: tools,
+          generationRunId: null,
+          expectedState: null,
+          expectedStateRevision: null,
+          terminalState: GenerationRunState.cancelled,
+        );
+        await service.updateStreamingCheckpointSilent(partial, []);
+        final cached = service.getMessages(convo.id).single;
+        expect(cached.content, 'final answer');
+        expect(cached.isStreaming, isFalse);
+        expect(service.getToolEvents(finished.id).single['content'], 'done');
+        if (!temporary) {
+          expect(
+            (await repository.getMessage(finished.id))!.content,
+            'final answer',
+          );
+        }
+      },
+    );
+
+    test(
+      'suggestion source crosses empty pages and honors a logical cutoff, temporary=$temporary',
+      () async {
+        final convo = temporary
+            ? await service.createDraftConversation(
+                title: 'source',
+                temporary: true,
+              )
+            : await service.createConversation(title: 'source');
+        await service.addMessage(
+          conversationId: convo.id,
+          role: 'user',
+          content: 'earlier question',
+        );
+        for (var i = 0; i < ChatService.defaultHistoryPageSize; i++) {
+          await service.addMessage(
+            conversationId: convo.id,
+            role: 'assistant',
+            content: '<think>hidden</think>',
+          );
+        }
+        final latest = await service.addMessage(
+          conversationId: convo.id,
+          role: 'assistant',
+          content: 'answer',
+        );
+        final tail = await service.addMessage(
+          conversationId: convo.id,
+          role: 'tool',
+          content: 'metadata',
+        );
+        final source = await ChatSuggestionService.loadSource(
+          service,
+          convo.id,
+          truncateIndex: -1,
+        );
+        expect(source?.messageId, tail.id);
+        expect(jsonDecode(source!.content), [
+          {'role': 'user', 'content': 'earlier question'},
+          {'role': 'assistant', 'content': latest.content},
+        ]);
+        final cut = await ChatSuggestionService.loadSource(
+          service,
+          convo.id,
+          truncateIndex: 1,
+        );
+        expect(jsonDecode(cut!.content), [
+          {'role': 'assistant', 'content': 'answer'},
+        ]);
+        expect(
+          await ChatSuggestionService.loadSource(
+            service,
+            convo.id,
+            truncateIndex: ChatService.defaultHistoryPageSize + 2,
+          ),
+          isNull,
+        );
+      },
+    );
+  }
+
+  test(
+    'a concurrent summary update preserves a valid suggestion source',
+    () async {
+      final convo = await service.createDraftConversation(
+        title: 'concurrent summary',
+        temporary: true,
+      );
+      final answer = await service.addMessage(
+        conversationId: convo.id,
+        role: 'assistant',
+        content: 'answer',
+      );
+      final pending = ChatSuggestionService.loadSource(
+        service,
+        convo.id,
+        truncateIndex: -1,
+      );
+      await service.updateConversationSummary(convo.id, 'updated metadata', 1);
+      final source = await pending;
+      expect(source?.messageId, answer.id);
+      expect(jsonDecode(source!.content), [
+        {'role': 'assistant', 'content': 'answer'},
+      ]);
+    },
+  );
+
+  testWidgets('single-flight cancel hides loading before slow teardown', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final convo = await openConversation(controller);
+      controller.chatController.setConversationLoading(convo.id, true);
+      final releaseCancel = Completer<void>();
+      var cancelCalls = 0;
+      final source = StreamController<void>(
+        onCancel: () async {
+          cancelCalls++;
+          await releaseCancel.future;
+          throw StateError('cancel failed');
+        },
+      );
+      controller.chatController.setStreamSubscription(
+        convo.id,
+        source.stream.listen((_) {}),
+      );
+
+      final firstCancel = controller.cancelStreaming();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.isCurrentConversationLoading, isFalse);
+      expect(controller.chatController.isConversationLoading(convo.id), isTrue);
+      expect(controller.loadingConversationIds, isNot(contains(convo.id)));
+
+      final recoveredMessage = ChatMessage(
+        id: 'stopping-assistant',
+        role: 'assistant',
+        content: '',
+        conversationId: convo.id,
+      );
+      const recoveredPart = ToolUIPart(
+        id: 'ask-user',
+        toolName: AskUserToolNames.askUser,
+        arguments: <String, dynamic>{},
+        loading: true,
+      );
+      await controller.submitRecoveredAskUserAnswer(
+        recoveredMessage,
+        recoveredPart,
+        const AskUserResult.answer(<String, AskUserAnswerValue>{}),
+      );
+      expect(service.getToolEvents(recoveredMessage.id), isEmpty);
+      expect(controller.toolParts[recoveredMessage.id], isNull);
+
+      var secondCompleted = false;
+      final secondCancel = controller.cancelStreaming().whenComplete(
+        () => secondCompleted = true,
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(cancelCalls, 1);
+      expect(secondCompleted, isFalse);
+
+      releaseCancel.complete();
+      await Future.wait([firstCancel, secondCancel]);
+
+      expect(
+        controller.chatController.isConversationLoading(convo.id),
+        isFalse,
+      );
+      await source.close();
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('double suggestion tap persists a single user/assistant pair', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final convo = await openConversation(controller);
+      final first = controller.sendSuggestion('hello');
+      final second = controller.sendSuggestion('hello');
+      await Future.wait([first, second]);
+      await waitFor(() => streamRequestCount == 1, 'stream request to fire');
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'streaming to finish',
+      );
+
+      final messages = await service.loadMessages(convo.id);
+      expect(messages.where((m) => m.role == 'user'), hasLength(1));
+      expect(messages.where((m) => m.role == 'assistant'), hasLength(1));
+      expect(streamRequestCount, 1);
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final limit in [1, 10, 11]) {
+    for (final temporary in [false, true]) {
+      testWidgets(
+        'context window stays identical on regeneration: limit=$limit temporary=$temporary',
+        (tester) async {
+          final controller = await pumpHarness(tester);
+          await tester.runAsync(() async {
+            await assistantProvider.updateAssistant(
+              assistantProvider.currentAssistant!.copyWith(
+                limitContextMessages: true,
+                contextMessageSize: limit,
+              ),
+            );
+            final convo = temporary
+                ? await service.createDraftConversation(
+                    title: 'Window test',
+                    temporary: true,
+                  )
+                : await openConversation(controller);
+            if (temporary) {
+              await controller.chatController.setCurrentConversationAndLoad(
+                convo,
+              );
+            }
+            for (var i = 0; i < 9; i++) {
+              await service.addMessage(
+                conversationId: convo.id,
+                role: 'user',
+                content: 'question $i',
+              );
+              await service.addMessage(
+                conversationId: convo.id,
+                role: 'assistant',
+                content: 'answer $i',
+              );
+            }
+            await controller.sendMessage(ChatInputData(text: 'last question'));
+            await waitFor(
+              () =>
+                  streamRequests.length == 1 &&
+                  !controller.chatController.isConversationLoading(convo.id),
+              'send completion',
+            );
+            final first = streamRequests.single['messages'];
+            for (var version = 1; version <= 2; version++) {
+              final selected = await service.loadSelectedContextMessages(
+                convo.id,
+                limit: 100,
+              );
+              await controller.regenerateAtMessage(selected.last);
+              await waitFor(
+                () =>
+                    streamRequests.length == version + 1 &&
+                    !controller.chatController.isConversationLoading(convo.id),
+                'regeneration completion',
+              );
+              expect(streamRequests.last['messages'], first);
+            }
+            final all = await service.loadMessages(convo.id);
+            expect(all, hasLength(22));
+            expect(all.where((m) => m.content == 'answer 0'), hasLength(1));
+          });
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  for (final temporary in [false, true]) {
+    testWidgets(
+      'regenerating assistant fixed start is rejected before creating a version: temporary=$temporary',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          final convo = temporary
+              ? await service.createDraftConversation(
+                  title: 'Assistant start',
+                  temporary: true,
+                )
+              : await openConversation(controller);
+          if (temporary) {
+            await controller.chatController.setCurrentConversationAndLoad(
+              convo,
+            );
+          }
+          await service.addMessage(
+            conversationId: convo.id,
+            role: 'user',
+            content: 'Question',
+          );
+          final reply = await service.addMessage(
+            conversationId: convo.id,
+            role: 'assistant',
+            content: 'Answer',
+          );
+          await service.setConversationContextStart(convo.id, reply.id);
+          final selections = Map<String, int>.from(
+            service.getVersionSelections(convo.id),
+          );
+          final errors = <String>[];
+          controller.debugViewModel.onError = errors.add;
+          expect(
+            await controller.debugViewModel.regenerateAtMessage(reply),
+            isFalse,
+          );
+          expect(errors.single, contains('its question is excluded'));
+          expect(streamRequests, isEmpty);
+          expect((await service.loadMessages(convo.id)).map((m) => m.content), [
+            'Question',
+            'Answer',
+          ]);
+          expect(service.getVersionSelections(convo.id), selections);
+          await controller.sendMessage(
+            ChatInputData(text: 'A follow-up question'),
+          );
+          await waitFor(
+            () =>
+                streamRequests.length == 1 &&
+                !controller.chatController.isConversationLoading(convo.id),
+            'follow-up after rejected regeneration',
+          );
+          final history = (streamRequests.single['messages'] as List)
+              .where((m) => m['role'] != 'system')
+              .toList();
+          expect(history.first['content'], 'Answer');
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final temporary in [false, true]) {
+    testWidgets(
+      'fixed context start survives sends, regeneration, moving and cancellation: temporary=$temporary',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(
+              limitContextMessages: true,
+              contextMessageSize: 2,
+            ),
+          );
+          final convo = temporary
+              ? await service.createDraftConversation(
+                  title: 'Pinned temporary',
+                  temporary: true,
+                )
+              : await openConversation(controller);
+          if (temporary) {
+            await controller.chatController.setCurrentConversationAndLoad(
+              convo,
+            );
+          }
+          final users = <ChatMessage>[];
+          for (var i = 0; i < 6; i++) {
+            users.add(
+              await service.addMessage(
+                conversationId: convo.id,
+                role: 'user',
+                content: 'question $i',
+              ),
+            );
+            await service.addMessage(
+              conversationId: convo.id,
+              role: 'assistant',
+              content: 'answer $i',
+            );
+          }
+          users[0] = (await service.appendMessageVersion(
+            messageId: users.first.id,
+            content: 'edited old question',
+          ))!;
+          final errors = <String>[];
+          controller.debugViewModel.onError = errors.add;
+          await service.setConversationContextStart(convo.id, users[2].id);
+          expect(service.getContextStartIndex(convo.id), 4);
+          final beforeCount = (await service.loadMessages(convo.id)).length;
+          expect(
+            await controller.debugViewModel.regenerateAtMessage(users.first),
+            isFalse,
+          );
+          expect((await service.loadMessages(convo.id)).length, beforeCount);
+          expect(streamRequests, isEmpty);
+          expect(errors.single, contains('before the fixed context start'));
+
+          await controller.sendMessage(ChatInputData(text: 'last question'));
+          await waitFor(
+            () =>
+                streamRequests.length == 1 &&
+                !controller.chatController.isConversationLoading(convo.id),
+            'pinned send',
+          );
+          List<dynamic> history() => (streamRequests.last['messages'] as List)
+              .where((m) => m['role'] != 'system')
+              .toList();
+          expect(history(), hasLength(9));
+          expect(history().first['content'], 'question 2');
+          final first = streamRequests.last['messages'];
+          final selected = await service.loadSelectedContextMessages(
+            convo.id,
+            limit: 1,
+          );
+          await controller.regenerateAtMessage(selected.last);
+          await waitFor(
+            () =>
+                streamRequests.length == 2 &&
+                !controller.chatController.isConversationLoading(convo.id),
+            'pinned regeneration',
+          );
+          expect(streamRequests.last['messages'], first);
+          await service.setConversationContextStart(convo.id, users[4].id);
+          await controller.sendMessage(ChatInputData(text: 'another question'));
+          await waitFor(
+            () =>
+                streamRequests.length == 3 &&
+                !controller.chatController.isConversationLoading(convo.id),
+            'moved start',
+          );
+          expect(history().first['content'], 'question 4');
+          final snapshot = await service.loadContextSnapshot(convo.id);
+          final start = snapshot.operations.singleWhere(
+            (op) => op.isFixedStart && !op.revoked,
+          );
+          await service.changeContextOperation(
+            convo.id,
+            start.id,
+            includeDependents: true,
+            expectedState: ContextHistory.operationsFingerprint(
+              snapshot.operations,
+            ),
+          );
+          await controller.sendMessage(ChatInputData(text: 'rolling again'));
+          await waitFor(
+            () =>
+                streamRequests.length == 4 &&
+                !controller.chatController.isConversationLoading(convo.id),
+            'unpinned send',
+          );
+          expect(history(), hasLength(3));
+          expect(history().first['content'], 'another question');
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'a stale delete-other-versions confirmation leaves regeneration running',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final chat = await openConversation(controller);
+        await controller.sendMessage(ChatInputData(text: 'hello'));
+        await waitFor(
+          () =>
+              streamRequestCount == 1 &&
+              !controller.chatController.isConversationLoading(chat.id),
+          'original reply',
+        );
+        final original = (await service.loadMessages(
+          chat.id,
+        )).singleWhere((m) => m.role == 'assistant');
+        final hold = Completer<void>();
+        streamHold = hold;
+        final generation = controller.regenerateAtMessage(original);
+        try {
+          await waitFor(() => streamRequestCount == 2, 'regeneration to start');
+          final versions = await service.loadMessageVersionHeaders(chat.id, {
+            original.groupId ?? original.id,
+          });
+          final streaming = versions.singleWhere((m) => m.id != original.id);
+          final vm = controller.debugViewModel;
+          expect(
+            await vm.deleteMessageVersions(
+              message: original,
+              versionsBefore: versions,
+              deletedMessageIds: {streaming.id},
+            ),
+            isEmpty,
+          );
+          expect(
+            vm.debugChatActions.activeStreamingMessageId(chat.id),
+            streaming.id,
+          );
+          // The same stream may be kept while its inactive sibling is removed.
+          expect(
+            await vm.deleteMessageVersions(
+              message: streaming,
+              versionsBefore: versions,
+              deletedMessageIds: {original.id},
+            ),
+            {original.id},
+          );
+          expect(
+            vm.debugChatActions.activeStreamingMessageId(chat.id),
+            streaming.id,
+          );
+        } finally {
+          hold.complete();
+          await generation;
+        }
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(chat.id),
+          'regeneration to finish',
+        );
+        final kept = (await service.loadMessages(
+          chat.id,
+        )).singleWhere((m) => m.role == 'assistant');
+        expect(kept.isStreaming, isFalse);
+        expect(kept.content, isNotEmpty);
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('double regenerate tap creates a single new version', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final convo = await openConversation(controller);
+      await controller.sendMessage(ChatInputData(text: 'hello'));
+      await waitFor(() => streamRequestCount == 1, 'stream request to fire');
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'initial streaming to finish',
+      );
+      final before = await service.loadMessages(convo.id);
+      expect(before, hasLength(2));
+      final assistantMessage = before.firstWhere((m) => m.role == 'assistant');
+
+      final first = controller.regenerateAtMessage(assistantMessage);
+      final second = controller.regenerateAtMessage(assistantMessage);
+      await Future.wait([first, second]);
+      await waitFor(() => streamRequestCount == 2, 'second stream to fire');
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'regeneration streaming to finish',
+      );
+
+      final messages = await service.loadMessages(convo.id);
+      // user + original assistant revision + exactly one regenerated revision
+      expect(messages, hasLength(3));
+      expect(
+        messages.where((m) => m.role == 'assistant' && m.version == 1),
+        hasLength(1),
+      );
+      expect(streamRequestCount, 2);
+      expect(
+        controller.chatController.isConversationLoading(convo.id),
+        isFalse,
+      );
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('assistant edit save and send creates a new reply slot', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final convo = await openConversation(controller);
+      await controller.sendMessage(ChatInputData(text: 'hello'));
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'initial streaming to finish',
+      );
+      final before = await service.loadMessages(convo.id);
+      final original = before.firstWhere((m) => m.role == 'assistant');
+      final edited = await service.appendMessageVersion(
+        messageId: original.id,
+        content: 'edited answer',
+      );
+      expect(edited, isNotNull);
+
+      await controller.regenerateAtMessage(edited!, assistantAsNewReply: true);
+
+      await waitFor(() => streamRequestCount == 2, 'second stream to fire');
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'new reply streaming to finish',
+      );
+      final messages = await service.loadMessages(convo.id);
+      final editedGroupId = original.groupId ?? original.id;
+      final newReplies = messages.where(
+        (message) =>
+            message.role == 'assistant' &&
+            (message.groupId ?? message.id) != editedGroupId,
+      );
+      expect(
+        messages.where((message) => message.role == 'assistant'),
+        hasLength(3),
+      );
+      expect(newReplies, hasLength(1));
+      expect(
+        newReplies.single.groupId ?? newReplies.single.id,
+        newReplies.single.id,
+      );
+      expect(newReplies.single.version, 0);
+      expect(newReplies.single.isStreaming, isFalse);
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final (laterInput, afterCommit) in [
+    ('text', false),
+    ('attachment', false),
+    ('none', false),
+    ('text', true),
+    ('cleared', false),
+  ]) {
+    testWidgets(
+      'edit submission preserves later $laterInput input${afterCommit ? ' after database commit' : ''}',
+      (tester) async {
+        final controller = await pumpHarness(tester, withComposer: true);
+        final state = tester.state<_ControllerHarnessState>(
+          find.byType(_ControllerHarness),
+        );
+        late Conversation conversation;
+        late ChatMessage original;
+        await tester.runAsync(() async {
+          conversation = await service.createConversation(title: 'Edit draft');
+          await controller.debugViewModel.switchConversation(conversation.id);
+          await waitFor(
+            () => state._mediaController.draftOwnerId == conversation.id,
+            'composer binding',
+          );
+          original = await service.addMessage(
+            conversationId: conversation.id,
+            role: 'user',
+            content: 'original',
+          );
+          await controller.chatController.setCurrentConversationAndLoad(
+            conversation,
+          );
+          state._inputController.text = 'ordinary draft';
+          await controller.startUserMessageEdit(original);
+        });
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(EditableText), 'submitted edit');
+        service.versionSaveHold = Completer<void>();
+        service.holdAfterVersionSave = afterCommit;
+        if (laterInput == 'cleared') {
+          service.regenerationHold = Completer<void>();
+        }
+        await tester.tap(find.byIcon(Lucide.ArrowUp));
+        await tester.pump();
+        await waitForWidget(
+          tester,
+          () => service.versionSaveEntered,
+          'version persistence',
+        );
+        expect(state._inputController.text, isEmpty);
+        if (afterCommit) {
+          // A cleared interim edit can autosave after the version commits,
+          // while the UI is still waiting for the save callback.
+          await tester.enterText(find.byType(EditableText), 'interim input');
+          await tester.enterText(find.byType(EditableText), '');
+          await finishWidget(tester, service.composerDrafts!.flush());
+        }
+        if (laterInput == 'text' || laterInput == 'cleared') {
+          await tester.enterText(
+            find.byType(EditableText),
+            'typed after submit',
+          );
+        } else if (laterInput == 'attachment') {
+          state._mediaController.addFiles([
+            const DocumentAttachment(
+              path: '/later.txt',
+              fileName: 'later.txt',
+              mime: 'text/plain',
+            ),
+          ]);
+        }
+        service.versionSaveHold!.complete();
+        if (laterInput == 'cleared') {
+          await waitForWidget(
+            tester,
+            () => service.regenerationEntered,
+            'regeneration preparation',
+          );
+          await tester.enterText(find.byType(EditableText), '');
+          service.regenerationHold!.complete();
+        }
+        await waitForWidget(
+          tester,
+          () =>
+              streamRequestCount == 1 &&
+              !service.composerDrafts!.submitting.contains(conversation.id) &&
+              !controller.chatController.isConversationLoading(conversation.id),
+          'edit submission and regeneration',
+        );
+        await tester.runAsync(() async {
+          await service.composerDrafts!.flush();
+          final versions = await service.loadMessages(conversation.id);
+          expect(
+            versions
+                .where((m) => m.role == 'user' && m.version == 1)
+                .single
+                .content,
+            'submitted edit',
+          );
+        });
+        await tester.pumpAndSettle();
+        final draft = service.composerDrafts!.peek(conversation.id)!;
+        expect(draft.compose.text, 'ordinary draft');
+        expect(draft.pending, isNull);
+        if (laterInput == 'none' || laterInput == 'cleared') {
+          expect(controller.isUserMessageEditActive, isFalse);
+          expect(state._inputController.text, 'ordinary draft');
+        } else {
+          expect(controller.userMessageEditState?.messageId, original.id);
+          if (laterInput == 'text') {
+            expect(state._inputController.text, 'typed after submit');
+            expect(draft.edit!.text, 'typed after submit');
+          } else {
+            expect(
+              state._mediaController
+                  .snapshotDraft(state._inputController.text)
+                  .documents
+                  .single
+                  .fileName,
+              'later.txt',
+            );
+            expect(draft.edit!.documents.single.fileName, 'later.txt');
+          }
+          controller.cancelUserMessageEdit();
+          expect(state._inputController.text, 'ordinary draft');
+        }
+        await tester.pumpWidget(const SizedBox());
+        await finishWidget(tester, service.composerDrafts!.flush());
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'find reads presented text and reasoning before the streaming checkpoint',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      final message = ChatMessage(
+        id: 'live-find',
+        conversationId: 'c',
+        role: 'assistant',
+        content: 'stored',
+        isStreaming: true,
+      );
+      final notifier = controller.streamingContentNotifier;
+      notifier.getNotifier(message.id);
+      controller.reasoningSegments[message.id] = [
+        ReasoningSegmentData()..text = 'first step',
+        ReasoningSegmentData()..text = 'new step',
+      ];
+      notifier.updateContent(
+        message.id,
+        'published',
+        3,
+        reasoningText: 'new step',
+        contentSplitOffsets: [3],
+        reasoningCountAtSplit: [1],
+        toolCountAtSplit: [0],
+      );
+      final snapshot = controller.conversationFindStreamSnapshot(message);
+      expect(snapshot.content, 'published');
+      expect(snapshot.reasoningText, 'new step');
+      final payload = jsonDecode(snapshot.reasoningSegmentsJson!);
+      expect((payload['segments'] as List).map((s) => s['text']), [
+        'first step',
+        'new step',
+      ]);
+      expect(payload['contentSplits']['offsets'], [3]);
+    },
+  );
+
+  testWidgets(
+    'find navigation to a different message keeps the unsaved user edit',
+    (tester) async {
+      final controller = await pumpHarness(tester, withComposer: true);
+      final state = tester.state<_ControllerHarnessState>(
+        find.byType(_ControllerHarness),
+      );
+      late ChatMessage original, target;
+      await tester.runAsync(() async {
+        final conversation = await service.createConversation(
+          title: 'Find during edit',
+        );
+        original = await service.addMessage(
+          conversationId: conversation.id,
+          role: 'user',
+          content: 'original',
+        );
+        target = await service.addMessage(
+          conversationId: conversation.id,
+          role: 'assistant',
+          content: 'target',
+        );
+        await controller.debugViewModel.switchConversation(conversation.id);
+        await waitFor(
+          () => state._mediaController.draftOwnerId == conversation.id,
+          'composer',
+        );
+      });
+      await controller.startUserMessageEdit(original);
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(EditableText), 'unsaved changes');
+      await finishWidget(
+        tester,
+        controller.scrollToMessageId(
+          target.id,
+          stillCurrent: () => true,
+          beforeScroll: () {},
+        ),
+      );
+      expect(controller.userMessageEditState?.messageId, original.id);
+      expect(state._inputController.text, 'unsaved changes');
+      expect(
+        (await tester.runAsync(
+          () => service.loadMessagesByIds([original.id]),
+        ))!.single.content,
+        'original',
+      );
+    },
+  );
+
+  for (final saveOnly in [false, true]) {
+    testWidgets(
+      'ordinary file import survives edit submission (save only: $saveOnly)',
+      (tester) async {
+        final controller = await pumpHarness(tester, withComposer: true);
+        final state = tester.state<_ControllerHarnessState>(
+          find.byType(_ControllerHarness),
+        );
+        late Conversation conversation;
+        late ChatMessage original;
+        late GatedXFile file;
+        await tester.runAsync(() async {
+          conversation = await service.createConversation(
+            title: 'Ordinary import',
+          );
+          original = await service.addMessage(
+            conversationId: conversation.id,
+            role: 'user',
+            content: 'original',
+          );
+          await controller.debugViewModel.switchConversation(conversation.id);
+          await waitFor(
+            () => state._mediaController.draftOwnerId == conversation.id,
+            'composer',
+          );
+          state._inputController.text = 'ordinary draft';
+          final source = await File(
+            '${directory.path}/ordinary.txt',
+          ).writeAsString('ordinary attachment');
+          file = GatedXFile(source.path);
+        });
+        final importing = controller.onFilesDroppedDesktop([file]);
+        await finishWidget(tester, file.started.future);
+        await controller.startUserMessageEdit(original);
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(EditableText), 'saved edit');
+        if (saveOnly) {
+          await finishWidget(tester, controller.saveUserMessageEditOnly());
+        } else {
+          await tester.tap(find.byIcon(Lucide.ArrowUp));
+          await waitForWidget(
+            tester,
+            () =>
+                service.versionSaveEntered &&
+                !service.composerDrafts!.submitting.contains(conversation.id) &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'edit completion',
+          );
+        }
+        expect(controller.isUserMessageEditActive, isFalse);
+        expect(state._inputController.text, 'ordinary draft');
+        file.release.complete();
+        await finishWidget(tester, importing);
+        await finishWidget(tester, service.composerDrafts!.flush());
+        final docs = state._mediaController
+            .snapshotDraft(state._inputController.text)
+            .documents;
+        expect(docs, hasLength(1));
+        expect(docs.single.fileName, 'ordinary.txt');
+        expect(
+          service.composerDrafts!
+              .peek(conversation.id)!
+              .compose
+              .documents
+              .single
+              .fileName,
+          'ordinary.txt',
+        );
+        await tester.runAsync(() async {
+          expect(
+            await File(docs.single.path).readAsString(),
+            'ordinary attachment',
+          );
+          final edited = (await service.loadMessages(conversation.id))
+              .where(
+                (message) => message.role == 'user' && message.version == 1,
+              )
+              .single;
+          expect(edited.content, 'saved edit');
+          expect(edited.parts.whereType<FilePart>(), isEmpty);
+        });
+        await tester.pumpWidget(const SizedBox());
+        await finishWidget(tester, service.composerDrafts!.flush());
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final (laterInput, callbackFails, navigate) in [
+    ('text', false, true),
+    ('attachment', false, true),
+    ('none', false, true),
+    ('text', true, true),
+    ('none', false, false),
+  ]) {
+    testWidgets(
+      'save-only preserves $laterInput ${navigate ? 'after A-B-A navigation' : 'while staying in A'} (callback fails: $callbackFails)',
+      (tester) async {
+        final controller = await pumpHarness(tester, withComposer: true);
+        final state = tester.state<_ControllerHarnessState>(
+          find.byType(_ControllerHarness),
+        );
+        late Conversation a;
+        late Conversation b;
+        late ChatMessage original;
+        await tester.runAsync(() async {
+          a = await service.createConversation(title: 'A');
+          b = await service.createConversation(title: 'B');
+          original = await service.addMessage(
+            conversationId: a.id,
+            role: 'user',
+            content: 'original',
+          );
+          await controller.debugViewModel.switchConversation(a.id);
+          await waitFor(
+            () => state._mediaController.draftOwnerId == a.id,
+            'A draft',
+          );
+          state._inputController.text = 'ordinary draft';
+          await controller.startUserMessageEdit(original);
+        });
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(EditableText), 'saved edit');
+        service.versionSaveHold = Completer<void>();
+        service.failAfterVersionSave = callbackFails;
+        final saving = controller.saveUserMessageEditOnly();
+        await waitForWidget(
+          tester,
+          () => service.versionSaveEntered,
+          'save-only persistence',
+        );
+        expect(state._mediaController.restoringDraft, isTrue);
+        for (final id in navigate ? [b.id, a.id] : <String>[]) {
+          await finishWidget(tester, controller.switchConversationAnimated(id));
+          await waitForWidget(
+            tester,
+            () =>
+                state._mediaController.draftOwnerId == id &&
+                !state._mediaController.restoringDraft,
+            'restored composer',
+          );
+        }
+        if (laterInput == 'text') {
+          await tester.enterText(
+            find.byType(EditableText),
+            'new edit after returning',
+          );
+        } else if (laterInput == 'attachment') {
+          state._mediaController.addFiles([
+            const DocumentAttachment(
+              path: '/later.txt',
+              fileName: 'later.txt',
+              mime: 'text/plain',
+            ),
+          ]);
+        }
+        service.versionSaveHold!.complete();
+        await finishWidget(tester, saving);
+        await finishWidget(tester, service.composerDrafts!.flush());
+        expect(streamRequestCount, 0);
+        final draft = service.composerDrafts!.peek(a.id)!;
+        expect(draft.compose.text, 'ordinary draft');
+        expect(draft.pending, isNull);
+        expect(state._mediaController.restoringDraft, isFalse);
+        if (laterInput == 'none') {
+          expect(controller.isUserMessageEditActive, isFalse);
+          expect(state._inputController.text, 'ordinary draft');
+        } else {
+          expect(controller.userMessageEditState?.messageId, original.id);
+          if (laterInput == 'text') {
+            expect(state._inputController.text, 'new edit after returning');
+            expect(draft.edit!.text, 'new edit after returning');
+          } else {
+            expect(
+              state._mediaController
+                  .snapshotDraft(state._inputController.text)
+                  .documents
+                  .single
+                  .fileName,
+              'later.txt',
+            );
+            expect(draft.edit!.documents.single.fileName, 'later.txt');
+          }
+          controller.cancelUserMessageEdit();
+          expect(state._inputController.text, 'ordinary draft');
+        }
+        await tester.runAsync(() async {
+          final messages = await service.loadMessages(a.id);
+          expect(
+            messages.where((message) => message.version == 1).single.content,
+            'saved edit',
+          );
+        });
+        await tester.pumpWidget(const SizedBox());
+        await finishWidget(tester, service.composerDrafts!.flush());
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final targetText in ['', 'existing target draft']) {
+    testWidgets(
+      'share keeps its target through preset loading and animated navigation (target: $targetText)',
+      (tester) async {
+        final controller = await pumpHarness(tester, withComposer: true);
+        final state = tester.state<_ControllerHarnessState>(
+          find.byType(_ControllerHarness),
+        );
+        late Conversation b;
+        await tester.runAsync(() async {
+          b = await service.createConversation(title: 'B');
+          await controller.debugViewModel.switchConversation(b.id);
+          await waitFor(
+            () => state._mediaController.draftOwnerId == b.id,
+            'B draft',
+          );
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(
+              presetMessages: [
+                PresetMessage(role: 'user', content: 'preset question'),
+              ],
+            ),
+          );
+        });
+        service.presetHold = Completer<void>();
+        bool? accepted;
+        Object? failure;
+        final delivery = controller
+            .openIncomingShareDraft(
+              const ChatInputData(text: 'shared input'),
+              shareIds: ['share-owner-test'],
+            )
+            .then<void>(
+              (value) {
+                accepted = value;
+              },
+              onError: (Object error) {
+                failure = error;
+              },
+            );
+        await waitForWidget(
+          tester,
+          () => service.presetConversationId != null,
+          'preset insertion',
+        );
+        final target = service.presetConversationId!;
+        expect(target, isNot(b.id));
+        await waitForWidget(
+          tester,
+          () => state._mediaController.draftOwnerId == target,
+          'share target binding',
+        );
+        state._inputController.text = targetText;
+        await finishWidget(tester, controller.switchConversationAnimated(b.id));
+        await waitForWidget(
+          tester,
+          () => state._mediaController.draftOwnerId == b.id,
+          'B binding',
+        );
+        expect(state._inputController.text, isEmpty);
+        service.presetHold!.complete();
+        await finishWidget(tester, delivery);
+        expect(controller.currentConversation!.id, b.id);
+        expect(state._inputController.text, isEmpty);
+        expect(service.composerDrafts!.peek(b.id)!.active.isEmpty, isTrue);
+        expect(find.byType(AlertDialog), findsNothing);
+        if (targetText.isEmpty) {
+          expect(failure, isNull);
+          expect(accepted, isTrue);
+          expect(
+            service.composerDrafts!.peek(target)!.active.text,
+            'shared input',
+          );
+          await tester.runAsync(() async {
+            expect(
+              await service.composerDrafts!.hasShareReceipt('share-owner-test'),
+              isTrue,
+            );
+            expect(
+              (await service.loadMessages(target)).single.content,
+              'preset question',
+            );
+          });
+          await finishWidget(
+            tester,
+            controller.switchConversationAnimated(target),
+          );
+          await waitForWidget(
+            tester,
+            () => state._mediaController.draftOwnerId == target,
+            'shared draft restore',
+          );
+          expect(state._inputController.text, 'shared input');
+        } else {
+          expect(failure, isStateError);
+          expect(accepted, isNull);
+          expect(service.composerDrafts!.peek(target)!.active.text, targetText);
+          await tester.runAsync(() async {
+            expect(
+              await service.composerDrafts!.hasShareReceipt('share-owner-test'),
+              isFalse,
+            );
+          });
+        }
+        await tester.pumpWidget(const SizedBox());
+        await finishWidget(tester, service.composerDrafts!.flush());
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('new entry reopens preset messages without reinjecting them', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester, withComposer: true);
+    final state = tester.state<_ControllerHarnessState>(
+      find.byType(_ControllerHarness),
+    );
+    await tester.runAsync(() async {
+      await assistantProvider.updateAssistant(
+        assistantProvider.currentAssistant!.copyWith(
+          presetMessages: [
+            PresetMessage(role: 'user', content: 'preset question'),
+            PresetMessage(role: 'assistant', content: 'preset answer'),
+          ],
+        ),
+      );
+      await controller.debugViewModel.createNewConversation();
+      final entry = controller.currentConversation!;
+      await waitFor(
+        () => state._mediaController.draftOwnerId == entry.id,
+        'new entry binding',
+      );
+      state._inputController.text = 'unsent question';
+      await service.composerDrafts!.flush();
+      expect(service.getMessageCount(entry.id), 2);
+      final other = await service.createConversation(title: 'other');
+      await controller.debugViewModel.switchConversation(other.id);
+      await waitFor(
+        () => state._mediaController.draftOwnerId == other.id,
+        'other conversation binding',
+      );
+      await controller.debugViewModel.createNewConversation();
+      await waitFor(
+        () => state._mediaController.draftOwnerId == entry.id,
+        'restored entry binding',
+      );
+      expect(controller.currentConversation!.id, entry.id);
+      expect(controller.messages.map((m) => m.content), [
+        'preset question',
+        'preset answer',
+      ]);
+      expect(service.getMessageCount(entry.id), 2);
+      expect(state._inputController.text, 'unsent question');
+    });
+    await tester.pumpWidget(const SizedBox());
+    await finishWidget(tester, service.composerDrafts!.flush());
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('temporary user edit saves and sends the in-memory version', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final convo = await service.createDraftConversation(
+        title: 'Temporary Chat',
+        temporary: true,
+      );
+      controller.chatController.setDraftConversation(convo);
+      await controller.sendMessage(ChatInputData(text: 'original question'));
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'initial temporary streaming to finish',
+      );
+      final original = service
+          .getMessages(convo.id)
+          .firstWhere((message) => message.role == 'user');
+
+      await controller.startUserMessageEdit(original);
+      final result = await controller.sendMessage(
+        ChatInputData(text: 'edited question'),
+      );
+
+      expect(result, ChatInputSubmissionResult.sent);
+      await waitFor(() => streamRequestCount == 2, 'edited stream to fire');
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'edited temporary streaming to finish',
+      );
+      final edited = service
+          .getMessages(convo.id)
+          .firstWhere(
+            (message) =>
+                message.role == 'user' &&
+                (message.groupId ?? message.id) ==
+                    (original.groupId ?? original.id) &&
+                message.version == 1,
+          );
+      expect(edited.content, 'edited question');
+      expect(
+        service.getVersionSelections(convo.id),
+        containsPair(original.groupId ?? original.id, 1),
+      );
+      expect(service.isTemporaryConversation(convo.id), isTrue);
+      expect(service.getAllConversations(), isEmpty);
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'suggestion requests isolate rules and preserve literal placeholders',
+    (tester) async {
+      final controller = await pumpHarness(tester, withSuggestions: true);
+      await tester.runAsync(() async {
+        final convo = await openConversation(controller);
+        await controller.sendMessage(
+          ChatInputData(text: 'Explain {locale} and {content}'),
+        );
+        await waitFor(
+          () => service.getConversation(convo.id)!.chatSuggestions.isNotEmpty,
+          'suggestions',
+        );
+        final request = suggestionRequests.single;
+        final messages = request['messages'] as List;
+        expect(messages.first['role'], 'system');
+        expect(messages.first['content'], contains('JSON object'));
+        expect(messages.last['role'], 'user');
+        expect(
+          messages.last['content'],
+          contains('Explain {locale} and {content}'),
+        );
+        expect(messages.last['content'], contains('"role":"assistant"'));
+        expect(request.containsKey('response_format'), isFalse);
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final mutation in [
+    'clear context',
+    'edit answer',
+    'disable',
+    'send again',
+  ]) {
+    testWidgets('discard delayed suggestions after $mutation', (tester) async {
+      final controller = await pumpHarness(tester, withSuggestions: true);
+      await tester.runAsync(() async {
+        suggestionHold = Completer<void>();
+        final convo = await openConversation(controller);
+        await controller.sendMessage(ChatInputData(text: 'hello'));
+        await waitFor(
+          () => suggestionRequests.length == 1,
+          'pending suggestions',
+        );
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(convo.id),
+          'first reply to finish',
+        );
+        switch (mutation) {
+          case 'clear context':
+            await controller.clearContext();
+          case 'edit answer':
+            final messages = await service.loadMessages(convo.id);
+            await service.updateMessage(
+              messages.last.id,
+              content: 'Edited answer',
+            );
+          case 'disable':
+            await settings.disableSuggestionGeneration();
+          case 'send again':
+            streamHold = Completer<void>();
+            await controller.sendMessage(ChatInputData(text: 'new question'));
+            await waitFor(
+              () => streamRequestCount == 2,
+              'second stream to start',
+            );
+        }
+        suggestionHold!.complete();
+        await waitFor(() => suggestionResponsesSent == 1, 'delayed response');
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect(service.getConversation(convo.id)!.chatSuggestions, isEmpty);
+        if (streamHold != null) {
+          await settings.disableSuggestionGeneration();
+          streamHold!.complete();
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(convo.id),
+            'second reply to finish',
+          );
+        }
+      });
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('an empty suggestions array is not a background error', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester, withSuggestions: true);
+    final errors = <Object>[];
+    controller.debugViewModel.onBackgroundTaskError = (_, error) =>
+        errors.add(error);
+    await tester.runAsync(() async {
+      suggestionResponse = '{"suggestions":[]}';
+      final convo = await openConversation(controller);
+      await controller.sendMessage(ChatInputData(text: 'Thanks, that is all.'));
+      await waitFor(() => suggestionResponsesSent == 1, 'empty response');
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(service.getConversation(convo.id)!.chatSuggestions, isEmpty);
+      expect(errors, isEmpty);
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'background suggestions use that conversations selected version',
+    (tester) async {
+      final controller = await pumpHarness(tester, withSuggestions: true);
+      await tester.runAsync(() async {
+        final convo = await openConversation(controller);
+        await service.addMessage(
+          conversationId: convo.id,
+          role: 'user',
+          content: 'Compare storage',
+        );
+        final answer = await service.addMessage(
+          conversationId: convo.id,
+          role: 'assistant',
+          content: 'SELECTED ANSWER',
+        );
+        await service.addMessage(
+          conversationId: convo.id,
+          role: 'assistant',
+          groupId: answer.groupId ?? answer.id,
+          version: 1,
+          content: 'UNSELECTED ANSWER',
+        );
+        await service.setSelectedVersion(
+          convo.id,
+          answer.groupId ?? answer.id,
+          0,
+        );
+        final other = await service.createConversation(title: 'Other');
+        await controller.chatController.setCurrentConversationAndLoad(other);
+        controller.debugViewModel.debugChatActions.onMaybeGenerateSuggestions!(
+          convo.id,
+        );
+        await waitFor(
+          () => service.getConversation(convo.id)!.chatSuggestions.isNotEmpty,
+          'background suggestions',
+        );
+        final prompt =
+            (suggestionRequests.single['messages'] as List).last['content']
+                as String;
+        expect(prompt, contains('SELECTED ANSWER'));
+        expect(prompt, isNot(contains('UNSELECTED ANSWER')));
+        expect(controller.currentConversation!.id, other.id);
+        expect(service.getConversation(other.id)!.chatSuggestions, isEmpty);
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('older suggestion requests cannot overwrite a newer result', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester, withSuggestions: true);
+    await tester.runAsync(() async {
+      final convo = await openConversation(controller);
+      await service.addMessage(
+        conversationId: convo.id,
+        role: 'user',
+        content: 'Question',
+      );
+      await service.addMessage(
+        conversationId: convo.id,
+        role: 'assistant',
+        content: 'Answer',
+      );
+      final oldHold = Completer<void>();
+      suggestionHold = oldHold;
+      suggestionResponse = '{"suggestions":["old suggestion"]}';
+      controller.debugViewModel.debugChatActions.onMaybeGenerateSuggestions!(
+        convo.id,
+      );
+      await waitFor(() => suggestionRequests.length == 1, 'old request');
+      suggestionHold = null;
+      suggestionResponse = '{"suggestions":["new suggestion"]}';
+      controller.debugViewModel.debugChatActions.onMaybeGenerateSuggestions!(
+        convo.id,
+      );
+      await waitFor(
+        () => service.getConversation(convo.id)!.chatSuggestions.isNotEmpty,
+        'new result',
+      );
+      expect(service.getConversation(convo.id)!.chatSuggestions, [
+        'new suggestion',
+      ]);
+      oldHold.complete();
+      await waitFor(() => suggestionResponsesSent == 2, 'old response');
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(service.getConversation(convo.id)!.chatSuggestions, [
+        'new suggestion',
+      ]);
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('multi-version conversation still saves generated suggestions', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester, withSuggestions: true);
+    await tester.runAsync(() async {
+      final convo = await openConversation(controller);
+      await controller.sendMessage(ChatInputData(text: 'hello'));
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'initial streaming to finish',
+      );
+      final before = await service.loadMessages(convo.id);
+      final assistantMessage = before.firstWhere((m) => m.role == 'assistant');
+
+      // Make the conversation multi-version, then wait for the automatic
+      // suggestion generation that follows the regenerated reply.
+      await controller.regenerateAtMessage(assistantMessage);
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(convo.id),
+        'regeneration streaming to finish',
+      );
+      expect(await service.loadMessages(convo.id), hasLength(3));
+
+      await waitFor(
+        () =>
+            service.getConversation(convo.id)?.chatSuggestions.isNotEmpty ??
+            false,
+        'suggestions to be saved',
+      );
+      expect(
+        service.getConversation(convo.id)!.chatSuggestions,
+        contains('suggestion one'),
+      );
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'a second conversation can send while the first is still streaming',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        streamHold = Completer<void>();
+        final first = await openConversation(controller);
+        await controller.sendMessage(ChatInputData(text: 'from a'));
+        await waitFor(
+          () => controller.chatController.isConversationLoading(first.id),
+          'first conversation to start streaming',
+        );
+
+        final second = await service.createConversation(title: 'Second');
+        await controller.chatController.setCurrentConversationAndLoad(second);
+        final result = await controller.sendMessage(
+          ChatInputData(text: 'from b'),
+        );
+
+        expect(result, ChatInputSubmissionResult.sent);
+        expect(
+          controller.chatController.isConversationLoading(first.id),
+          isTrue,
+        );
+        expect(
+          controller.chatController.isConversationLoading(second.id),
+          isTrue,
+        );
+
+        streamHold!.complete();
+        await waitFor(
+          () =>
+              !controller.chatController.isConversationLoading(first.id) &&
+              !controller.chatController.isConversationLoading(second.id),
+          'both streams to finish',
+        );
+
+        final firstMessages = await service.loadMessages(first.id);
+        final secondMessages = await service.loadMessages(second.id);
+        expect(
+          firstMessages.where((m) => m.role == 'user').single.content,
+          'from a',
+        );
+        expect(
+          secondMessages.where((m) => m.role == 'user').single.content,
+          'from b',
+        );
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets('scheduled send uses its model over the conversation pin', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final target = await openConversation(controller);
+      await controller.sendMessage(ChatInputData(text: 'Previous question'));
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(target.id),
+        'initial reply',
+      );
+      await service.setConversationModel(
+        target.id,
+        providerKey: 'SiliconFlow',
+        modelId: 'pinned-model',
+      );
+      final foreground = await openConversation(controller);
+      String? startedMessage;
+      final result = await controller.debugViewModel.sendScheduledMessage(
+        input: ChatInputData(text: 'Scheduled follow-up'),
+        conversation: service.getConversation(target.id)!,
+        assistant: assistantProvider.currentAssistant!,
+        modelOverride: (providerKey: 'SiliconFlow', modelId: 'scheduled-model'),
+        onGenerationStarted: (id) => startedMessage = id,
+      );
+      expect(result.success, isTrue);
+      expect(startedMessage, result.assistantMessage!.id);
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(target.id),
+        'scheduled reply',
+      );
+      expect(streamRequests.last['model'], 'scheduled-model');
+      final messages = streamRequests.last['messages'] as List;
+      expect(
+        messages.where((m) => m['role'] == 'user').map((m) => m['content']),
+        ['Previous question', 'Scheduled follow-up'],
+      );
+      expect(service.getConversation(target.id)!.chatModelId, 'pinned-model');
+      expect(settings.currentModelId, 'test-model');
+      expect(controller.chatController.currentConversation!.id, foreground.id);
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'scheduled rerun preserves later messages and the foreground chat',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final target = await openConversation(controller);
+        for (final question in ['First question', 'Later question']) {
+          await controller.sendMessage(ChatInputData(text: question));
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(target.id),
+            'reply to $question',
+          );
+        }
+        final before = List<ChatMessage>.of(
+          await service.loadMessages(target.id),
+        );
+        final question = before.firstWhere((m) => m.role == 'user');
+        await settings.setRegenerateDeleteTrailingMessages(true);
+        final foreground = await openConversation(controller);
+        final selections = Map<String, int>.of(
+          controller.debugViewModel.versionSelections,
+        );
+        final result = await controller.debugViewModel
+            .regenerateScheduledMessage(
+              message: question,
+              conversation: service.getConversation(target.id)!,
+              assistant: assistantProvider.currentAssistant!,
+              modelOverride: (
+                providerKey: 'SiliconFlow',
+                modelId: 'rerun-model',
+              ),
+            );
+        expect(result.success, isTrue);
+        expect(result.generationRunId, isNotNull);
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(target.id),
+          'scheduled rerun',
+        );
+        final after = await service.loadMessages(target.id);
+        expect(after, hasLength(before.length + 1));
+        expect(after.map((m) => m.id), containsAll(before.map((m) => m.id)));
+        expect(streamRequests.last['model'], 'rerun-model');
+        final messages = streamRequests.last['messages'] as List;
+        expect(
+          messages.where((m) => m['role'] == 'user').map((m) => m['content']),
+          ['First question'],
+        );
+        expect(
+          controller.chatController.currentConversation!.id,
+          foreground.id,
+        );
+        expect(controller.debugViewModel.versionSelections, selections);
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'a busy scheduled target and stale cancellation leave the user stream running',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        streamHold = Completer<void>();
+        final target = await openConversation(controller);
+        await controller.sendMessage(ChatInputData(text: 'User is chatting'));
+        await waitFor(() => streamRequestCount == 1, 'held user request');
+        final question = (await service.loadMessages(
+          target.id,
+        )).firstWhere((m) => m.role == 'user');
+        var starts = 0;
+        final send = await controller.debugViewModel.sendScheduledMessage(
+          input: ChatInputData(text: 'Scheduled follow-up'),
+          conversation: target,
+          assistant: assistantProvider.currentAssistant!,
+          onGenerationStarted: (_) => starts++,
+        );
+        final rerun = await controller.debugViewModel
+            .regenerateScheduledMessage(
+              message: question,
+              conversation: target,
+              assistant: assistantProvider.currentAssistant!,
+              onGenerationStarted: (_) => starts++,
+            );
+        expect(send.errorMessage, 'in_flight');
+        expect(rerun.errorMessage, 'in_flight');
+        expect(starts, 0);
+        await ChatActions.cancelActiveGenerationFor(
+          target.id,
+          expectedMessageId: 'finished-scheduled-run',
+        );
+        expect(
+          controller.chatController.isConversationLoading(target.id),
+          isTrue,
+        );
+        streamHold!.complete();
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(target.id),
+          'original user reply',
+        );
+        expect(streamRequestCount, 1);
+        expect((await service.loadMessages(target.id)).last.content, 'ok');
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'scheduled rerun before context reset succeeds without changing the cutoff',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final target = await openConversation(controller);
+        await controller.sendMessage(ChatInputData(text: 'Original question'));
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(target.id),
+          'original reply',
+        );
+        final question = (await service.loadMessages(
+          target.id,
+        )).firstWhere((m) => m.role == 'user');
+        await service.clearConversationContext(target.id);
+        final current = service.getConversation(target.id)!;
+        final choices = await repository.getSelectedMessageProjections(
+          target.id,
+        );
+        expect(choices.any((m) => m.id == question.id), isTrue);
+        expect(await repository.getMessage(question.id), isNotNull);
+        final result = await controller.debugViewModel
+            .regenerateScheduledMessage(
+              message: question,
+              conversation: current,
+              assistant: assistantProvider.currentAssistant!,
+            );
+        expect(result.success, isTrue);
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(target.id),
+          'scheduled rerun',
+        );
+        expect(streamRequestCount, 2);
+        expect(
+          service.getConversation(target.id)!.truncateIndex,
+          current.truncateIndex,
+        );
+        expect(
+          (streamRequests.last['messages'] as List)
+              .where((m) => m['role'] == 'user')
+              .map((m) => m['content']),
+          ['Original question'],
+        );
+        await controller.debugViewModel.sendScheduledMessage(
+          input: ChatInputData(text: 'After clear'),
+          conversation: service.getConversation(target.id)!,
+          assistant: assistantProvider.currentAssistant!,
+        );
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(target.id),
+          'follow-up after clear',
+        );
+        expect(
+          (streamRequests.last['messages'] as List)
+              .where((m) => m['role'] == 'user')
+              .map((m) => m['content']),
+          ['After clear'],
+        );
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'scheduled nonstream rerun returns a run while user input is pending',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final target = await openConversation(controller);
+        await controller.sendMessage(ChatInputData(text: 'Original question'));
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(target.id),
+          'original reply',
+        );
+        final question = (await service.loadMessages(
+          target.id,
+        )).firstWhere((m) => m.role == 'user');
+        var returned = false;
+        final run = controller.debugViewModel
+            .regenerateScheduledMessage(
+              message: question,
+              conversation: service.getConversation(target.id)!,
+              assistant: assistantProvider.currentAssistant!.copyWith(
+                streamOutput: false,
+                localToolIds: [AskUserToolNames.askUser],
+              ),
+              modelOverride: (providerKey: 'SiliconFlow', modelId: 'gpt-4o'),
+            )
+            .then((result) {
+              returned = true;
+              return result;
+            });
+        try {
+          await waitFor(
+            () => questions.pendingRequests.isNotEmpty,
+            'real ask-user tool request',
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 700));
+          expect(returned, isTrue);
+          final result = await run;
+          expect(result.success, isTrue);
+          expect(result.generationRunId, isNotNull);
+          expect(
+            (await repository.getGenerationRun(
+              result.generationRunId!,
+            ))!.state.isTerminal,
+            isFalse,
+          );
+          expect(
+            questions.pendingRequests.values.single.conversationId,
+            target.id,
+          );
+        } finally {
+          await ChatActions.cancelActiveGenerationFor(target.id);
+          await run.timeout(const Duration(seconds: 10));
+        }
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  Future<void> compressionReply(
+    HttpRequest request, {
+    bool summary = false,
+    String summaryText = 'COMPACT_HANDOFF',
+  }) async {
+    if (summary) {
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {'role': 'assistant', 'content': summaryText},
+              'finish_reason': 'stop',
+            },
+          ],
+          'usage': {'prompt_tokens': 200, 'completion_tokens': 10},
+        }),
+      );
+    } else {
+      request.response.headers.contentType = ContentType(
+        'text',
+        'event-stream',
+        charset: 'utf-8',
+      );
+      request.response.write(
+        'data: ${jsonEncode({
+          'choices': [
+            {
+              'index': 0,
+              'delta': {'role': 'assistant', 'content': 'ok'},
+              'finish_reason': 'stop',
+            },
+          ],
+        })}\n\n',
+      );
+      request.response.write('data: [DONE]\n\n');
+    }
+    await request.response.close();
+  }
+
+  testWidgets('automatic imported native warning is localized', (tester) async {
+    final controller = await pumpHarness(tester);
+    controller.debugViewModel.onError?.call(
+      'native_compaction_originals_unavailable',
+    );
+    await tester.pumpAndSettle();
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(Scaffold).first),
+    )!;
+    final notices = AppSnackBarManager().activeToasts.map(
+      (entry) => entry.notification.message,
+    );
+    expect(notices, contains(l10n.compressionNativeOriginalsUnavailable));
+    expect(
+      notices.any(
+        (message) =>
+            message.contains('native_compaction_originals_unavailable'),
+      ),
+      isFalse,
+    );
+    AppSnackBarManager().dismissAll();
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pumpAndSettle();
+  });
+
+  for (final keepRecent in [0, 1]) {
+    testWidgets(
+      'manual native compaction preserves selected history beyond the chat limit: keep=$keepRecent',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.disableSuggestionGeneration();
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(
+              limitContextMessages: true,
+              contextMessageSize: 10,
+            ),
+          );
+          final conversation = await service.createConversation(
+            title: 'Native compression range',
+            assistantId: assistantProvider.currentAssistant!.id,
+          );
+          await controller.chatController.setCurrentConversationAndLoad(
+            conversation,
+          );
+          final originals = <ChatMessage>[];
+          for (var i = 0; i < 30; i++) {
+            for (final role in ['user', 'assistant']) {
+              originals.add(
+                await service.addMessage(
+                  conversationId: conversation.id,
+                  role: role,
+                  content: '$role history $i',
+                ),
+              );
+            }
+          }
+          Map<String, dynamic>? compactBody;
+          apiOverride = (request, body) async {
+            expect(request.uri.path.endsWith('/responses/compact'), isTrue);
+            compactBody = body;
+            await _writeResponses(request, body, [
+              {
+                'type': 'compaction',
+                'id': 'selected-history',
+                'encrypted_content': 'selected-history-state',
+              },
+            ]);
+          };
+          expect(
+            await controller.compressContext(
+              options: CompressContextOptions(
+                mode: keepRecent == 0
+                    ? CompressContextLimitMode.unlimited
+                    : CompressContextLimitMode.keepRecent,
+                keepUserMessages: keepRecent,
+                native: true,
+              ),
+            ),
+            isNull,
+          );
+          await waitFor(
+            () =>
+                service.contextCompression.taskFor(conversation.id)?.phase ==
+                CompressionPhase.completed,
+            'selected history compaction installs',
+          );
+          final covered = originals.take(originals.length - keepRecent * 2);
+          final input = compactBody!['input'] as List;
+          expect(input.length, covered.length);
+          expect(input.map((item) => item['role']), covered.map((m) => m.role));
+          expect(
+            input.map((item) {
+              final content = item['content'];
+              return content is String
+                  ? content
+                  : (content as List).map((part) => part['text']).join();
+            }),
+            covered.map((m) => m.content),
+          );
+          final snapshot = await service.loadContextSnapshot(conversation.id);
+          final operation = snapshot.operations.single;
+          expect(operation.sourceGroups, covered.map(ContextHistory.group));
+          expect(
+            operation.compressionDetails['sourceRevisionIds'],
+            covered.map((m) => m.id),
+          );
+          final effective = ContextHistory.resolve(
+            snapshot.messages,
+            snapshot.operations,
+          );
+          expect(ContextOperation.isSummary(effective.first), isTrue);
+          expect(
+            effective.skip(1).map((m) => m.id),
+            originals.skip(covered.length).map((m) => m.id),
+          );
+
+          await service.changeContextOperation(
+            conversation.id,
+            operation.id,
+            includeDependents: true,
+            expectedState: ContextHistory.operationsFingerprint(
+              snapshot.operations,
+            ),
+          );
+          apiOverride = null;
+          await controller.sendMessage(
+            ChatInputData(text: 'ordinary continuation'),
+          );
+          await waitFor(
+            () =>
+                streamRequests.length == 1 &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'ordinary limited send finishes',
+          );
+          final ordinary = (streamRequests.single['messages'] as List).where(
+            (item) => item['role'] == 'user' || item['role'] == 'assistant',
+          );
+          // The limit keeps complete turns, plus the new user message.
+          expect(ordinary.map((item) => item['content']), [
+            ...originals.skip(50).map((m) => m.content),
+            'ordinary continuation',
+          ]);
+        });
+        AppSnackBarManager().dismissAll();
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final newChat in [false, true]) {
+    testWidgets(
+      'manual native compaction sends its whole result before unchanged recent history: newChat=$newChat',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.disableSuggestionGeneration();
+          // Native mode ignores the independently configured text template/model.
+          await settings.setCompressionDefaults(
+            const CompressionConfig(
+              templateId: 'missing-template',
+              providerId: 'missing-summary-provider',
+              modelId: 'missing-summary-model',
+              keepRecentUserTurns: 4,
+            ),
+          );
+          final textSettings = settings.compressionDefaults.toJson();
+          final conversation = await openConversation(controller);
+          for (final content in ['old user', 'recent user']) {
+            await service.addMessage(
+              conversationId: conversation.id,
+              role: 'user',
+              content: content,
+            );
+            await service.addMessage(
+              conversationId: conversation.id,
+              role: 'assistant',
+              content: 'answer to $content',
+            );
+          }
+          final nativeOutput = <Map<String, dynamic>>[
+            {
+              'type': 'message',
+              'id': 'preserved',
+              'role': 'user',
+              'content': [
+                {'type': 'input_text', 'text': 'server retained'},
+              ],
+            },
+            {
+              'type': 'compaction',
+              'id': 'opaque-id',
+              'encrypted_content': 'opaque-state',
+            },
+            {
+              'type': 'future_native_item',
+              'custom': {'keep': true},
+            },
+          ];
+          var compactCalls = 0;
+          Map<String, dynamic>? following;
+          apiOverride = (request, body) async {
+            if (request.uri.path.endsWith('/responses/compact')) {
+              compactCalls++;
+              expect(body['model'], 'test-model');
+              expect(jsonEncode(body), contains('old user'));
+              expect(jsonEncode(body), isNot(contains('recent user')));
+              expect(body, isNot(contains('stream')));
+              request.response.headers.contentType = ContentType.json;
+              request.response.write(
+                jsonEncode({
+                  'output': nativeOutput,
+                  'usage': {'input_tokens': 200, 'output_tokens': 20},
+                }),
+              );
+              await request.response.close();
+            } else {
+              expect(request.uri.path.endsWith('/responses'), isTrue);
+              following = body;
+              request.response.headers.contentType = ContentType(
+                'text',
+                'event-stream',
+              );
+              for (final event in [
+                {
+                  'type': 'response.output_text.delta',
+                  'output_index': 0,
+                  'content_index': 0,
+                  'delta': 'continued',
+                },
+                {
+                  'type': 'response.completed',
+                  'response': {
+                    'status': 'completed',
+                    'output': [
+                      {
+                        'type': 'message',
+                        'id': 'answer-id',
+                        'role': 'assistant',
+                        'content': [
+                          {'type': 'output_text', 'text': 'continued'},
+                        ],
+                      },
+                    ],
+                    'usage': {'input_tokens': 40, 'output_tokens': 2},
+                  },
+                },
+              ]) {
+                request.response.write('data: ${jsonEncode(event)}\n\n');
+              }
+              await request.response.close();
+            }
+          };
+          expect(
+            await controller.compressContext(
+              options: CompressContextOptions(
+                mode: CompressContextLimitMode.keepRecent,
+                keepUserMessages: 1,
+                native: true,
+                newConversation: newChat,
+              ),
+            ),
+            isNull,
+          );
+          await waitFor(
+            () =>
+                service.contextCompression.taskFor(conversation.id)?.phase ==
+                CompressionPhase.completed,
+            'native compaction installs',
+          );
+          final targetId = newChat
+              ? service.contextCompression
+                    .taskFor(conversation.id)!
+                    .resultConversationId!
+              : conversation.id;
+          if (newChat) {
+            final snapshot = await service.loadContextSnapshot(targetId);
+            expect(snapshot.messages, hasLength(3));
+            expect(snapshot.messages.skip(1).map((m) => m.content), [
+              'recent user',
+              'answer to recent user',
+            ]);
+            expect(
+              (await service.loadContextSnapshot(conversation.id)).messages,
+              hasLength(4),
+            );
+            await controller.chatController.setCurrentConversationAndLoad(
+              service.getConversation(targetId)!,
+            );
+          }
+          expect(compactCalls, 1);
+          expect(settings.compressionDefaults.toJson(), textSettings);
+          expect(
+            settings.getProviderConfig('SiliconFlow').useResponseApi,
+            isNot(isTrue),
+          );
+          await controller.sendMessage(ChatInputData(text: 'next user'));
+          await waitFor(
+            () =>
+                following != null &&
+                !controller.chatController.isConversationLoading(targetId),
+            'native follow-up finishes',
+          );
+          final input = following!['input'] as List;
+          expect(input.take(nativeOutput.length).toList(), nativeOutput);
+          final tail = jsonEncode(input.skip(nativeOutput.length).toList());
+          expect(tail, contains('recent user'));
+          expect(tail, contains('answer to recent user'));
+          expect(tail, contains('next user'));
+          expect(tail, isNot(contains('old user')));
+          expect(jsonEncode(following), isNot(contains('_kelivo_native')));
+          expect(
+            (await service.loadMessages(targetId)).last.content,
+            'continued',
+          );
+        });
+        AppSnackBarManager().dismissAll();
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final scenario in ['threshold', 'overflow', 'failure', 'measured']) {
+    testWidgets(
+      'automatic native compression preserves the active turn: $scenario',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.disableSuggestionGeneration();
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(maxTokens: 512),
+          );
+          await settings.setCompressionDefaults(
+            CompressionConfig(
+              mode: AutoCompressionMode.auto,
+              nativeEnabled: true,
+              nativeKeepRecentUserTurns: 1,
+              keepRecentUserTurns: 4,
+              templateId: 'code',
+              summaryTokens: 8192,
+              providerId: 'unavailable-text-provider',
+              modelId: 'text-only-model',
+              planningWindow: scenario == 'overflow' ? 100000 : 4096,
+              includeReference: false,
+            ),
+          );
+          final textSettings = settings.compressionDefaults.toJson();
+          final conversation = await openConversation(controller);
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'user',
+            content: 'EARLIER_NATIVE_FACTS ${'history ' * 5000}',
+          );
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'assistant',
+            content: 'older answer',
+          );
+          var currentQuestion = 'CURRENT_NATIVE_QUESTION';
+          var compactCalls = 0;
+          var replyCalls = 0;
+          apiOverride = (request, body) async {
+            final serialized = jsonEncode(body);
+            expect(serialized, isNot(contains('Target length:')));
+            if (request.uri.path.endsWith('/responses/compact')) {
+              compactCalls++;
+              expect(
+                serialized,
+                contains(
+                  compactCalls == 1
+                      ? 'EARLIER_NATIVE_FACTS'
+                      : 'native-auto-result-1',
+                ),
+              );
+              expect(serialized, isNot(contains(currentQuestion)));
+              if (scenario == 'failure') {
+                request.response.statusCode = 404;
+                request.response.write('unsupported native compaction');
+              } else {
+                request.response.headers.contentType = ContentType.json;
+                request.response.write(
+                  jsonEncode({
+                    'output': [
+                      {
+                        'type': 'compaction',
+                        'id': 'cmp-auto-$compactCalls',
+                        'encrypted_content': 'native-auto-result-$compactCalls',
+                      },
+                      {
+                        'type': 'future_item',
+                        'extra': {'keep': true},
+                      },
+                    ],
+                  }),
+                );
+              }
+            } else {
+              replyCalls++;
+              expect(request.uri.path, endsWith('/responses'));
+              expect(serialized, contains(currentQuestion));
+              if (scenario == 'overflow' && replyCalls == 1) {
+                request.response.statusCode = 400;
+                request.response.write(
+                  '{"error":{"code":"context_length_exceeded"}}',
+                );
+              } else {
+                expect(
+                  serialized.contains('native-auto-result'),
+                  scenario != 'failure',
+                );
+                expect(
+                  serialized.contains('EARLIER_NATIVE_FACTS'),
+                  scenario == 'failure',
+                );
+                request.response.headers.contentType = ContentType(
+                  'text',
+                  'event-stream',
+                );
+                request.response.write(
+                  'data: ${jsonEncode({'type': 'response.output_text.delta', 'output_index': 0, 'content_index': 0, 'delta': 'continued automatically'})}\n\n',
+                );
+                request.response.write(
+                  'data: ${jsonEncode({
+                    'type': 'response.completed',
+                    'response': {
+                      'status': 'completed',
+                      'output': [],
+                      'usage': {'input_tokens': scenario == 'measured' && replyCalls == 1 ? 3500 : 600, 'output_tokens': 3},
+                    },
+                  })}\n\n',
+                );
+              }
+            }
+            await request.response.close();
+          };
+          await controller.sendMessage(
+            ChatInputData(text: 'CURRENT_NATIVE_QUESTION'),
+          );
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(
+              conversation.id,
+            ),
+            'native auto reply',
+          );
+          expect(compactCalls, 1);
+          expect(replyCalls, scenario == 'overflow' ? 2 : 1);
+          expect(
+            (await service.loadMessages(conversation.id)).last.content,
+            'continued automatically',
+          );
+          expect(settings.compressionDefaults.toJson(), textSettings);
+          if (scenario == 'measured') {
+            currentQuestion = 'NEXT_NATIVE_QUESTION';
+            await controller.sendMessage(ChatInputData(text: currentQuestion));
+            await waitFor(
+              () => !controller.chatController.isConversationLoading(
+                conversation.id,
+              ),
+              'native measured usage',
+            );
+            expect(compactCalls, 2);
+            expect(replyCalls, 2);
+          }
+          final operations = await service.loadContextOperations(
+            conversation.id,
+          );
+          if (scenario == 'failure') {
+            expect(operations, isEmpty);
+            expect(
+              service.contextCompression.taskFor(conversation.id)!.phase,
+              CompressionPhase.failed,
+            );
+          } else {
+            expect(operations.last.isNative, isTrue);
+            expect(operations.last.compressionDetails['automatic'], isTrue);
+          }
+        });
+        AppSnackBarManager().dismissAll();
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'automatic native compaction preserves overflow errors for custom string input',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        await configureNative(claude: false, stream: false);
+        await assistantProvider.updateAssistant(
+          assistantProvider.currentAssistant!.copyWith(
+            customBody: const [
+              {'key': 'input', 'value': 'CUSTOM_INPUT'},
+            ],
+          ),
+        );
+        await settings.setCompressionDefaults(
+          const CompressionConfig(
+            mode: AutoCompressionMode.auto,
+            nativeEnabled: true,
+            planningWindow: 1000000,
+          ),
+        );
+        final conversation = await openConversation(controller);
+        var calls = 0;
+        apiOverride = (request, body) async {
+          calls++;
+          expect(request.uri.path, '/v1/responses');
+          expect(body['input'], 'CUSTOM_INPUT');
+          request.response.statusCode = 400;
+          request.response.write(
+            '{"error":{"code":"context_length_exceeded"}}',
+          );
+          await request.response.close();
+        };
+        await controller.sendMessage(ChatInputData(text: 'Local question'));
+        await waitFor(
+          () =>
+              !controller.chatController.isConversationLoading(conversation.id),
+          'custom input overflow',
+        );
+        expect(calls, 1);
+        expect(await service.loadContextOperations(conversation.id), isEmpty);
+        final content = (await service.loadMessages(
+          conversation.id,
+        )).last.content;
+        expect(content, contains('context_length_exceeded'));
+        expect(content, isNot(contains('subtype')));
+      });
+      AppSnackBarManager().dismissAll();
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'automatic native compaction stays on the active connection during a model switch',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final original = await configureNative(claude: false, stream: false);
+        await settings.setProviderConfig(
+          'other',
+          original.copyWith(
+            id: 'other',
+            name: 'Other connection',
+            baseUrl: 'http://${server.address.address}:${server.port}/other',
+          ),
+        );
+        await settings.setCompressionDefaults(
+          const CompressionConfig(
+            mode: AutoCompressionMode.auto,
+            nativeEnabled: true,
+            nativeKeepRecentUserTurns: 1,
+            planningWindow: 1000000,
+          ),
+        );
+        final conversation = await openConversation(controller);
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'user',
+          content: 'OLD_NATIVE_HISTORY ${'history ' * 500}',
+        );
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'assistant',
+          content: 'Old answer',
+        );
+        var compactCalls = 0;
+        var normalCalls = 0;
+        apiOverride = (request, body) async {
+          expect(request.uri.path, startsWith('/v1/responses'));
+          expect(body['model'], 'gpt-5.4');
+          request.response.headers.contentType = ContentType.json;
+          if (request.uri.path.endsWith('/compact')) {
+            compactCalls++;
+            expect(jsonEncode(body), contains('OLD_NATIVE_HISTORY'));
+            expect(jsonEncode(body), isNot(contains('ACTIVE_QUESTION')));
+            expect(jsonEncode(body), isNot(contains('ACTIVE_TOOL_ANSWER')));
+            request.response.write(
+              jsonEncode({
+                'output': [
+                  {
+                    'type': 'compaction',
+                    'id': 'original-connection-state',
+                    'encrypted_content': 'opaque-original-connection',
+                  },
+                ],
+              }),
+            );
+          } else {
+            normalCalls++;
+            if (normalCalls == 1) {
+              request.response.write(
+                jsonEncode({
+                  'output': [
+                    {
+                      'type': 'function_call',
+                      'call_id': 'native-switch-tool',
+                      'name': AskUserToolNames.askUser,
+                      'arguments': jsonEncode({
+                        'questions': [
+                          {'id': 'q1', 'question': 'Continue?'},
+                        ],
+                      }),
+                    },
+                  ],
+                }),
+              );
+            } else if (normalCalls == 2) {
+              request.response.statusCode = 400;
+              request.response.write(
+                '{"error":{"code":"context_length_exceeded"}}',
+              );
+            } else {
+              final wire = jsonEncode(body);
+              expect(wire, contains('opaque-original-connection'));
+              expect(wire, contains('ACTIVE_QUESTION'));
+              expect(wire, contains('ACTIVE_TOOL_ANSWER'));
+              expect(wire, isNot(contains('OLD_NATIVE_HISTORY')));
+              request.response.write(
+                jsonEncode({
+                  'output': [_nativeText('Resumed on original connection')],
+                }),
+              );
+            }
+          }
+          await request.response.close();
+        };
+        final sending = controller.sendMessage(
+          ChatInputData(text: 'ACTIVE_QUESTION'),
+        );
+        await waitFor(
+          () => questions.pendingRequests.containsKey('native-switch-tool'),
+          'native tool before connection switch',
+        );
+        await controller.setConversationModel(
+          providerKey: 'other',
+          modelId: 'other-model',
+        );
+        questions.answer('native-switch-tool', {
+          'q1': const AskUserAnswerValue.single(
+            value: 'ACTIVE_TOOL_ANSWER',
+            custom: true,
+          ),
+        });
+        await sending;
+        await waitFor(
+          () =>
+              !controller.chatController.isConversationLoading(conversation.id),
+          'native continuation after connection switch',
+        );
+        expect(compactCalls, 1);
+        expect(normalCalls, 3);
+        expect(
+          (await service.loadMessages(conversation.id)).last.content,
+          'Resumed on original connection',
+        );
+        final operations = await service.loadContextOperations(conversation.id);
+        expect(operations.single.isNative, isTrue);
+        expect(operations.single.nativePayload!.modelId, 'gpt-5.4');
+      });
+      AppSnackBarManager().dismissAll();
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'existing text auto compression can recover an overflow after native compaction',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        await settings.disableTitleGeneration();
+        await settings.disableSuggestionGeneration();
+        await assistantProvider.updateAssistant(
+          assistantProvider.currentAssistant!.copyWith(maxTokens: 512),
+        );
+        await settings.setCompressionDefaults(
+          const CompressionConfig(
+            mode: AutoCompressionMode.auto,
+            keepRecentUserTurns: 1,
+            summaryTokens: 512,
+            planningWindow: 5000,
+            includeReference: false,
+          ),
+        );
+        final conversation = await openConversation(controller);
+        for (final text in [
+          'ORIGINAL_FACTS ${'history ' * 1000}',
+          'retained turn',
+        ]) {
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'user',
+            content: text,
+          );
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'assistant',
+            content: 'reply',
+          );
+        }
+        var replies = 0;
+        var textCompactions = 0;
+        apiOverride = (request, body) async {
+          if (request.uri.path.endsWith('/responses/compact')) {
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(
+              jsonEncode({
+                'output': [
+                  {
+                    'type': 'compaction',
+                    'id': 'native',
+                    'encrypted_content': 'opaque',
+                  },
+                ],
+              }),
+            );
+            await request.response.close();
+          } else if (jsonEncode(body).contains('Target length:')) {
+            textCompactions++;
+            expect(jsonEncode(body), contains('ORIGINAL_FACTS'));
+            expect(jsonEncode(body), isNot(contains('encrypted_content')));
+            await compressionReply(request, summary: true);
+          } else {
+            replies++;
+            if (replies == 1) {
+              request.response.statusCode = 400;
+              request.response.write(
+                '{"error":{"code":"context_length_exceeded"}}',
+              );
+            } else {
+              expect(jsonEncode(body), contains('COMPACT_HANDOFF'));
+              expect(jsonEncode(body), isNot(contains('encrypted_content')));
+              request.response.headers.contentType = ContentType(
+                'text',
+                'event-stream',
+              );
+              request.response.write(
+                'data: ${jsonEncode({'type': 'response.output_text.delta', 'output_index': 0, 'content_index': 0, 'delta': 'recovered'})}\n\n',
+              );
+              request.response.write(
+                'data: ${jsonEncode({
+                  'type': 'response.completed',
+                  'response': {'status': 'completed', 'output': []},
+                })}\n\n',
+              );
+            }
+            await request.response.close();
+          }
+        };
+        await controller.compressContext(
+          options: const CompressContextOptions(
+            mode: CompressContextLimitMode.keepRecent,
+            keepUserMessages: 1,
+            native: true,
+          ),
+        );
+        await waitFor(
+          () =>
+              service.contextCompression.taskFor(conversation.id)?.phase ==
+              CompressionPhase.completed,
+          'native setup',
+        );
+        await controller.sendMessage(ChatInputData(text: 'current question'));
+        await waitFor(
+          () =>
+              !controller.chatController.isConversationLoading(conversation.id),
+          'automatic recovery',
+        );
+        expect(replies, 2);
+        expect(textCompactions, 1);
+        final operations = await service.loadContextOperations(conversation.id);
+        expect(operations.last.isNative, isFalse);
+        expect(
+          (await service.loadMessages(conversation.id)).last.content,
+          'recovered',
+        );
+        expect(settings.compressionDefaults.mode, AutoCompressionMode.auto);
+      });
+      AppSnackBarManager().dismissAll();
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final mode in AutoCompressionMode.values) {
+    testWidgets(
+      'automatic compression mode ${mode.name} respects consent and sends once',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.disableSuggestionGeneration();
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(maxTokens: 512),
+          );
+          await settings.setCompressionDefaults(
+            CompressionConfig(
+              mode: mode,
+              keepRecentUserTurns: 1,
+              summaryTokens: 512,
+              planningWindow: 5000,
+              includeReference: false,
+            ),
+          );
+          final conversation = await openConversation(controller);
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'user',
+            content: 'OLD_FACTS ${'history ' * 6000}',
+          );
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'assistant',
+            content: 'Earlier answer',
+          );
+          var summaryCalls = 0;
+          final sent = <Map<String, dynamic>>[];
+          apiOverride = (request, body) async {
+            if (jsonEncode(body).contains('Target length:')) {
+              summaryCalls++;
+              await compressionReply(request, summary: true);
+            } else {
+              sent.add(body);
+              await compressionReply(request);
+            }
+          };
+          await controller.sendMessage(ChatInputData(text: 'CURRENT_QUESTION'));
+          await waitFor(
+            () =>
+                sent.isNotEmpty &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'compression send completes',
+          );
+          expect(sent, hasLength(1));
+          expect(summaryCalls, mode == AutoCompressionMode.auto ? 1 : 0);
+          expect(jsonEncode(sent.single), contains('CURRENT_QUESTION'));
+          if (mode == AutoCompressionMode.auto) {
+            expect(jsonEncode(sent.single), contains('COMPACT_HANDOFF'));
+            expect(jsonEncode(sent.single), isNot(contains('OLD_FACTS')));
+            final operation = (await service.loadContextOperations(
+              conversation.id,
+            )).single;
+            expect(operation.compressionDetails['requestAttempts'], 1);
+            expect(
+              operation.compressionDetails['usage'],
+              containsPair('promptTokens', 200),
+            );
+          } else {
+            expect(jsonEncode(sent.single), contains('OLD_FACTS'));
+            expect(
+              await service.loadContextOperations(conversation.id),
+              isEmpty,
+            );
+          }
+        });
+        AppSnackBarManager().dismissAll();
+        await tester.pumpAndSettle();
+        AppSnackBarManager().dismissAll();
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'undo skips compression for one turn while consumed tools stay replaceable',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        await settings.disableTitleGeneration();
+        await settings.disableSuggestionGeneration();
+        await settings.setCurrentModel('SiliconFlow', 'gpt-4.1');
+        await assistantProvider.updateAssistant(
+          assistantProvider.currentAssistant!.copyWith(
+            maxTokens: 512,
+            localToolIds: [AskUserToolNames.askUser],
+          ),
+        );
+        await settings.setCompressionDefaults(
+          const CompressionConfig(
+            mode: AutoCompressionMode.auto,
+            keepRecentUserTurns: 1,
+            summaryTokens: 512,
+            planningWindow: 5000,
+            includeReference: false,
+            replaceConsumedTools: true,
+          ),
+        );
+        final conversation = await openConversation(controller);
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'user',
+          content: 'OLD_FACTS ${'history ' * 6000}',
+        );
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'assistant',
+          parts: [
+            ToolCallPart(
+              jsonEncode({
+                'id': 'consumed-call',
+                'name': 'read_file',
+                'arguments': {'path': 'history.txt'},
+                'content': 'TOOL_PAYLOAD ' * 500,
+              }),
+            ),
+            const AssistantRoundEndPart(),
+            const TextPart('Already used the result'),
+            const AssistantRoundEndPart(),
+          ],
+        );
+        service.contextCompression.skipNextAutomaticTurn(conversation.id);
+        var summaryCalls = 0;
+        final sent = <Map<String, dynamic>>[];
+        apiOverride = (request, body) async {
+          if (jsonEncode(body).contains('Target length:')) {
+            summaryCalls++;
+            await compressionReply(request, summary: true);
+          } else {
+            sent.add(body);
+            await compressionReply(request);
+          }
+        };
+        await controller.sendMessage(ChatInputData(text: 'FIRST_QUESTION'));
+        await waitFor(
+          () =>
+              sent.isNotEmpty &&
+              !controller.chatController.isConversationLoading(conversation.id),
+          'skipped turn finishes',
+        );
+        expect(summaryCalls, 0);
+        expect(sent, hasLength(1));
+        final first = jsonEncode(sent.single);
+        expect(first, contains('OLD_FACTS'));
+        expect(first, contains('Previously consumed result:'));
+        expect(first, contains('read_chat_context'));
+        expect(first, isNot(contains('TOOL_PAYLOAD')));
+        await controller.sendMessage(ChatInputData(text: 'SECOND_QUESTION'));
+        await waitFor(
+          () =>
+              sent.length == 2 &&
+              !controller.chatController.isConversationLoading(conversation.id),
+          'next turn compresses',
+        );
+        expect(summaryCalls, 1);
+        expect(jsonEncode(sent.last), contains('COMPACT_HANDOFF'));
+        expect(jsonEncode(sent.last), isNot(contains('OLD_FACTS')));
+      });
+      AppSnackBarManager().dismissAll();
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('stop during compression settings read never sends a request', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      await settings.disableTitleGeneration();
+      await settings.disableSuggestionGeneration();
+      final conversation = await openConversation(controller);
+      await settings.setCompressionDefaults(
+        const CompressionConfig(replaceConsumedTools: false),
+      );
+      final hold = Completer<void>();
+      repository.compression.readHold = hold;
+      // World-book assembly reads settings before the generation is active.
+      // Hold the following read in _historyContext, just before API dispatch.
+      repository.compression.readsToSkip = 1;
+      var requests = 0;
+      apiOverride = (request, body) async {
+        requests++;
+        await compressionReply(request);
+      };
+      final sending = controller.sendMessage(
+        ChatInputData(text: 'stop before request'),
+      );
+      await repository.compression.readEntered.future;
+      await controller.cancelStreaming();
+      hold.complete();
+      await sending;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(requests, 0);
+      expect(
+        controller.chatController.isConversationLoading(conversation.id),
+        isFalse,
+      );
+      expect(
+        (await service.loadMessages(conversation.id)).last.isStreaming,
+        isFalse,
+      );
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final (providerOverflow, needsReview) in [
+    (false, false),
+    (true, false),
+    (true, true),
+  ]) {
+    testWidgets('automatic compression treats its target as advisory: '
+        'providerOverflow=$providerOverflow, needsReview=$needsReview', (
+      tester,
+    ) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        await settings.disableTitleGeneration();
+        await settings.disableSuggestionGeneration();
+        await assistantProvider.updateAssistant(
+          assistantProvider.currentAssistant!.copyWith(maxTokens: 512),
+        );
+        await settings.setCompressionDefaults(
+          const CompressionConfig(
+            mode: AutoCompressionMode.auto,
+            keepRecentUserTurns: 2,
+            summaryTokens: 512,
+            planningWindow: 5000,
+            includeReference: false,
+          ),
+        );
+        final conversation = await openConversation(controller);
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'user',
+          content: 'OLD_HISTORY ${'history ' * (needsReview ? 300 : 2000)}',
+        );
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'assistant',
+          content: 'Old answer',
+        );
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'user',
+          content: 'RECENT_TURN ${'keep ' * (needsReview ? 3250 : 2750)}',
+        );
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'assistant',
+          content: 'Recent answer',
+        );
+        final summaries = <String>[];
+        final chats = <String>[];
+        apiOverride = (request, body) async {
+          final wire = jsonEncode(body);
+          if (wire.contains('Target length:')) {
+            summaries.add(wire);
+            await compressionReply(
+              request,
+              summary: true,
+              summaryText: needsReview && summaries.length == 1
+                  ? 'long ' * 480
+                  : 'COMPACT_HANDOFF',
+            );
+          } else {
+            chats.add(wire);
+            if (providerOverflow && chats.length == 1) {
+              if (needsReview) {
+                expect(
+                  service.contextCompression.taskFor(conversation.id)?.phase,
+                  CompressionPhase.review,
+                );
+              }
+              request.response.statusCode = needsReview ? 413 : 400;
+              request.response.write(
+                needsReview
+                    ? 'Request Entity Too Large'
+                    : '{"error":{"code":"context_length_exceeded"}}',
+              );
+              await request.response.close();
+            } else {
+              await compressionReply(request);
+            }
+          }
+        };
+        await controller.sendMessage(ChatInputData(text: 'CURRENT_QUESTION'));
+        await waitFor(
+          () =>
+              chats.isNotEmpty &&
+              !controller.chatController.isConversationLoading(conversation.id),
+          'advisory window compression completes',
+        );
+        expect(summaries, hasLength(providerOverflow ? 2 : 1));
+        expect(summaries.first, contains('OLD_HISTORY'));
+        expect(summaries.first, isNot(contains('RECENT_TURN')));
+        expect(chats.first, contains('RECENT_TURN'));
+        expect(chats, hasLength(providerOverflow ? 2 : 1));
+        expect(chats.last, contains('CURRENT_QUESTION'));
+        expect(chats.last, contains('COMPACT_HANDOFF'));
+        expect(chats.last, isNot(contains('OLD_HISTORY')));
+        if (providerOverflow) {
+          expect(summaries.last, contains('RECENT_TURN'));
+          expect(
+            summaries.last,
+            contains(needsReview ? 'OLD_HISTORY' : 'COMPACT_HANDOFF'),
+          );
+          expect(summaries.last, isNot(contains('CURRENT_QUESTION')));
+          expect(chats.last, isNot(contains('RECENT_TURN')));
+        }
+      });
+      AppSnackBarManager().dismissAll();
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final retryAfterRestore in [false, true]) {
+    testWidgets(
+      'automatic compression stays inside the finite context window: retryAfterRestore=$retryAfterRestore',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.disableSuggestionGeneration();
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(
+              maxTokens: 512,
+              limitContextMessages: true,
+              contextMessageSize: 3,
+            ),
+          );
+          await settings.setCompressionDefaults(
+            const CompressionConfig(
+              mode: AutoCompressionMode.auto,
+              keepRecentUserTurns: 1,
+              summaryTokens: 512,
+              planningWindow: 5000,
+              includeReference: false,
+            ),
+          );
+          final conversation = await openConversation(controller);
+          for (final text in [
+            'EXCLUDED_SECRET',
+            'VISIBLE_FACTS ${'history ' * 6000}',
+          ]) {
+            await service.addMessage(
+              conversationId: conversation.id,
+              role: 'user',
+              content: text,
+            );
+            await service.addMessage(
+              conversationId: conversation.id,
+              role: 'assistant',
+              content: 'Answer to $text',
+            );
+          }
+          var failSummary = retryAfterRestore;
+          final prompts = <String>[];
+          final sent = <Map<String, dynamic>>[];
+          apiOverride = (request, body) async {
+            if (jsonEncode(body).contains('Target length:')) {
+              prompts.add(jsonEncode(body));
+              if (failSummary) {
+                request.response.statusCode = 400;
+                request.response.write(
+                  '{"error":{"message":"summary rejected"}}',
+                );
+                await request.response.close();
+              } else {
+                await compressionReply(request, summary: true);
+              }
+            } else {
+              sent.add(body);
+              await compressionReply(request);
+            }
+          };
+          await controller.sendMessage(ChatInputData(text: 'CURRENT_QUESTION'));
+          await waitFor(
+            () =>
+                sent.isNotEmpty &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'window compression completes',
+          );
+          if (retryAfterRestore) {
+            expect(
+              service.contextCompression.taskFor(conversation.id)!.phase,
+              CompressionPhase.failed,
+            );
+            await service.contextCompression.restore();
+            final recovered = service.contextCompression.taskFor(
+              conversation.id,
+            )!;
+            expect(recovered.effectiveMessageIds, isNotNull);
+            expect(recovered.phase, CompressionPhase.interrupted);
+            failSummary = false;
+            expect(
+              await controller.compressContext(
+                options: recovered.options,
+                targetConversationId: recovered.conversationId,
+                beforeMessageId: recovered.protectedMessageId,
+                effectiveMessageIds: recovered.effectiveMessageIds,
+              ),
+              isNull,
+            );
+            await waitFor(
+              () =>
+                  service.contextCompression.taskFor(conversation.id)!.phase ==
+                  CompressionPhase.completed,
+              'restored bounded retry completes',
+            );
+          }
+          expect(prompts, isNotEmpty);
+          expect(prompts.join(), contains('VISIBLE_FACTS'));
+          expect(prompts.join(), isNot(contains('EXCLUDED_SECRET')));
+          expect(sent, hasLength(1));
+          expect(
+            jsonEncode(sent.single),
+            contains(retryAfterRestore ? 'VISIBLE_FACTS' : 'COMPACT_HANDOFF'),
+          );
+          expect(jsonEncode(sent.single), contains('CURRENT_QUESTION'));
+          expect(jsonEncode(sent.single), isNot(contains('EXCLUDED_SECRET')));
+          final operation = (await service.loadContextOperations(
+            conversation.id,
+          )).single;
+          final original = await service.loadMessages(conversation.id);
+          expect(
+            operation.sourceGroups,
+            isNot(contains(original.first.groupId)),
+          );
+        });
+        AppSnackBarManager().dismissAll();
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('automatic compression cancellation does not install or resume', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      await settings.disableTitleGeneration();
+      await settings.disableSuggestionGeneration();
+      await settings.setCompressionDefaults(
+        const CompressionConfig(
+          mode: AutoCompressionMode.auto,
+          keepRecentUserTurns: 1,
+          summaryTokens: 512,
+          planningWindow: 8000,
+          includeReference: false,
+        ),
+      );
+      final conversation = await openConversation(controller);
+      await service.addMessage(
+        conversationId: conversation.id,
+        role: 'user',
+        content: 'OLD_FACTS ${'history ' * 8000}',
+      );
+      final held = Completer<void>();
+      var summaryEntered = false;
+      var chatCalls = 0;
+      apiOverride = (request, body) async {
+        if (jsonEncode(body).contains('Target length:')) {
+          summaryEntered = true;
+          await held.future;
+          await compressionReply(request, summary: true);
+        } else {
+          chatCalls++;
+          await compressionReply(request);
+        }
+      };
+      await controller.sendMessage(ChatInputData(text: 'CURRENT_QUESTION'));
+      await waitFor(() => summaryEntered, 'summary request');
+      await controller.cancelStreaming();
+      held.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(chatCalls, 0);
+      expect(await service.loadContextOperations(conversation.id), isEmpty);
+    });
+    AppSnackBarManager().dismissAll();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final (enabled, includeCards) in [
+    (false, true),
+    (true, false),
+    (true, true),
+  ]) {
+    testWidgets(
+      'automatic compression actual overflow recovery enabled=$enabled cards=$includeCards',
+      (tester) async {
+        final controller = await pumpHarness(
+          tester,
+          withInstructionInjections: true,
+        );
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.disableSuggestionGeneration();
+          final assistant = assistantProvider.currentAssistant!;
+          const card = InstructionInjection(
+            id: 'style',
+            title: 'Style',
+            prompt: 'ASSISTANT_STYLE_CARD',
+          );
+          final injections = tester
+              .element(find.byType(_ControllerHarness))
+              .read<InstructionInjectionProvider>();
+          await injections.add(card);
+          await injections.setActiveId(card.id, assistantId: assistant.id);
+          await settings.setProviderConfig(
+            'other',
+            settings
+                .getProviderConfig('SiliconFlow')
+                .copyWith(
+                  id: 'other',
+                  baseUrl:
+                      'http://${server.address.address}:${server.port}/other/v1',
+                ),
+          );
+          await settings.setCompressionDefaults(
+            CompressionConfig(
+              mode: enabled
+                  ? AutoCompressionMode.auto
+                  : AutoCompressionMode.off,
+              keepRecentUserTurns: 1,
+              summaryTokens: 512,
+              planningWindow: 32000,
+              includeInstructionInjections: enabled
+                  ? !includeCards
+                  : includeCards,
+              providerId: enabled ? null : 'other',
+              modelId: enabled ? null : 'dedicated-summary',
+            ),
+          );
+          final conversation = await openConversation(controller);
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'user',
+            content: 'OLD_FACTS ${'history ' * 600}',
+          );
+          final summaries = <({String path, Map<String, dynamic> body})>[];
+          final chats = <String>[];
+          apiOverride = (request, body) async {
+            final wire = jsonEncode(body);
+            if (wire.contains('Target length:')) {
+              summaries.add((path: request.uri.path, body: body));
+              await compressionReply(request, summary: true);
+            } else {
+              chats.add(wire);
+              if (chats.length == 1) {
+                if (enabled) {
+                  await service.setCompressionOverrides(conversation.id, {
+                    'includeInstructionInjections': includeCards,
+                  });
+                  final other = await assistantProvider.addAssistant(
+                    name: 'Other',
+                  );
+                  await assistantProvider.updateAssistant(
+                    assistantProvider
+                        .getById(other)!
+                        .copyWith(
+                          chatModelProvider: 'other',
+                          chatModelId: 'other-chat',
+                        ),
+                  );
+                  await assistantProvider.setCurrentAssistant(other);
+                }
+                request.response.statusCode = enabled ? 400 : 413;
+                request.response.write(
+                  enabled
+                      ? '{"error":{"code":"context_length_exceeded"}}'
+                      : 'Request Entity Too Large',
+                );
+                await request.response.close();
+              } else {
+                await compressionReply(request);
+              }
+            }
+          };
+          await controller.sendMessage(ChatInputData(text: 'CURRENT_QUESTION'));
+          await waitFor(
+            () =>
+                chats.isNotEmpty &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'overflow completes',
+          );
+          expect(summaries, hasLength(enabled ? 1 : 0));
+          expect(chats, hasLength(enabled ? 2 : 1));
+          if (!enabled) {
+            expect(
+              AppSnackBarManager().activeToasts.map(
+                (toast) => toast.notification.actionLabel,
+              ),
+              contains(AppLocalizationsEn().compressionOverflowAction),
+            );
+            final failed = (await service.loadContextSnapshot(
+              conversation.id,
+            )).messages.last;
+            await controller.debugViewModel.compressAndRetryContext(
+              failed,
+              originalParts: const [],
+            );
+            await waitFor(
+              () =>
+                  chats.length == 2 &&
+                  !controller.chatController.isConversationLoading(
+                    conversation.id,
+                  ),
+              'explicit compression retry completes',
+            );
+            final after = await service.loadContextSnapshot(conversation.id);
+            expect(after.messages.last.id, failed.id);
+            expect(
+              after.messages.last.content,
+              isNot(contains('context_length_exceeded')),
+            );
+            expect(
+              after.messages.where((m) => m.content == 'CURRENT_QUESTION'),
+              hasLength(1),
+            );
+            expect(settings.compressionDefaults.mode, AutoCompressionMode.off);
+          }
+          final summary = summaries.single;
+          expect(
+            summary.path,
+            enabled ? '/v1/chat/completions' : '/other/v1/chat/completions',
+          );
+          expect(
+            summary.body['model'],
+            enabled ? 'test-model' : 'dedicated-summary',
+          );
+          final summaryBody = jsonEncode(summary.body);
+          expect(summaryBody, contains('OLD_FACTS'));
+          expect(summaryBody.contains(card.prompt), includeCards);
+          expect(chats, everyElement(contains(card.prompt)));
+        });
+        AppSnackBarManager().dismissAll();
+        await tester.pumpAndSettle();
+        AppSnackBarManager().dismissAll();
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+}
+
+Map<String, dynamic> _nativeReasoning(String id) => {
+  'type': 'reasoning',
+  'id': id,
+  'summary': [],
+  'encrypted_content': 'opaque-$id',
+};
+
+Map<String, dynamic> _nativeText(String text) => {
+  'type': 'message',
+  'id': 'message-$text',
+  'role': 'assistant',
+  'content': [
+    {'type': 'output_text', 'text': text, 'annotations': []},
+  ],
+};
+
+Future<void> _writeResponses(
+  HttpRequest request,
+  Map<String, dynamic> body,
+  List<Map<String, dynamic>> output,
+) async {
+  if (body['stream'] == true) {
+    request.response.headers.contentType = ContentType('text', 'event-stream');
+    void emit(Map<String, dynamic> event) =>
+        request.response.write('data: ${jsonEncode(event)}\n\n');
+    for (final (index, item) in output.indexed) {
+      emit({
+        'type': 'response.output_item.added',
+        'output_index': index,
+        'item': item,
+      });
+      if (item['type'] == 'message') {
+        emit({
+          'type': 'response.output_text.delta',
+          'output_index': index,
+          'delta': (item['content'] as List).first['text'],
+        });
+      }
+      emit({
+        'type': 'response.output_item.done',
+        'output_index': index,
+        'item': item,
+      });
+    }
+    emit({
+      'type': 'response.completed',
+      'response': {'output': output},
+    });
+  } else {
+    request.response.headers.contentType = ContentType.json;
+    request.response.write(jsonEncode({'output': output}));
+  }
+  await request.response.close();
+}
+
+class _ControllerHarness extends StatefulWidget {
+  const _ControllerHarness({
+    required this.onCreated,
+    this.withComposer = false,
+    this.onSend,
+  });
+
+  final ValueChanged<HomePageController> onCreated;
+  final bool withComposer;
+  final Future<ChatInputSubmissionResult> Function(ChatInputData)? onSend;
+
+  @override
+  State<_ControllerHarness> createState() => _ControllerHarnessState();
+}
+
+class _ControllerHarnessState extends State<_ControllerHarness>
+    with TickerProviderStateMixin {
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
+  final _inputBarKey = GlobalKey();
+  final _inputFocus = FocusNode();
+  final _inputController = TextEditingController();
+  final _mediaController = ChatInputBarController();
+  final _scrollController = ChatAutoFollowScrollController();
+  late final HomePageController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = HomePageController(
+      context: context,
+      vsync: this,
+      scaffoldKey: _scaffoldKey,
+      inputBarKey: _inputBarKey,
+      inputFocus: _inputFocus,
+      inputController: _inputController,
+      mediaController: _mediaController,
+      scrollController: _scrollController,
+    );
+    widget.onCreated(_controller);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _inputFocus.dispose();
+    _inputController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: _controller,
+    builder: (context, _) => Scaffold(
+      key: _scaffoldKey,
+      body: widget.withComposer
+          ? Align(
+              alignment: Alignment.bottomCenter,
+              child: ChatInputBar(
+                key: _inputBarKey,
+                controller: _inputController,
+                mediaController: _mediaController,
+                focusNode: _inputFocus,
+                conversationId: _controller.currentConversation?.id,
+                onSend: widget.onSend ?? _controller.sendMessage,
+              ),
+            )
+          : null,
+    ),
+  );
+}

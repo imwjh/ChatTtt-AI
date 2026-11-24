@@ -1,0 +1,263 @@
+import 'package:Kelivo/core/services/tts/tts_text_selection.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test(
+    'quote and parenthesis selection continues across semantic boundaries',
+    () {
+      expect(
+        TtsTextSelection.prepareParts(const [
+          TtsTextPart('Before (hidden'),
+          TtsTextPart('UI: 3', literal: true),
+          TtsTextPart('hidden) After'),
+        ], mode: TtsTextSelectionMode.outsideParentheses),
+        'Before After',
+      );
+      expect(
+        TtsTextSelection.prepareParts(const [
+          TtsTextPart('Outside “start'),
+          TtsTextPart('UI: 3', literal: true),
+          TtsTextPart('end” Outside'),
+        ], mode: TtsTextSelectionMode.quotedOnly),
+        'start UI: 3 end',
+      );
+      expect(
+        TtsTextSelection.prepareParts(const [
+          TtsTextPart('<em>start'),
+          TtsTextPart('*plain*', literal: true),
+          TtsTextPart('end</em> other'),
+        ], mode: TtsTextSelectionMode.italicOnly),
+        'start *plain* end',
+      );
+    },
+  );
+
+  test('semantic literals survive Markdown cleanup and selection modes', () {
+    const parts = [
+      TtsTextPart('**Normal** *emphasis* `code`'),
+      TtsTextPart('-3 `literal` *not italic* “spoken” (aside)', literal: true),
+    ];
+    expect(
+      TtsTextSelection.prepareParts(parts, mode: TtsTextSelectionMode.fullText),
+      'Normal emphasis -3 `literal` *not italic* “spoken” (aside)',
+    );
+    expect(
+      TtsTextSelection.prepareParts(
+        parts,
+        mode: TtsTextSelectionMode.quotedOnly,
+      ),
+      'spoken',
+    );
+    expect(
+      TtsTextSelection.prepareParts(
+        parts,
+        mode: TtsTextSelectionMode.italicOnly,
+      ),
+      'emphasis',
+    );
+    expect(
+      TtsTextSelection.prepareParts(
+        parts,
+        mode: TtsTextSelectionMode.nonItalic,
+      ),
+      'Normal -3 `literal` *not italic* “spoken” (aside)',
+    );
+    expect(
+      TtsTextSelection.prepareParts(
+        parts,
+        mode: TtsTextSelectionMode.outsideParentheses,
+      ),
+      'Normal emphasis -3 `literal` *not italic* “spoken”',
+    );
+  });
+  test('speech fallback applies once across ordinary and semantic parts', () {
+    expect(
+      TtsTextSelection.prepareParts(const [
+        TtsTextPart('unquoted ordinary'),
+        TtsTextPart('value: 4', literal: true),
+      ], mode: TtsTextSelectionMode.quotedOnly),
+      'unquoted ordinary value: 4',
+    );
+    expect(
+      TtsTextSelection.prepareParts(const [
+        TtsTextPart('unquoted ordinary'),
+        TtsTextPart('“value”', literal: true),
+      ], mode: TtsTextSelectionMode.quotedOnly),
+      'value',
+    );
+  });
+
+  test('speech excludes an open fence after Unicode line separators', () {
+    for (final separator in ['\u2028', '\u2029']) {
+      expect(
+        TtsTextSelection.apply(
+          '“spoken”$separator```text$separator“hidden”',
+          mode: TtsTextSelectionMode.quotedOnly,
+        ),
+        'spoken',
+      );
+    }
+  });
+
+  group('TtsTextSelection', () {
+    test('keeps full text by default', () {
+      expect(
+        TtsTextSelection.apply(
+          '旁白 “你好” (动作)',
+          mode: TtsTextSelectionMode.fullText,
+        ),
+        '旁白 “你好” (动作)',
+      );
+    });
+
+    test('extracts full-width and half-width quoted text', () {
+      expect(
+        TtsTextSelection.apply(
+          '旁白 “你好” then \'世界\' and "again" plus ‘再见’.',
+          mode: TtsTextSelectionMode.quotedOnly,
+        ),
+        '你好\n世界\nagain\n再见',
+      );
+    });
+
+    test('ignores quoted text inside fenced and inline code', () {
+      expect(
+        TtsTextSelection.apply(
+          '旁白 “保留”\n'
+          '```dart\n'
+          'print("代码块");\n'
+          '```\n'
+          '以及 `print("行内代码")`。',
+          mode: TtsTextSelectionMode.quotedOnly,
+        ),
+        '保留',
+      );
+    });
+
+    test('ignores quoted text inside all supported fence forms', () {
+      for (final source in const [
+        '旁白 “保留”\n~~~dart\nprint("波浪线");\n~~~',
+        '旁白 “保留”\n````markdown\n```\nprint("变长围栏");\n````',
+        '旁白 “保留”\n```dart\n``` not-a-closer\nprint("伪关闭");\n```',
+        '旁白 “保留”\n> ```dart\n> print("引用围栏");\n> ```',
+        '旁白 “保留”\n```dart\nprint("未闭合");',
+      ]) {
+        expect(
+          TtsTextSelection.apply(source, mode: TtsTextSelectionMode.quotedOnly),
+          '保留',
+          reason: source,
+        );
+      }
+    });
+
+    test('ignores quoted text inside multi-backtick inline code', () {
+      expect(
+        TtsTextSelection.apply(
+          '旁白 “保留”以及 ``print("行内代码")``。',
+          mode: TtsTextSelectionMode.quotedOnly,
+        ),
+        '保留',
+      );
+    });
+
+    test('does not pair unmatched backticks across lines', () {
+      expect(
+        TtsTextSelection.apply(
+          '`第一行\n旁白 “应朗读”\n第三行`',
+          mode: TtsTextSelectionMode.quotedOnly,
+        ),
+        '应朗读',
+      );
+    });
+
+    test(
+      'extracts half-width quotes next to CJK text but skips apostrophes',
+      () {
+        expect(
+          TtsTextSelection.apply(
+            '他说\'你好\'，她说"世界"，don\'t read apostrophes.',
+            mode: TtsTextSelectionMode.quotedOnly,
+          ),
+          '你好\n世界',
+        );
+      },
+    );
+
+    test('does not close an unmatched quote with an apostrophe in a word', () {
+      expect(
+        TtsTextSelection.apply(
+          '他说\'你好，don\'t stop.',
+          mode: TtsTextSelectionMode.quotedOnly,
+        ),
+        '他说\'你好，don\'t stop.',
+      );
+    });
+
+    test('keeps text outside full-width and half-width parentheses', () {
+      expect(
+        TtsTextSelection.apply(
+          '你好（动作）世界 (stage direction) 继续',
+          mode: TtsTextSelectionMode.outsideParentheses,
+        ),
+        '你好 世界 继续',
+      );
+    });
+
+    test('extracts markdown and html italic text', () {
+      expect(
+        TtsTextSelection.apply(
+          '正体 *斜体一* and _斜体二_ plus <em>斜体三</em>.',
+          mode: TtsTextSelectionMode.italicOnly,
+        ),
+        '斜体一\n斜体二\n斜体三',
+      );
+    });
+
+    test('ignores italic text inside fenced and inline code', () {
+      expect(
+        TtsTextSelection.apply(
+          '旁白 *保留*\n'
+          '```dart\n'
+          'final value = "*代码块*";\n'
+          '```\n'
+          '以及 `_行内代码_`。',
+          mode: TtsTextSelectionMode.italicOnly,
+        ),
+        '保留',
+      );
+    });
+
+    test('removes markdown and html italic text for non-italic mode', () {
+      expect(
+        TtsTextSelection.apply(
+          '正体 *斜体一* and _斜体二_ plus <i>斜体三</i> done.',
+          mode: TtsTextSelectionMode.nonItalic,
+        ),
+        '正体 and plus done.',
+      );
+    });
+
+    test('falls back to original text when selected content is empty', () {
+      expect(
+        TtsTextSelection.apply(
+          '没有引号的内容',
+          mode: TtsTextSelectionMode.quotedOnly,
+        ),
+        '没有引号的内容',
+      );
+    });
+
+    test('fallback excludes code when no selected content remains', () {
+      expect(
+        TtsTextSelection.apply(
+          '普通旁白\n'
+          '```dart\n'
+          'print("不应朗读");\n'
+          '```',
+          mode: TtsTextSelectionMode.quotedOnly,
+        ),
+        '普通旁白',
+      );
+    });
+  });
+}

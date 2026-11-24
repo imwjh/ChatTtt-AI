@@ -1,0 +1,5 @@
+<svg viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg">
+  <!-- Vector adaptation of https://platform.stepfun.com/home-v2/logo/StepFunV2.png -->
+  <title>StepFun</title>
+  <path fill="currentColor" fill-rule="evenodd" d="M36 0a36 36 0 1 1 0 72 36 36 0 0 1 0-72Zm-6 13h13v13H30V13Zm17 0h13v13H47V13ZM30 29h13v14H30V29ZM14 46h13v13H14V46Zm16 0h13v13H30V46Z"/>
+</svg>

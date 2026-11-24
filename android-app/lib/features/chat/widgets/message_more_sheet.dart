@@ -1,0 +1,543 @@
+import '../../intelligent_ui/host/ui_copy_actions.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform;
+import '../../../icons/lucide_adapter.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+import '../../../core/models/chat_message.dart';
+// import '../pages/select_copy_page.dart';
+import 'select_copy_sheet.dart';
+import '../../../shared/widgets/snackbar.dart';
+import '../../../shared/widgets/ios_tactile.dart';
+import '../../../core/services/haptics.dart';
+import '../../../l10n/app_localizations.dart';
+import '../../../desktop/desktop_context_menu.dart';
+import '../../../desktop/menu_anchor.dart';
+import '../../../desktop/select_copy_dialog.dart';
+import '../../../utils/markdown_preview_html.dart';
+import '../../../utils/markdown_media_sanitizer.dart';
+import '../../../shared/pages/webview_page.dart';
+import '../../../desktop/html_preview_dialog.dart';
+import 'dart:convert';
+import 'package:Kelivo/theme/app_font_weights.dart';
+import 'package:Kelivo/theme/app_semantic_colors.dart';
+import '../../../shared/widgets/section_card.dart';
+import '../../../shared/widgets/ios_text_button.dart';
+import 'context_dialog.dart';
+
+enum MessageVersionDeleteScope { current, others, all }
+
+enum MessageMoreAction {
+  edit,
+  fork,
+  deleteCurrentVersion(MessageVersionDeleteScope.current),
+  deleteOtherVersions(MessageVersionDeleteScope.others),
+  deleteAllVersions(MessageVersionDeleteScope.all),
+  selectMessages,
+  setContextStart,
+  cancelContextStart;
+
+  const MessageMoreAction([this.deleteScope]);
+  final MessageVersionDeleteScope? deleteScope;
+}
+
+Future<bool> confirmMessageVersionDeletion(
+  BuildContext context,
+  MessageVersionDeleteScope scope,
+  int count,
+) async {
+  final l10n = AppLocalizations.of(context)!;
+  final (title, body) = switch (scope) {
+    MessageVersionDeleteScope.current => (
+      l10n.homePageDeleteMessage,
+      l10n.homePageDeleteMessageConfirm,
+    ),
+    MessageVersionDeleteScope.others => (
+      l10n.homePageDeleteOtherVersions,
+      l10n.homePageDeleteOtherVersionsConfirm(count),
+    ),
+    MessageVersionDeleteScope.all => (
+      l10n.homePageDeleteAllVersions,
+      l10n.homePageDeleteAllVersionsConfirm,
+    ),
+  };
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => ContextDialog(
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: AppFontWeights.emphasis,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(body),
+            const SizedBox(height: 12),
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              children: [
+                IosTextButton(
+                  label: l10n.homePageCancel,
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                ),
+                IosTextButton(
+                  label: l10n.homePageDelete,
+                  color: Theme.of(ctx).colorScheme.error,
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+  return result == true;
+}
+
+Future<MessageMoreAction?> showMessageMoreSheet(
+  BuildContext context,
+  ChatMessage message, {
+  required bool hasMultipleVersions,
+  required bool canCreateBranch,
+  bool canSetContextStart = false,
+  bool isContextStart = false,
+}) async {
+  final isDesktop =
+      defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.windows ||
+      defaultTargetPlatform == TargetPlatform.linux;
+  if (!isDesktop) {
+    return showModalBottomSheet<MessageMoreAction?>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: context.overlaySurface,
+      clipBehavior: Clip.antiAlias,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => _MessageMoreSheet(
+        message: message,
+        parentContext: context,
+        hasMultipleVersions: hasMultipleVersions,
+        canCreateBranch: canCreateBranch,
+        canSetContextStart: canSetContextStart,
+        isContextStart: isContextStart,
+      ),
+    );
+  }
+
+  // Desktop: show anchored glass menu near the clicked button
+  final l10n = AppLocalizations.of(context)!;
+  MessageMoreAction? selected;
+  Future<void> Function()? afterClose;
+  await showDesktopContextMenuAt(
+    context,
+    globalPosition: DesktopMenuAnchor.positionOrCenter(context),
+    compact: true,
+    items: [
+      DesktopContextMenuItem(
+        icon: Lucide.TextSelect,
+        label: l10n.messageMoreSheetSelectCopy,
+        onTap: () {
+          afterClose = () async {
+            if (!context.mounted) return;
+            showSelectCopyDesktopDialog(context, message: message);
+          };
+        },
+      ),
+      DesktopContextMenuItem(
+        icon: Lucide.Code,
+        label: l10n.genuiCopySourceMarkdown,
+        onTap: () {
+          afterClose = () => copyUiMessageSource(context, message);
+        },
+      ),
+      DesktopContextMenuItem(
+        icon: Lucide.BookOpenText,
+        label: l10n.messageMoreSheetRenderWebView,
+        onTap: () {
+          afterClose = () async {
+            try {
+              final raw = message.content.trim();
+              if (raw.isEmpty) return;
+              final scheme = Theme.of(context).colorScheme;
+              final processed =
+                  await MarkdownMediaSanitizer.inlineLocalImagesToBase64(raw);
+              final html =
+                  await MarkdownPreviewHtmlBuilder.buildFromMarkdownWithColorScheme(
+                    scheme,
+                    processed,
+                  );
+              if (!context.mounted) return;
+              showHtmlPreviewDesktopDialog(context, html: html);
+            } catch (e) {
+              if (!context.mounted) return;
+              showAppSnackBar(
+                context,
+                message: e.toString(),
+                type: NotificationType.error,
+              );
+            }
+          };
+        },
+      ),
+      if (message.role != 'user')
+        DesktopContextMenuItem(
+          startsGroup: true,
+          icon: Lucide.Pencil,
+          label: l10n.messageMoreSheetEdit,
+          onTap: () {
+            selected = MessageMoreAction.edit;
+          },
+        ),
+      DesktopContextMenuItem(
+        startsGroup: message.role == 'user',
+        icon: Lucide.CheckSquare,
+        label: l10n.messageMoreSheetSelectMessages,
+        onTap: () {
+          selected = MessageMoreAction.selectMessages;
+        },
+      ),
+      if (canSetContextStart)
+        DesktopContextMenuItem(
+          startsGroup: true,
+          icon: LucideIcons.flag,
+          label: isContextStart
+              ? l10n.contextCancelFixedStart
+              : l10n.contextSetFixedStart,
+          onTap: () {
+            selected = isContextStart
+                ? MessageMoreAction.cancelContextStart
+                : MessageMoreAction.setContextStart;
+          },
+        ),
+      if (canCreateBranch)
+        DesktopContextMenuItem(
+          startsGroup: !canSetContextStart,
+          icon: Lucide.GitFork,
+          label: l10n.messageMoreSheetCreateBranch,
+          onTap: () {
+            selected = MessageMoreAction.fork;
+          },
+        ),
+      DesktopContextMenuItem(
+        startsGroup: true,
+        icon: Lucide.Trash2,
+        label: l10n.messageMoreSheetDelete,
+        danger: true,
+        onTap: () {
+          selected = MessageMoreAction.deleteCurrentVersion;
+        },
+      ),
+      if (hasMultipleVersions) ...[
+        DesktopContextMenuItem(
+          icon: LucideIcons.listMinus,
+          label: l10n.homePageDeleteOtherVersions,
+          danger: true,
+          onTap: () {
+            selected = MessageMoreAction.deleteOtherVersions;
+          },
+        ),
+        DesktopContextMenuItem(
+          icon: Lucide.Trash,
+          label: l10n.messageMoreSheetDeleteAllVersions,
+          danger: true,
+          onTap: () {
+            selected = MessageMoreAction.deleteAllVersions;
+          },
+        ),
+      ],
+    ],
+  );
+  if (afterClose != null) {
+    await afterClose!();
+  }
+  return selected;
+}
+
+class _MessageMoreSheet extends StatefulWidget {
+  const _MessageMoreSheet({
+    required this.message,
+    required this.parentContext,
+    required this.hasMultipleVersions,
+    required this.canCreateBranch,
+    required this.canSetContextStart,
+    required this.isContextStart,
+  });
+  final ChatMessage message;
+  final BuildContext parentContext;
+  final bool hasMultipleVersions;
+  final bool canCreateBranch;
+  final bool canSetContextStart;
+  final bool isContextStart;
+
+  @override
+  State<_MessageMoreSheet> createState() => _MessageMoreSheetState();
+}
+
+class _MessageMoreSheetState extends State<_MessageMoreSheet> {
+  // Draggable sheet removed; use auto height with max constraint.
+
+  Widget _actionItem({
+    required IconData icon,
+    required String label,
+    bool danger = false,
+    required VoidCallback onTap,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = danger ? cs.error : cs.onSurface;
+    return IosCardPress(
+      borderRadius: BorderRadius.zero,
+      baseColor: Colors.transparent,
+      duration: const Duration(milliseconds: 180),
+      onTap: () {
+        Haptics.light();
+        onTap();
+      },
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 44),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            children: [
+              Icon(icon, size: 20, color: fg),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 15,
+                    height: 1.25,
+                    fontWeight: AppFontWeights.medium,
+                    color: fg,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _actionGroup(List<Widget> actions) => Container(
+    decoration: BoxDecoration(
+      color: sheetTileColor(context),
+      borderRadius: BorderRadius.circular(12),
+    ),
+    clipBehavior: Clip.antiAlias,
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < actions.length; i++) ...[
+          if (i > 0)
+            Divider(
+              height: 0.5,
+              thickness: 0.5,
+              indent: 44,
+              endIndent: 12,
+              color: context.appColors.hairline,
+            ),
+          actions[i],
+        ],
+      ],
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+
+    // Footer metadata (time/model) removed per iOS-style spec
+
+    final maxHeight = MediaQuery.sizeOf(context).height * 0.8;
+    return SafeArea(
+      top: false,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxHeight),
+        child: SingleChildScrollView(
+          physics: const BouncingScrollPhysics(),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Drag handle
+              Padding(
+                padding: const EdgeInsets.only(top: 6, bottom: 6),
+                child: Container(
+                  width: 32,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: cs.onSurface.withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              // No title per design; keep content close to handle
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _actionGroup([
+                      _actionItem(
+                        icon: Lucide.TextSelect,
+                        label: l10n.messageMoreSheetSelectCopy,
+                        onTap: () {
+                          // Close current sheet, then open iOS-style select-copy sheet
+                          Navigator.of(context).pop();
+                          // Schedule next frame with parent context to avoid stacking sheets
+                          final parentCtx = widget.parentContext;
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!parentCtx.mounted) return;
+                            showSelectCopySheet(
+                              parentCtx,
+                              message: widget.message,
+                            );
+                          });
+                        },
+                      ),
+                      _actionItem(
+                        icon: Lucide.Code,
+                        label: l10n.genuiCopySourceMarkdown,
+                        onTap: () {
+                          final parent = widget.parentContext;
+                          Navigator.of(context).pop();
+                          copyUiMessageSource(parent, widget.message);
+                        },
+                      ),
+                      _actionItem(
+                        icon: Lucide.BookOpenText,
+                        label: l10n.messageMoreSheetRenderWebView,
+                        onTap: () async {
+                          final parentCtx = widget.parentContext;
+                          final navigator = Navigator.of(parentCtx);
+                          final scheme = Theme.of(parentCtx).colorScheme;
+                          Navigator.of(context).pop();
+                          try {
+                            final raw = widget.message.content.trim();
+                            if (raw.isEmpty) return;
+                            final processed =
+                                await MarkdownMediaSanitizer.inlineLocalImagesToBase64(
+                                  raw,
+                                );
+                            final html =
+                                await MarkdownPreviewHtmlBuilder.buildFromMarkdownWithColorScheme(
+                                  scheme,
+                                  processed,
+                                );
+                            final b64 = base64Encode(utf8.encode(html));
+                            if (!parentCtx.mounted) return;
+                            navigator.push(
+                              MaterialPageRoute(
+                                builder: (_) => WebViewPage(contentBase64: b64),
+                              ),
+                            );
+                          } catch (e) {
+                            if (!parentCtx.mounted) return;
+                            showAppSnackBar(
+                              parentCtx,
+                              message: e.toString(),
+                              type: NotificationType.error,
+                            );
+                          }
+                        },
+                      ),
+                    ]),
+                    const SizedBox(height: 12),
+                    _actionGroup([
+                      if (widget.message.role != 'user')
+                        _actionItem(
+                          icon: Lucide.Pencil,
+                          label: l10n.messageMoreSheetEdit,
+                          onTap: () {
+                            Navigator.of(context).pop(MessageMoreAction.edit);
+                          },
+                        ),
+                      _actionItem(
+                        icon: Lucide.CheckSquare,
+                        label: l10n.messageMoreSheetSelectMessages,
+                        onTap: () {
+                          Navigator.of(
+                            context,
+                          ).pop(MessageMoreAction.selectMessages);
+                        },
+                      ),
+                    ]),
+                    if (widget.canSetContextStart ||
+                        widget.canCreateBranch) ...[
+                      const SizedBox(height: 12),
+                      _actionGroup([
+                        if (widget.canSetContextStart)
+                          _actionItem(
+                            icon: LucideIcons.flag,
+                            label: widget.isContextStart
+                                ? l10n.contextCancelFixedStart
+                                : l10n.contextSetFixedStart,
+                            onTap: () => Navigator.of(context).pop(
+                              widget.isContextStart
+                                  ? MessageMoreAction.cancelContextStart
+                                  : MessageMoreAction.setContextStart,
+                            ),
+                          ),
+                        if (widget.canCreateBranch)
+                          _actionItem(
+                            icon: Lucide.GitFork,
+                            label: l10n.messageMoreSheetCreateBranch,
+                            onTap: () {
+                              Navigator.of(context).pop(MessageMoreAction.fork);
+                            },
+                          ),
+                      ]),
+                    ],
+                    const SizedBox(height: 12),
+                    _actionGroup([
+                      _actionItem(
+                        icon: Lucide.Trash2,
+                        label: l10n.messageMoreSheetDelete,
+                        danger: true,
+                        onTap: () {
+                          Navigator.of(
+                            context,
+                          ).pop(MessageMoreAction.deleteCurrentVersion);
+                        },
+                      ),
+                      if (widget.hasMultipleVersions) ...[
+                        _actionItem(
+                          icon: LucideIcons.listMinus,
+                          label: l10n.homePageDeleteOtherVersions,
+                          danger: true,
+                          onTap: () => Navigator.of(
+                            context,
+                          ).pop(MessageMoreAction.deleteOtherVersions),
+                        ),
+                        _actionItem(
+                          icon: Lucide.Trash,
+                          label: l10n.messageMoreSheetDeleteAllVersions,
+                          danger: true,
+                          onTap: () {
+                            Navigator.of(
+                              context,
+                            ).pop(MessageMoreAction.deleteAllVersions);
+                          },
+                        ),
+                      ],
+                    ]),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

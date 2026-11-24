@@ -1,0 +1,419 @@
+import 'dart:io';
+
+import 'package:Kelivo/core/database/app_database.dart';
+import 'package:Kelivo/core/database/chat_database_repository.dart';
+import 'package:Kelivo/core/database/database_installation_gate.dart';
+import 'package:Kelivo/core/database/startup_recovery_service.dart';
+import 'package:Kelivo/core/services/backup/restore_business_lease.dart';
+import 'package:Kelivo/core/services/backup/restore_durability.dart';
+import 'package:Kelivo/core/services/backup/restore_startup_gate.dart';
+import 'package:Kelivo/core/services/backup/restore_workspace_lock.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+
+String? installedDatabaseId(Directory root) {
+  final file = File(p.join(root.path, AppDatabase.databaseFileName));
+  if (!file.existsSync()) return null;
+  return ChatDatabaseRepository.inspectInstalledDatabase(file).databaseId;
+}
+
+void main() {
+  late Directory directory;
+
+  setUp(() async {
+    directory = await Directory.systemTemp.createTemp(
+      'kelivo_startup_recovery_',
+    );
+  });
+
+  tearDown(() async {
+    if (await directory.exists()) await directory.delete(recursive: true);
+  });
+
+  File databaseFile(Directory root) =>
+      File(p.join(root.path, AppDatabase.databaseFileName));
+
+  List<File> receiptFiles(Directory root) => root
+      .listSync()
+      .whereType<File>()
+      .where(
+        (file) =>
+            p
+                .basename(file.path)
+                .startsWith('database_installation_receipt_') &&
+            file.path.endsWith('.json'),
+      )
+      .toList();
+
+  group('repair', () {
+    test(
+      'repair cannot erase the only receipt and create an empty database',
+      () async {
+        final receipt = File(
+          p.join(directory.path, 'database_installation_receipt_broken.json'),
+        );
+        await receipt.writeAsString('{broken receipt');
+        await expectLater(
+          StartupRecoveryService.repair(appDataDirectory: directory),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'code',
+              'database_missing_with_prior_data',
+            ),
+          ),
+        );
+        expect(await receipt.readAsString(), '{broken receipt');
+        expect(await databaseFile(directory).exists(), isFalse);
+      },
+    );
+
+    test(
+      'rebuilds a corrupt receipt from the live database identity',
+      () async {
+        await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+        final originalId = installedDatabaseId(directory);
+        // Corrupt the receipt the way a torn write / partial platform-backup
+        // restore would.
+        receiptFiles(directory).single.writeAsStringSync('{not valid json');
+
+        // Sanity: admission is now dead-locked.
+        await expectLater(
+          DatabaseInstallationGate.ensureReady(appDataDirectory: directory),
+          throwsA(anything),
+        );
+
+        await StartupRecoveryService.repair(appDataDirectory: directory);
+
+        // A fresh, valid receipt matching the untouched database is republished
+        // and admission succeeds again.
+        final receipt = await DatabaseInstallationGate.ensureReady(
+          appDataDirectory: directory,
+        );
+        expect(receipt.databaseId, originalId);
+        expect(receiptFiles(directory), hasLength(1));
+      },
+    );
+
+    test('clears leftover publish temp files', () async {
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+      await File(
+        p.join(directory.path, '.database_installation_receipt.tmp'),
+      ).create();
+      await File(
+        p.join(directory.path, '.database_installation_receipt_9_1.tmp'),
+      ).create();
+
+      await StartupRecoveryService.repair(appDataDirectory: directory);
+
+      expect(
+        File(
+          p.join(directory.path, '.database_installation_receipt.tmp'),
+        ).existsSync(),
+        isFalse,
+      );
+      expect(
+        File(
+          p.join(directory.path, '.database_installation_receipt_9_1.tmp'),
+        ).existsSync(),
+        isFalse,
+      );
+    });
+
+    test('sweeps inert OS junk from the restore workspace', () async {
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+      final completed = Directory(
+        p.join(directory.path, '.kelivo_restore', 'completed'),
+      )..createSync(recursive: true);
+      final junk = File(p.join(completed.path, '.DS_Store'))..createSync();
+      final realState = File(p.join(completed.path, 'keep.dat'))..createSync();
+
+      await StartupRecoveryService.repair(appDataDirectory: directory);
+
+      expect(junk.existsSync(), isFalse);
+      // Non-junk entries are left untouched.
+      expect(realState.existsSync(), isTrue);
+    });
+
+    test('adopts a swapped database when the user repairs', () async {
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+      final other = await Directory.systemTemp.createTemp('kelivo_other_');
+      addTearDown(() async => other.delete(recursive: true));
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: other);
+      final swappedId = installedDatabaseId(other);
+
+      // Replace the database with a different install; admission now throws
+      // database_identity_mismatch.
+      await databaseFile(other).copy(databaseFile(directory).path);
+      for (final suffix in const ['-wal', '-shm']) {
+        final stale = File('${databaseFile(directory).path}$suffix');
+        if (stale.existsSync()) stale.deleteSync();
+      }
+      await expectLater(
+        DatabaseInstallationGate.ensureReady(appDataDirectory: directory),
+        throwsA(anything),
+      );
+
+      await StartupRecoveryService.repair(appDataDirectory: directory);
+
+      final receipt = await DatabaseInstallationGate.ensureReady(
+        appDataDirectory: directory,
+      );
+      expect(receipt.databaseId, swappedId);
+    });
+
+    test('rethrows when the database itself is missing', () async {
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+      for (final suffix in const ['', '-wal', '-shm']) {
+        final file = File('${databaseFile(directory).path}$suffix');
+        if (file.existsSync()) file.deleteSync();
+      }
+      await expectLater(
+        StartupRecoveryService.repair(appDataDirectory: directory),
+        throwsA(anything),
+      );
+    });
+  });
+
+  group('exportDataCopy', () {
+    test('copies the whole data tree into a timestamped folder', () async {
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+      Directory(p.join(directory.path, 'images')).createSync();
+      File(
+        p.join(directory.path, 'images', 'a.png'),
+      ).writeAsBytesSync(const [1, 2, 3]);
+
+      final destination = await Directory.systemTemp.createTemp('kelivo_dest_');
+      addTearDown(() async => destination.delete(recursive: true));
+
+      final exported = await StartupRecoveryService.exportDataCopy(
+        appDataDirectory: directory,
+        destinationParent: destination,
+      );
+
+      expect(exported.existsSync(), isTrue);
+      expect(
+        File(p.join(exported.path, AppDatabase.databaseFileName)).existsSync(),
+        isTrue,
+      );
+      expect(
+        File(p.join(exported.path, 'images', 'a.png')).readAsBytesSync(),
+        const [1, 2, 3],
+      );
+      // The original data is untouched.
+      expect(databaseFile(directory).existsSync(), isTrue);
+    });
+  });
+
+  group('exportDataCopy destination guard', () {
+    test('rejects a destination inside the data directory', () async {
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+      final inside = Directory(p.join(directory.path, 'exports'));
+
+      await expectLater(
+        StartupRecoveryService.exportDataCopy(
+          appDataDirectory: directory,
+          destinationParent: inside,
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            'startup_recovery_export_inside_source',
+          ),
+        ),
+      );
+      await expectLater(
+        StartupRecoveryService.exportDataCopy(
+          appDataDirectory: directory,
+          destinationParent: directory,
+        ),
+        throwsA(isA<StateError>()),
+      );
+    });
+  });
+
+  group('reset', () {
+    test('rebuilds a fresh installation after the database is lost', () async {
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+      final originalId = installedDatabaseId(directory);
+      // A missing database cannot be repaired; reset must recover.
+      databaseFile(directory).deleteSync();
+
+      await StartupRecoveryService.reset(appDataDirectory: directory);
+
+      final receipt = await DatabaseInstallationGate.ensureReady(
+        appDataDirectory: directory,
+      );
+      expect(receipt.databaseId, isNotEmpty);
+      expect(receipt.databaseId, isNot(originalId));
+      expect(receiptFiles(directory), hasLength(1));
+    });
+
+    test(
+      'ends interrupted snapshot recovery before the next cold startup',
+      () async {
+        await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+        final originalId = installedDatabaseId(directory);
+        final lease = await RestoreBusinessLease.acquire(
+          appDataDirectory: directory,
+        );
+        try {
+          final lock = RestoreWorkspaceLock(appDataDirectory: directory);
+          await lock.synchronized(lock.beginSnapshotRecoveryWhileLocked);
+        } finally {
+          await lease.close();
+        }
+        await expectLater(
+          RestoreStartupGate.recoverAndRequireBusinessReady(
+            appDataDirectory: directory,
+          ),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'message',
+              'restore_startup_snapshot_preparation_incomplete',
+            ),
+          ),
+        );
+        await StartupRecoveryService.reset(appDataDirectory: directory);
+        expect(
+          await RestoreStartupGate.hasPendingWork(appDataDirectory: directory),
+          isFalse,
+        );
+        expect(
+          await RestoreStartupGate.recoverAndRequireBusinessReady(
+            appDataDirectory: directory,
+          ),
+          isNull,
+        );
+        final receipt = await DatabaseInstallationGate.ensureReady(
+          appDataDirectory: directory,
+        );
+        expect(receipt.databaseId, isNot(originalId));
+      },
+    );
+
+    test('uses the startup lease and refuses a competing reset', () async {
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+      final originalId = installedDatabaseId(directory);
+      final lease = await RestoreBusinessLease.acquire(
+        appDataDirectory: directory,
+      );
+      try {
+        await expectLater(
+          StartupRecoveryService.reset(appDataDirectory: directory),
+          throwsA(isA<RestoreBusinessLeaseUnavailable>()),
+        );
+        expect(installedDatabaseId(directory), originalId);
+        await StartupRecoveryService.reset(
+          appDataDirectory: directory,
+          businessLease: lease,
+        );
+        expect(lease.isClosed, isFalse);
+        expect(
+          await RestoreStartupGate.recoverAndRequireBusinessReady(
+            appDataDirectory: directory,
+            businessLease: lease,
+          ),
+          isNull,
+        );
+        expect(installedDatabaseId(directory), isNot(originalId));
+      } finally {
+        await lease.close();
+      }
+    });
+
+    test(
+      'failed reset keeps admission blocked until a successful retry',
+      () async {
+        await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+        await expectLater(
+          StartupRecoveryService.reset(
+            appDataDirectory: directory,
+            durability: _FailInstallationReceiptSync(),
+          ),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'message',
+              'test_receipt_sync_failed',
+            ),
+          ),
+        );
+        // The database already exists, but its new receipt is not durable yet.
+        expect(await databaseFile(directory).exists(), isTrue);
+        await expectLater(
+          RestoreStartupGate.recoverAndRequireBusinessReady(
+            appDataDirectory: directory,
+          ),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'message',
+              'restore_startup_snapshot_preparation_incomplete',
+            ),
+          ),
+        );
+        await StartupRecoveryService.reset(appDataDirectory: directory);
+        expect(
+          await RestoreStartupGate.recoverAndRequireBusinessReady(
+            appDataDirectory: directory,
+          ),
+          isNull,
+        );
+        expect(
+          await DatabaseInstallationGate.read(appDataDirectory: directory),
+          isNotNull,
+        );
+      },
+    );
+
+    test('preserves the original database as a displaced copy', () async {
+      // A fresh start retains the previous database for later recovery.
+      await DatabaseInstallationGate.ensureReady(appDataDirectory: directory);
+
+      await StartupRecoveryService.reset(appDataDirectory: directory);
+
+      final displaced = directory
+          .listSync(followLinks: false)
+          .map((entity) => p.basename(entity.path))
+          .where(
+            (name) => name.startsWith(
+              '${AppDatabase.databaseFileName}'
+              '${DatabaseInstallationGate.displacedDatabasePrefix}',
+            ),
+          );
+      expect(displaced, isNotEmpty);
+    });
+  });
+}
+
+final class _FailInstallationReceiptSync implements RestoreDurability {
+  final _delegate = RestorePlatformDurability();
+
+  @override
+  Future<void> restrictFile(File file) => _delegate.restrictFile(file);
+
+  @override
+  Future<void> restrictDirectory(Directory directory) =>
+      _delegate.restrictDirectory(directory);
+
+  @override
+  Future<void> syncFile(File file, {bool fullBarrier = false}) async {
+    if (p.basename(file.path).startsWith('.database_installation_receipt')) {
+      throw StateError('test_receipt_sync_failed');
+    }
+    await _delegate.syncFile(file, fullBarrier: fullBarrier);
+  }
+
+  @override
+  Future<void> syncDirectory(Directory directory, {bool fullBarrier = false}) =>
+      _delegate.syncDirectory(directory, fullBarrier: fullBarrier);
+
+  @override
+  Future<void> renameAndSync({
+    required FileSystemEntity source,
+    required String targetPath,
+  }) => _delegate.renameAndSync(source: source, targetPath: targetPath);
+}

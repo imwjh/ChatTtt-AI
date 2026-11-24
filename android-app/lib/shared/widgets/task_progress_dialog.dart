@@ -1,0 +1,289 @@
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+import 'package:reel_text/reel_text.dart';
+
+import '../../core/services/haptics.dart';
+import '../../icons/lucide_adapter.dart';
+import '../../theme/app_font_weights.dart';
+import '../../theme/app_semantic_colors.dart';
+import '../animations/widgets.dart';
+import 'animated_progress_bar.dart';
+import 'ios_tile_button.dart';
+import 'throttled_progress_label.dart';
+
+enum TaskProgressOutcome { running, success, warning, failure }
+
+class TaskProgressDialogCard extends StatelessWidget {
+  const TaskProgressDialogCard({
+    super.key,
+    required this.title,
+    required this.phaseLabel,
+    required this.fraction,
+    this.subtitle,
+    this.phaseIcon,
+    this.cancellable = true,
+    this.onCancel,
+    this.onAcknowledge,
+    this.cancelLabel = 'Cancel',
+    this.acknowledgeLabel = 'OK',
+    this.onBackground,
+    this.backgroundLabel,
+    this.errorMessage,
+    this.errorAction,
+    this.warningMessage,
+    this.onCopyError,
+    this.copyErrorLabel = 'Copy error',
+    this.outcome = TaskProgressOutcome.running,
+  });
+
+  final String title;
+  final String phaseLabel;
+  final double? fraction;
+  final String? subtitle;
+  final IconData? phaseIcon;
+  final bool cancellable;
+  final VoidCallback? onCancel;
+  final VoidCallback? onAcknowledge;
+  final String cancelLabel;
+  final String acknowledgeLabel;
+
+  /// Dismisses the dialog and lets the task keep running. Offered only where
+  /// the caller can carry on without the result.
+  final VoidCallback? onBackground;
+  final String? backgroundLabel;
+  final String? errorMessage;
+  final Widget? errorAction;
+  final String? warningMessage;
+  final VoidCallback? onCopyError;
+  final String copyErrorLabel;
+  final TaskProgressOutcome outcome;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final showCancel =
+        outcome == TaskProgressOutcome.running &&
+        cancellable &&
+        onCancel != null;
+    final warning = outcome == TaskProgressOutcome.warning;
+    final showAck = outcome == TaskProgressOutcome.failure || warning;
+    final message = warning ? warningMessage : errorMessage;
+    final showError = showAck && message != null;
+    final messageColor = warning ? context.appColors.warning : cs.error;
+    final messageBackground = warning
+        ? context.appColors.warningContainer
+        : cs.errorContainer;
+    final showBackground =
+        outcome == TaskProgressOutcome.running &&
+        onBackground != null &&
+        backgroundLabel != null;
+    final resolvedFraction = switch (outcome) {
+      TaskProgressOutcome.success => 1.0,
+      TaskProgressOutcome.warning => 1.0,
+      TaskProgressOutcome.failure => fraction,
+      TaskProgressOutcome.running => fraction,
+    };
+    final leadingIcon = switch (outcome) {
+      TaskProgressOutcome.success => Lucide.Check,
+      TaskProgressOutcome.failure => Lucide.TriangleAlert,
+      TaskProgressOutcome.warning => Lucide.TriangleAlert,
+      TaskProgressOutcome.running => phaseIcon,
+    };
+
+    return PopScope(
+      key: const Key('task_progress_pop_scope'),
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop || outcome != TaskProgressOutcome.running) return;
+        if (cancellable) {
+          onCancel?.call();
+        } else {
+          Haptics.light();
+        }
+      },
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                if (leadingIcon != null) ...[
+                  Icon(
+                    leadingIcon,
+                    size: 18,
+                    color: switch (outcome) {
+                      TaskProgressOutcome.success => context.appColors.success,
+                      TaskProgressOutcome.failure => cs.error,
+                      TaskProgressOutcome.warning => context.appColors.warning,
+                      TaskProgressOutcome.running => cs.onSurface,
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Expanded(
+                  child: Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: AppFontWeights.emphasis,
+                      color: cs.onSurface,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Flexible(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child: SingleChildScrollView(
+                  primary: false,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (!showAck) ...[
+                        AnimatedProgressBar(
+                          fraction: resolvedFraction,
+                          height: 6,
+                        ),
+                        const SizedBox(height: 10),
+                      ],
+                      Row(
+                        children: [
+                          Expanded(
+                            child: AnimatedTextSwap(
+                              text: phaseLabel,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: showAck
+                                    ? messageColor
+                                    : cs.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                          if (!showAck && resolvedFraction == null)
+                            const CupertinoActivityIndicator(radius: 8)
+                          else if (!showAck && resolvedFraction != null)
+                            ThrottledProgressLabel(
+                              text:
+                                  '${((resolvedFraction.clamp(0.0, 1.0)) * 100).round()}%',
+                              forceImmediate: resolvedFraction >= 1,
+                              builder: (context, displayText) {
+                                return ReelText(
+                                  displayText,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: AppFontWeights.emphasis,
+                                    color: cs.primary,
+                                  ),
+                                  options: const ReelTextOptions(
+                                    direction: ReelTextDirection.up,
+                                    duration: Duration(milliseconds: 320),
+                                  ),
+                                );
+                              },
+                            ),
+                        ],
+                      ),
+                      AnimatedSize(
+                        duration: kAnimFast,
+                        curve: Curves.easeOutCubic,
+                        child: (subtitle == null || subtitle!.isEmpty)
+                            ? const SizedBox.shrink()
+                            : Padding(
+                                padding: const EdgeInsets.only(top: 6),
+                                child: Text(
+                                  subtitle!,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: cs.onSurface.withValues(alpha: 0.6),
+                                  ),
+                                ),
+                              ),
+                      ),
+                      if (showError)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: messageBackground.withValues(alpha: 0.3),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: messageColor.withValues(alpha: 0.2),
+                              ),
+                            ),
+                            child: SelectableText(
+                              message,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: cs.onSurface,
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (showError && errorAction != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: errorAction!,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            AnimatedSize(
+              duration: kAnim,
+              curve: Curves.easeOutCubic,
+              child: AnimatedOpacity(
+                duration: kAnim,
+                curve: Curves.easeOutCubic,
+                opacity: (showCancel || showAck || showBackground) ? 1 : 0,
+                child: (showCancel || showAck || showBackground)
+                    ? Padding(
+                        padding: const EdgeInsets.only(top: 14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (showError && onCopyError != null) ...[
+                              IosTileButton(
+                                icon: Lucide.Copy,
+                                label: copyErrorLabel,
+                                onTap: onCopyError!,
+                              ),
+                              const SizedBox(height: 8),
+                            ],
+                            if (showBackground)
+                              IosTileButton(
+                                icon: Lucide.ChevronDown,
+                                label: backgroundLabel!,
+                                onTap: () => onBackground?.call(),
+                              ),
+                            if (showBackground && (showCancel || showAck))
+                              const SizedBox(height: 8),
+                            if (showCancel || showAck)
+                              IosTileButton(
+                                key: showAck
+                                    ? const Key('task_progress_acknowledge')
+                                    : const Key('task_progress_cancel'),
+                                icon: showAck ? Lucide.Check : Lucide.X,
+                                label: showAck ? acknowledgeLabel : cancelLabel,
+                                onTap: showAck
+                                    ? () => onAcknowledge?.call()
+                                    : () => onCancel?.call(),
+                              ),
+                          ],
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

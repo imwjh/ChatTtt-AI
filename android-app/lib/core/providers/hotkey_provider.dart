@@ -1,0 +1,695 @@
+import 'dart:async' show Completer;
+import 'dart:io' show Platform;
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:hotkey_manager/hotkey_manager.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
+
+import '../../desktop/hotkeys/hotkey_event_bus.dart';
+
+enum AppHotkeyScope {
+  application,
+  system,
+  conversation,
+  sidePanel;
+
+  bool get isAppWide => this == application || this == system;
+
+  bool overlaps(AppHotkeyScope other) =>
+      this == other || isAppWide || other.isAppWide;
+}
+
+/// A single hotkey item definition and state.
+class AppHotkey {
+  AppHotkey({
+    required this.id,
+    required this.l10nLabelKey,
+    this.defaultWinLinux,
+    this.defaultMac,
+    this.enabledByDefault = true,
+    this.scope = AppHotkeyScope.application,
+  });
+
+  final String id;
+  final String l10nLabelKey; // key in AppLocalizations
+  final String? defaultWinLinux; // e.g., 'ctrl+comma'
+  final String? defaultMac; // e.g., 'cmd+comma'
+  final bool enabledByDefault;
+  final AppHotkeyScope scope;
+
+  String get defaultCommand =>
+      (Platform.isMacOS ? defaultMac : defaultWinLinux) ?? '';
+
+  // runtime state
+  String? command; // normalized key string, platform-independent
+  bool enabled = true;
+}
+
+/// Provider that stores hotkey assignments and registers them via hotkey_manager.
+class HotkeyProvider extends ChangeNotifier {
+  static const conversationFindId = 'conversation_find';
+
+  static const _prefsKeyCommands =
+      'desktop_hotkeys_commands_v1'; // id -> command
+  static const _prefsKeyEnabled = 'desktop_hotkeys_enabled_v1'; // id -> bool
+
+  final Map<String, AppHotkey> _items = {
+    'toggle_side_panel': AppHotkey(
+      id: 'toggle_side_panel',
+      l10nLabelKey: 'hotkeyToggleSidePanel',
+      defaultWinLinux: 'ctrl+alt+b',
+      defaultMac: 'cmd+alt+b',
+    ),
+    'side_panel_new_web': AppHotkey(
+      id: 'side_panel_new_web',
+      l10nLabelKey: 'hotkeySidePanelNewWeb',
+      defaultWinLinux: 'ctrl+t',
+      defaultMac: 'cmd+t',
+    ),
+    'side_panel_files': AppHotkey(
+      id: 'side_panel_files',
+      l10nLabelKey: 'hotkeySidePanelFiles',
+      defaultWinLinux: 'ctrl+shift+e',
+      defaultMac: 'cmd+shift+e',
+    ),
+    'side_panel_expand': AppHotkey(
+      id: 'side_panel_expand',
+      l10nLabelKey: 'hotkeySidePanelExpand',
+      defaultWinLinux: 'ctrl+shift+f',
+      defaultMac: 'cmd+shift+f',
+    ),
+    'side_panel_reopen_tab': AppHotkey(
+      id: 'side_panel_reopen_tab',
+      l10nLabelKey: 'hotkeySidePanelReopenTab',
+      defaultWinLinux: 'ctrl+shift+t',
+      defaultMac: 'cmd+shift+t',
+    ),
+    'side_panel_next_tab': AppHotkey(
+      id: 'side_panel_next_tab',
+      l10nLabelKey: 'hotkeySidePanelNextTab',
+      defaultWinLinux: 'ctrl+tab',
+      defaultMac: 'ctrl+tab',
+    ),
+    'side_panel_previous_tab': AppHotkey(
+      id: 'side_panel_previous_tab',
+      l10nLabelKey: 'hotkeySidePanelPreviousTab',
+      defaultWinLinux: 'ctrl+shift+tab',
+      defaultMac: 'ctrl+shift+tab',
+    ),
+    'side_panel_address': AppHotkey(
+      id: 'side_panel_address',
+      l10nLabelKey: 'hotkeySidePanelAddress',
+      defaultWinLinux: 'ctrl+l',
+      defaultMac: 'cmd+l',
+      scope: AppHotkeyScope.sidePanel,
+    ),
+    'side_panel_focus': AppHotkey(
+      id: 'side_panel_focus',
+      l10nLabelKey: 'hotkeySidePanelFocus',
+      defaultWinLinux: 'f6',
+      defaultMac: 'f6',
+    ),
+    // Toggle app visibility (no default)
+    'toggle_app_visibility': AppHotkey(
+      id: 'toggle_app_visibility',
+      l10nLabelKey: 'hotkeyToggleAppVisibility',
+      defaultWinLinux: '',
+      defaultMac: '',
+      enabledByDefault: true,
+      scope: AppHotkeyScope.system,
+    ),
+    // Close window (in-app scope)
+    'close_window': AppHotkey(
+      id: 'close_window',
+      l10nLabelKey: 'hotkeyCloseWindow',
+      defaultWinLinux: 'ctrl+w',
+      defaultMac: 'cmd+w',
+      enabledByDefault: true,
+    ),
+    // Open settings
+    'open_settings': AppHotkey(
+      id: 'open_settings',
+      l10nLabelKey: 'hotkeyOpenSettings',
+      defaultWinLinux: 'ctrl+comma',
+      defaultMac: 'cmd+comma',
+      enabledByDefault: true,
+    ),
+    // New topic (chat)
+    'new_topic': AppHotkey(
+      id: 'new_topic',
+      l10nLabelKey: 'hotkeyNewTopic',
+      defaultWinLinux: 'ctrl+n',
+      defaultMac: 'cmd+n',
+      enabledByDefault: true,
+    ),
+    conversationFindId: AppHotkey(
+      id: conversationFindId,
+      l10nLabelKey: 'conversationFindOpenTooltip',
+      defaultWinLinux: 'ctrl+f',
+      defaultMac: 'cmd+f',
+      scope: AppHotkeyScope.conversation,
+    ),
+    // Switch model (chat; no default)
+    'switch_model': AppHotkey(
+      id: 'switch_model',
+      l10nLabelKey: 'hotkeySwitchModel',
+      defaultWinLinux: '',
+      defaultMac: '',
+      enabledByDefault: true,
+    ),
+    // Toggle assistants panel (left topics layout only)
+    'toggle_assistants': AppHotkey(
+      id: 'toggle_assistants',
+      l10nLabelKey: 'hotkeyToggleAssistantPanel',
+      defaultWinLinux: 'ctrl+bracketleft',
+      defaultMac: 'cmd+bracketleft',
+      enabledByDefault: true,
+    ),
+    // Toggle topics panel (left topics layout only)
+    'toggle_topics': AppHotkey(
+      id: 'toggle_topics',
+      l10nLabelKey: 'hotkeyToggleTopicPanel',
+      defaultWinLinux: 'ctrl+bracketright',
+      defaultMac: 'cmd+bracketright',
+      enabledByDefault: true,
+    ),
+  };
+
+  final Map<String, HotKey> _registered = <String, HotKey>{};
+  Future<void>? _mutationTail;
+
+  final _recordingOwners = <Object>{};
+  void beginRecording(Object owner) => _recordingOwners.add(owner);
+  void endRecording(Object owner) => _recordingOwners.remove(owner);
+
+  bool _initialized = false;
+  bool get initialized => _initialized;
+
+  List<AppHotkey> get items => _items.values.toList(growable: false);
+  AppHotkey getById(String id) => _items[id]!;
+
+  /// Focus-scoped shortcuts yield to bindings registered with the OS or app.
+  bool handlesShortcut(SingleActivator shortcut) =>
+      _registered.values.any((hotkey) {
+        final modifiers = hotkey.modifiers ?? const <HotKeyModifier>[];
+        return hotkey.logicalKey == shortcut.trigger &&
+            modifiers.contains(HotKeyModifier.control) == shortcut.control &&
+            modifiers.contains(HotKeyModifier.meta) == shortcut.meta &&
+            modifiers.contains(HotKeyModifier.alt) == shortcut.alt &&
+            modifiers.contains(HotKeyModifier.shift) == shortcut.shift;
+      });
+
+  Future<T> _serializeMutation<T>(Future<T> Function() operation) async {
+    final pending = _mutationTail;
+    final completion = Completer<void>();
+    _mutationTail = completion.future;
+    try {
+      if (pending != null) await pending;
+      return await operation();
+    } finally {
+      if (_mutationTail == completion.future) _mutationTail = null;
+      completion.complete();
+    }
+  }
+
+  Future<void> initialize() =>
+      _initialized ? Future<void>.value() : _serializeMutation(_initialize);
+
+  Future<void> _initialize() async {
+    if (_initialized) return;
+    final prefs = await SharedPreferences.getInstance();
+    // Load enabled map
+    final enabledMap = (prefs.getStringList(_prefsKeyEnabled) ?? [])
+        .map((e) => e.split('='))
+        .where((p) => p.length == 2)
+        .map((p) => MapEntry(p[0], p[1] == '1'))
+        .toList();
+    final enabled = <String, bool>{for (final e in enabledMap) e.key: e.value};
+    // Load commands map
+    final cmdList = (prefs.getStringList(_prefsKeyCommands) ?? [])
+        .map((e) => e.split('='))
+        .where((p) => p.length == 2)
+        .map((p) => MapEntry(p[0], p[1]))
+        .toList();
+    final commands = <String, String>{for (final e in cmdList) e.key: e.value};
+
+    // Seed defaults
+    for (final e in _items.values) {
+      e.enabled = enabled[e.id] ?? e.enabledByDefault;
+      final command = (commands[e.id] ?? e.defaultCommand).trim();
+      e.command = command.isEmpty ? null : command;
+    }
+
+    await _rebindAll();
+    _initialized = true;
+    notifyListeners();
+  }
+
+  Future<void> _persist() async {
+    final prefs = await SharedPreferences.getInstance();
+    final enabledList = _items.values
+        .map((e) => '${e.id}=${e.enabled ? '1' : '0'}')
+        .toList();
+    final cmdList = _items.values
+        .map((e) => '${e.id}=${e.command ?? ''}')
+        .toList();
+    await prefs.setStringList(_prefsKeyEnabled, enabledList);
+    await prefs.setStringList(_prefsKeyCommands, cmdList);
+  }
+
+  Future<void> resetAllToDefaults() => _serializeMutation(() async {
+    for (final e in _items.values) {
+      final def = e.defaultCommand;
+      e.command = def.isEmpty ? null : def;
+      e.enabled = e.enabledByDefault;
+    }
+    await _saveChanges(rebind: true);
+  });
+
+  Future<String?> resetToDefault(String id) =>
+      setCommand(id, _items[id]!.defaultCommand);
+
+  Future<void> clearCommand(String id) async {
+    await setCommand(id, '');
+  }
+
+  Future<String?> setCommand(String id, String command) =>
+      _serializeMutation(() {
+        final item = _items[id]!;
+        final trimmed = command.trim();
+        return _update(item, trimmed.isEmpty ? null : trimmed, item.enabled);
+      });
+
+  Future<String?> setEnabled(String id, bool value) => _serializeMutation(() {
+    final item = _items[id]!;
+    return _update(item, item.command, value);
+  });
+
+  String? conflictingActionLabelKey(AppHotkey item) {
+    final command = item.command;
+    return item.enabled && command != null
+        ? _findConflict(item, command)
+        : null;
+  }
+
+  String? _findConflict(AppHotkey item, String command) {
+    final normalized = canonicalCommand(command);
+    return _builtInConflict(item.scope, normalized) ??
+        _items.values
+            .where((other) {
+              final otherCommand = other.command;
+              return other != item &&
+                  other.enabled &&
+                  otherCommand != null &&
+                  item.scope.overlaps(other.scope) &&
+                  canonicalCommand(otherCommand) == normalized;
+            })
+            .firstOrNull
+            ?.l10nLabelKey;
+  }
+
+  static String? _builtInConflict(AppHotkeyScope scope, String command) {
+    final parts = command.split('+');
+    final key = parts.last;
+    final ctrl = parts.contains('ctrl');
+    final cmd = parts.contains('cmd');
+    final mac = Platform.isMacOS;
+    final primary = mac ? cmd : ctrl;
+    final plainPrimary = primary && parts.length == 2;
+
+    if (scope.overlaps(AppHotkeyScope.sidePanel) && plainPrimary) {
+      if (key == 'f') return 'browserFind';
+      if (key == 'r') return 'browserReload';
+    }
+
+    if (scope.overlaps(AppHotkeyScope.conversation)) {
+      // The selection and composer handlers also accept extra modifiers.
+      if (key == 'l' && primary) return 'selectionQuote';
+      if (key == 'v' && (ctrl || cmd)) return 'paste';
+    }
+
+    if (scope != AppHotkeyScope.conversation) return null;
+    if (!ctrl && !cmd && key != 'f6') return 'hotkeysTextEditing';
+    if (plainPrimary) {
+      return switch (key) {
+        'a' => 'selectAll',
+        'c' => 'copy',
+        'x' => 'cut',
+        'z' => 'hotkeysTextEditing',
+        _ => null,
+      };
+    }
+    if (primary && parts.length == 3 && parts.contains('shift') && key == 'z') {
+      return 'hotkeysTextEditing';
+    }
+    // Flutter's macOS text editing shortcuts also use the Control key.
+    if (mac &&
+        ctrl &&
+        parts.length == 2 &&
+        const {'a', 'b', 'e', 'f', 'n', 'p', 't'}.contains(key)) {
+      return 'hotkeysTextEditing';
+    }
+    return null;
+  }
+
+  /// Returns the conflicting action's label key and leaves the current settings intact.
+  Future<String?> _update(AppHotkey item, String? command, bool enabled) async {
+    if (enabled && command != null) {
+      final conflict = _findConflict(item, command);
+      if (conflict != null) return conflict;
+    }
+    // A repeated choice can retry a preference write that failed on disk.
+    item.command = command;
+    item.enabled = enabled;
+    await _saveChanges(rebind: item.scope.isAppWide);
+    return null;
+  }
+
+  Future<void> _saveChanges({required bool rebind}) async {
+    await _persist();
+    if (rebind) await _rebindAll();
+    notifyListeners();
+  }
+
+  // ===== Registration via hotkey_manager =====
+
+  Future<void> _rebindAll() async {
+    // Hard reset: ensure no stale registrations (especially system scope)
+    try {
+      await HotKeyManager.instance.unregisterAll();
+    } catch (_) {
+      // Fallback to unregister known ones if needed
+      for (final hk in _registered.values) {
+        try {
+          await HotKeyManager.instance.unregister(hk);
+        } catch (_) {}
+      }
+    }
+    _registered.clear();
+
+    // Register each enabled app-wide item with a valid command.
+    for (final e in _items.values) {
+      if (!e.enabled || !e.scope.isAppWide) continue;
+      final cmd = e.command;
+      if (cmd == null || cmd.trim().isEmpty) continue;
+      final scope = e.scope == AppHotkeyScope.system
+          ? HotKeyScope.system
+          : HotKeyScope.inapp;
+      final hk = _parseCommandToHotKey(cmd, scope: scope);
+      if (hk == null) continue;
+
+      try {
+        await HotKeyManager.instance.register(
+          hk,
+          keyDownHandler: (_) => _invoke(e.id),
+        );
+        _registered[e.id] = hk;
+      } catch (_) {
+        // Ignore registration error (e.g., duplicate)
+      }
+    }
+  }
+
+  void _invoke(String id) {
+    if (_recordingOwners.isNotEmpty) return;
+    switch (id) {
+      case 'toggle_side_panel':
+        HotkeyEventBus.instance.fire(HotkeyAction.toggleSidePanel);
+        break;
+      case 'side_panel_new_web':
+        HotkeyEventBus.instance.fire(HotkeyAction.sidePanelNewWeb);
+        break;
+      case 'side_panel_files':
+        HotkeyEventBus.instance.fire(HotkeyAction.sidePanelFiles);
+        break;
+      case 'side_panel_expand':
+        HotkeyEventBus.instance.fire(HotkeyAction.sidePanelExpand);
+        break;
+      case 'side_panel_reopen_tab':
+        HotkeyEventBus.instance.fire(HotkeyAction.sidePanelReopenTab);
+        break;
+      case 'side_panel_next_tab':
+        HotkeyEventBus.instance.fire(HotkeyAction.sidePanelNextTab);
+        break;
+      case 'side_panel_previous_tab':
+        HotkeyEventBus.instance.fire(HotkeyAction.sidePanelPreviousTab);
+        break;
+      case 'side_panel_address':
+        HotkeyEventBus.instance.fire(HotkeyAction.sidePanelAddress);
+        break;
+      case 'side_panel_focus':
+        HotkeyEventBus.instance.fire(HotkeyAction.sidePanelFocus);
+        break;
+      case 'toggle_app_visibility':
+        HotkeyEventBus.instance.fire(HotkeyAction.toggleAppVisibility);
+        break;
+      case 'close_window':
+        HotkeyEventBus.instance.fire(HotkeyAction.closeWindow);
+        break;
+      case 'open_settings':
+        HotkeyEventBus.instance.fire(HotkeyAction.openSettings);
+        break;
+      case 'new_topic':
+        HotkeyEventBus.instance.fire(HotkeyAction.newTopic);
+        break;
+      case 'switch_model':
+        HotkeyEventBus.instance.fire(HotkeyAction.switchModel);
+        break;
+      case 'toggle_assistants':
+        HotkeyEventBus.instance.fire(HotkeyAction.toggleLeftPanelAssistants);
+        break;
+      case 'toggle_topics':
+        HotkeyEventBus.instance.fire(HotkeyAction.toggleLeftPanelTopics);
+        break;
+    }
+  }
+
+  static String canonicalCommand(String command) {
+    final parts = command
+        .toLowerCase()
+        .split('+')
+        .map(
+          (part) => switch (part.trim()) {
+            'control' => 'ctrl',
+            'meta' => 'cmd',
+            'option' => 'alt',
+            ',' => 'comma',
+            '[' => 'bracketleft',
+            ']' => 'bracketright',
+            final value =>
+              value.startsWith('key') && value.length == 4
+                  ? value.substring(3)
+                  : value,
+          },
+        )
+        .toSet();
+    return [
+      ...['ctrl', 'cmd', 'alt', 'shift'].where(parts.contains),
+      ...parts.where((part) => !{'ctrl', 'cmd', 'alt', 'shift'}.contains(part)),
+    ].join('+');
+  }
+
+  Map<String, String> get nativeCommands => {
+    for (final item in _items.values)
+      if ((item.scope == AppHotkeyScope.application ||
+              item.scope == AppHotkeyScope.sidePanel) &&
+          item.enabled &&
+          (item.command ?? '').isNotEmpty)
+        canonicalCommand(item.command!): item.id,
+  };
+
+  void invoke(String id) => _invoke(id);
+
+  /// Uses the same configured command for a focus-scoped Flutter handler.
+  SingleActivator? shortcutFor(String id) {
+    final item = _items[id]!;
+    final command = item.command;
+    if (!item.enabled || command == null) return null;
+    if (item.scope == AppHotkeyScope.conversation &&
+        _builtInConflict(item.scope, canonicalCommand(command)) != null) {
+      return null;
+    }
+    final hotkey = _parseCommandToHotKey(command);
+    if (hotkey == null) return null;
+    final modifiers = hotkey.modifiers ?? const [];
+    final shortcut = SingleActivator(
+      hotkey.logicalKey,
+      control: modifiers.contains(HotKeyModifier.control),
+      meta: modifiers.contains(HotKeyModifier.meta),
+      alt: modifiers.contains(HotKeyModifier.alt),
+      shift: modifiers.contains(HotKeyModifier.shift),
+      includeRepeats: false,
+    );
+    // An existing app-wide assignment can already own the new find default.
+    if (item.scope == AppHotkeyScope.conversation &&
+        handlesShortcut(shortcut)) {
+      return null;
+    }
+    return shortcut;
+  }
+
+  // ===== Helpers for parsing/displaying hotkey strings =====
+
+  // Supported commands format: 'ctrl+shift+n', 'cmd+comma', 'ctrl+bracketleft'
+  HotKey? _parseCommandToHotKey(
+    String command, {
+    HotKeyScope scope = HotKeyScope.inapp,
+  }) {
+    final raw = command.trim().toLowerCase();
+    if (raw.isEmpty) return null;
+    final parts = raw
+        .split('+')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    final modifiers = <HotKeyModifier>[];
+    LogicalKeyboardKey? keyboardKey;
+    for (final p in parts) {
+      switch (p) {
+        case 'ctrl':
+        case 'control':
+          modifiers.add(HotKeyModifier.control);
+          break;
+        case 'cmd':
+        case 'meta':
+          modifiers.add(HotKeyModifier.meta);
+          break;
+        case 'alt':
+        case 'option':
+          modifiers.add(HotKeyModifier.alt);
+          break;
+        case 'shift':
+          modifiers.add(HotKeyModifier.shift);
+          break;
+        case 'tab':
+          keyboardKey = LogicalKeyboardKey.tab;
+          break;
+        case 'f6':
+          keyboardKey = LogicalKeyboardKey.f6;
+          break;
+        case ',':
+        case 'comma':
+          keyboardKey = LogicalKeyboardKey.comma;
+          break;
+        case '[':
+        case 'bracketleft':
+          keyboardKey = LogicalKeyboardKey.bracketLeft;
+          break;
+        case ']':
+        case 'bracketright':
+          keyboardKey = LogicalKeyboardKey.bracketRight;
+          break;
+        default:
+          if (p.length == 1) {
+            final code = p.codeUnitAt(0);
+            if (code >= 97 && code <= 122) {
+              // a-z -> keyA ... keyZ
+              keyboardKey = _letterToLogicalKey(p);
+            } else if (code >= 48 && code <= 57) {
+              keyboardKey = LogicalKeyboardKey.findKeyByKeyId(code);
+            }
+          } else if (p.startsWith('key') && p.length == 4) {
+            keyboardKey = _letterToLogicalKey(p.substring(3));
+          }
+      }
+    }
+    if (keyboardKey == null) return null;
+    // Require at least one modifier (avoid single-key capture)
+    if (modifiers.isEmpty && keyboardKey != LogicalKeyboardKey.f6) return null;
+    return HotKey(key: keyboardKey, modifiers: modifiers, scope: scope);
+  }
+
+  LogicalKeyboardKey? _letterToLogicalKey(String ch) {
+    switch (ch.toLowerCase()) {
+      case 'a':
+        return LogicalKeyboardKey.keyA;
+      case 'b':
+        return LogicalKeyboardKey.keyB;
+      case 'c':
+        return LogicalKeyboardKey.keyC;
+      case 'd':
+        return LogicalKeyboardKey.keyD;
+      case 'e':
+        return LogicalKeyboardKey.keyE;
+      case 'f':
+        return LogicalKeyboardKey.keyF;
+      case 'g':
+        return LogicalKeyboardKey.keyG;
+      case 'h':
+        return LogicalKeyboardKey.keyH;
+      case 'i':
+        return LogicalKeyboardKey.keyI;
+      case 'j':
+        return LogicalKeyboardKey.keyJ;
+      case 'k':
+        return LogicalKeyboardKey.keyK;
+      case 'l':
+        return LogicalKeyboardKey.keyL;
+      case 'm':
+        return LogicalKeyboardKey.keyM;
+      case 'n':
+        return LogicalKeyboardKey.keyN;
+      case 'o':
+        return LogicalKeyboardKey.keyO;
+      case 'p':
+        return LogicalKeyboardKey.keyP;
+      case 'q':
+        return LogicalKeyboardKey.keyQ;
+      case 'r':
+        return LogicalKeyboardKey.keyR;
+      case 's':
+        return LogicalKeyboardKey.keyS;
+      case 't':
+        return LogicalKeyboardKey.keyT;
+      case 'u':
+        return LogicalKeyboardKey.keyU;
+      case 'v':
+        return LogicalKeyboardKey.keyV;
+      case 'w':
+        return LogicalKeyboardKey.keyW;
+      case 'x':
+        return LogicalKeyboardKey.keyX;
+      case 'y':
+        return LogicalKeyboardKey.keyY;
+      case 'z':
+        return LogicalKeyboardKey.keyZ;
+    }
+    return null;
+  }
+
+  static String formatCommandForDisplay(String? cmd) {
+    if (cmd == null || cmd.trim().isEmpty) return '';
+    final parts = cmd.toLowerCase().split('+').map((e) => e.trim()).toList();
+    String nice(String p) {
+      switch (p) {
+        case 'ctrl':
+        case 'control':
+          return 'Ctrl';
+        case 'cmd':
+        case 'meta':
+          return 'Cmd';
+        case 'alt':
+        case 'option':
+          return 'Alt';
+        case 'shift':
+          return 'Shift';
+        case ',':
+        case 'comma':
+          return ',';
+        case '[':
+        case 'bracketleft':
+          return '[';
+        case ']':
+        case 'bracketright':
+          return ']';
+        default:
+          if (p.startsWith('key') && p.length == 4) {
+            return p.substring(3).toUpperCase();
+          }
+          return p.toUpperCase();
+      }
+    }
+
+    return parts.map(nice).join(' + ');
+  }
+}

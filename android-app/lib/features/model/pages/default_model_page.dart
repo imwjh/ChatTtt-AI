@@ -1,0 +1,1145 @@
+import '../../chat/widgets/compression_template_library.dart';
+import '../../home/widgets/model_icon.dart';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../../../core/providers/settings_provider.dart';
+import '../../../icons/lucide_adapter.dart';
+import '../../../shared/widgets/snackbar.dart';
+import '../../../shared/widgets/ios_switch.dart';
+import '../widgets/model_select_sheet.dart';
+import '../widgets/ocr_prompt_sheet.dart';
+import '../utils/ocr_model_capability.dart';
+import '../../../l10n/app_localizations.dart';
+import '../../../core/services/haptics.dart';
+import '../../../theme/app_font_weights.dart';
+import 'package:Kelivo/theme/app_semantic_colors.dart';
+
+class DefaultModelPage extends StatelessWidget {
+  const DefaultModelPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final settings = context.watch<SettingsProvider>();
+    final l10n = AppLocalizations.of(context)!;
+    Future<ModelSelection?> pickConfiguredModel(
+      String? providerKey,
+      String? modelId,
+    ) {
+      return showModelSelector(
+        context,
+        initialProviderKey: providerKey,
+        initialModelId: modelId,
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: cs.surface,
+      appBar: AppBar(
+        leading: Tooltip(
+          message: l10n.defaultModelPageBackTooltip,
+          child: _TactileIconButton(
+            icon: Lucide.ArrowLeft,
+            color: cs.onSurface,
+            size: 22,
+            onTap: () => Navigator.of(context).maybePop(),
+          ),
+        ),
+        title: Text(l10n.defaultModelPageTitle),
+        actions: const [SizedBox(width: 12)],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        children: [
+          _ModelCard(
+            icon: Lucide.MessageCircle,
+            title: l10n.defaultModelPageChatModelTitle,
+            subtitle: l10n.defaultModelPageChatModelSubtitle,
+            modelProvider: settings.currentModelProvider,
+            modelId: settings.currentModelId,
+            onReset: () async {
+              await settings.resetCurrentModel();
+            },
+            onPick: () async {
+              final sel = await pickConfiguredModel(
+                settings.currentModelProvider,
+                settings.currentModelId,
+              );
+              if (sel != null) {
+                await settings.setCurrentModel(sel.providerKey, sel.modelId);
+              }
+            },
+          ),
+          const SizedBox(height: 16),
+          _PerChatModelCard(
+            value: settings.perChatModelEnabled,
+            onChanged: settings.setPerChatModelEnabled,
+          ),
+          const SizedBox(height: 16),
+          _ModelCard(
+            icon: Lucide.NotebookTabs,
+            title: l10n.defaultModelPageTitleModelTitle,
+            subtitle: l10n.defaultModelPageTitleModelSubtitle,
+            modelProvider: settings.titleModelProvider,
+            modelId: settings.titleModelId,
+            fallbackProvider: settings.currentModelProvider,
+            fallbackModelId: settings.currentModelId,
+            disabledWhenUnset: !settings.isTitleGenerationEnabled,
+            showResetWhenUnset: !settings.isTitleGenerationEnabled,
+            resetTooltip: l10n.defaultModelPageUseCurrentModel,
+            onReset: () async {
+              await settings.resetTitleModel();
+            },
+            onDisable: settings.isTitleGenerationEnabled
+                ? () async {
+                    await settings.disableTitleGeneration();
+                  }
+                : null,
+            onPick: () async {
+              final sel = await showModelSelectorWithCurrentChatFallback(
+                context,
+                initialProviderKey: settings.titleModelProvider,
+                initialModelId: settings.titleModelId,
+              );
+              if (sel != null) {
+                await settings.setTitleModel(sel.providerKey, sel.modelId);
+              }
+            },
+            configAction: () => _showTitlePromptSheet(context),
+          ),
+          const SizedBox(height: 16),
+          _ModelCard(
+            icon: Lucide.FileText,
+            title: l10n.defaultModelPageSummaryModelTitle,
+            subtitle: l10n.defaultModelPageSummaryModelSubtitle,
+            modelProvider: settings.summaryModelProvider,
+            modelId: settings.summaryModelId,
+            fallbackProvider:
+                settings.titleModelProvider ?? settings.currentModelProvider,
+            fallbackModelId: settings.titleModelId ?? settings.currentModelId,
+            onReset: () async {
+              await settings.resetSummaryModel();
+            },
+            onPick: () async {
+              final sel = await pickConfiguredModel(
+                settings.summaryModelProvider,
+                settings.summaryModelId,
+              );
+              if (sel != null) {
+                await settings.setSummaryModel(sel.providerKey, sel.modelId);
+              }
+            },
+            configAction: () => _showSummaryPromptSheet(context),
+          ),
+          const SizedBox(height: 16),
+          _ModelCard(
+            icon: Lucide.MessagesSquare,
+            title: l10n.defaultModelPageSuggestionModelTitle,
+            subtitle: l10n.defaultModelPageSuggestionModelSubtitle,
+            modelProvider: settings.suggestionModelProvider,
+            modelId: settings.suggestionModelId,
+            fallbackProvider: settings.currentModelProvider,
+            fallbackModelId: settings.currentModelId,
+            disabledWhenUnset: !settings.isSuggestionGenerationEnabled,
+            showResetWhenUnset: !settings.isSuggestionGenerationEnabled,
+            resetTooltip: l10n.defaultModelPageUseCurrentModel,
+            onReset: () async {
+              await settings.resetSuggestionModel();
+            },
+            onDisable: settings.isSuggestionGenerationEnabled
+                ? () async {
+                    await settings.disableSuggestionGeneration();
+                  }
+                : null,
+            onPick: () async {
+              final sel = await showModelSelectorWithCurrentChatFallback(
+                context,
+                initialProviderKey: settings.suggestionModelProvider,
+                initialModelId: settings.suggestionModelId,
+              );
+              if (sel != null) {
+                await settings.setSuggestionModel(sel.providerKey, sel.modelId);
+              }
+            },
+            configAction: () => _showSuggestionPromptSheet(context),
+          ),
+          const SizedBox(height: 16),
+          _ModelCard(
+            icon: Lucide.package2,
+            title: l10n.defaultModelPageCompressModelTitle,
+            subtitle: l10n.defaultModelPageCompressModelSubtitle,
+            modelProvider: settings.compressModelProvider,
+            modelId: settings.compressModelId,
+            fallbackProvider:
+                settings.summaryModelProvider ??
+                settings.titleModelProvider ??
+                settings.currentModelProvider,
+            fallbackModelId:
+                settings.summaryModelId ??
+                settings.titleModelId ??
+                settings.currentModelId,
+            onReset: () async {
+              await settings.resetCompressModel();
+            },
+            onPick: () async {
+              final sel = await pickConfiguredModel(
+                settings.compressModelProvider,
+                settings.compressModelId,
+              );
+              if (sel != null) {
+                await settings.setCompressModel(sel.providerKey, sel.modelId);
+              }
+            },
+            configAction: () => _showCompressPromptSheet(context),
+            footer: const _ThinkingSwitchRow(
+              task: _BackgroundModelTask.compress,
+            ),
+          ),
+          const SizedBox(height: 16),
+          _ModelCard(
+            icon: Lucide.Languages,
+            title: l10n.defaultModelPageTranslateModelTitle,
+            subtitle: l10n.defaultModelPageTranslateModelSubtitle,
+            modelProvider: settings.translateModelProvider,
+            modelId: settings.translateModelId,
+            fallbackProvider: settings.currentModelProvider,
+            fallbackModelId: settings.currentModelId,
+            onReset: () async {
+              await settings.resetTranslateModel();
+            },
+            onPick: () async {
+              final sel = await pickConfiguredModel(
+                settings.translateModelProvider,
+                settings.translateModelId,
+              );
+              if (sel != null) {
+                await settings.setTranslateModel(sel.providerKey, sel.modelId);
+              }
+            },
+            configAction: () => _showTranslatePromptSheet(context),
+          ),
+          const SizedBox(height: 16),
+          _ModelCard(
+            icon: Lucide.Eye,
+            title: l10n.defaultModelPageOcrModelTitle,
+            subtitle: l10n.defaultModelPageOcrModelSubtitle,
+            modelProvider: settings.ocrModelProvider,
+            modelId: settings.ocrModelId,
+            disabledWhenUnset: true,
+            onReset: () async {
+              await settings.resetOcrModel();
+            },
+            onPick: () async {
+              final sel = await pickConfiguredModel(
+                settings.ocrModelProvider,
+                settings.ocrModelId,
+              );
+              if (sel != null) {
+                if (!modelSupportsOcrImageInput(
+                  settings,
+                  sel.providerKey,
+                  sel.modelId,
+                )) {
+                  if (!context.mounted) return;
+                  showAppSnackBar(
+                    context,
+                    message: l10n.defaultModelPageOcrModelRequiresImageInput,
+                    type: NotificationType.error,
+                  );
+                  return;
+                }
+                await settings.setOcrModel(sel.providerKey, sel.modelId);
+              }
+            },
+            configAction: () => showOcrPromptSheet(context),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showTitlePromptSheet(BuildContext context) async {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.read<SettingsProvider>();
+    final controller = TextEditingController(text: settings.titlePrompt);
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: context.overlaySurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+      ),
+      builder: (ctx) {
+        return Consumer<SettingsProvider>(
+          builder: (context, settings, _) {
+            return SafeArea(
+              top: false,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 12,
+                  bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: cs.onSurface.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    _ThinkingSwitchRow(task: _BackgroundModelTask.title),
+                    const SizedBox(height: 18),
+                    Text(
+                      l10n.defaultModelPagePromptLabel,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: AppFontWeights.semibold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: controller,
+                      maxLines: 6,
+                      decoration: InputDecoration(
+                        hintText: l10n.defaultModelPageTitlePromptHint,
+                        filled: true,
+                        fillColor: ctx.appColors.surfaceFill,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                            color: cs.outlineVariant.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                            color: cs.outlineVariant.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                            color: cs.primary.withValues(alpha: 0.5),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      l10n.defaultModelPageTitleVars('{content}', '{locale}'),
+                      style: TextStyle(
+                        color: cs.onSurface.withValues(alpha: 0.6),
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: () async {
+                            await settings.resetTitlePrompt();
+                            await settings
+                                .resetTitleGenerationThinkingEnabled();
+                            controller.text = settings.titlePrompt;
+                          },
+                          child: Text(l10n.defaultModelPageResetDefault),
+                        ),
+                        const Spacer(),
+                        FilledButton(
+                          onPressed: () async {
+                            await settings.setTitlePrompt(
+                              controller.text.trim(),
+                            );
+                            if (ctx.mounted) Navigator.of(ctx).pop();
+                          },
+                          child: Text(l10n.defaultModelPageSave),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _showTranslatePromptSheet(BuildContext context) async {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.read<SettingsProvider>();
+    final controller = TextEditingController(text: settings.translatePrompt);
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: context.overlaySurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 16,
+              right: 16,
+              top: 12,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: cs.onSurface.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _ThinkingSwitchRow(task: _BackgroundModelTask.translate),
+                const SizedBox(height: 18),
+                Text(
+                  l10n.defaultModelPagePromptLabel,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: AppFontWeights.semibold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: controller,
+                  maxLines: 8,
+                  decoration: InputDecoration(
+                    hintText: l10n.defaultModelPageTranslatePromptHint,
+                    filled: true,
+                    fillColor: ctx.appColors.surfaceFill,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: cs.outlineVariant.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: cs.outlineVariant.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: cs.primary.withValues(alpha: 0.5),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: () async {
+                        await settings.resetTranslatePrompt();
+                        await settings
+                            .resetTranslateGenerationThinkingEnabled();
+                        controller.text = settings.translatePrompt;
+                      },
+                      child: Text(l10n.defaultModelPageResetDefault),
+                    ),
+                    const Spacer(),
+                    FilledButton(
+                      onPressed: () async {
+                        await settings.setTranslatePrompt(
+                          controller.text.trim(),
+                        );
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                      },
+                      child: Text(l10n.defaultModelPageSave),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  l10n.defaultModelPageTranslateVars(
+                    '{source_text}',
+                    '{target_lang}',
+                  ),
+                  style: TextStyle(
+                    color: cs.onSurface.withValues(alpha: 0.6),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showSummaryPromptSheet(BuildContext context) async {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.read<SettingsProvider>();
+    final controller = TextEditingController(text: settings.summaryPrompt);
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: context.overlaySurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 16,
+              right: 16,
+              top: 12,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: cs.onSurface.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _ThinkingSwitchRow(task: _BackgroundModelTask.summary),
+                const SizedBox(height: 18),
+                Text(
+                  l10n.defaultModelPagePromptLabel,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: AppFontWeights.semibold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: controller,
+                  maxLines: 8,
+                  decoration: InputDecoration(
+                    hintText: l10n.defaultModelPageSummaryPromptHint,
+                    filled: true,
+                    fillColor: ctx.appColors.surfaceFill,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: cs.outlineVariant.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: cs.outlineVariant.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: cs.primary.withValues(alpha: 0.5),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: () async {
+                        await settings.resetSummaryPrompt();
+                        await settings.resetSummaryGenerationThinkingEnabled();
+                        controller.text = settings.summaryPrompt;
+                      },
+                      child: Text(l10n.defaultModelPageResetDefault),
+                    ),
+                    const Spacer(),
+                    FilledButton(
+                      onPressed: () async {
+                        await settings.setSummaryPrompt(controller.text.trim());
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                      },
+                      child: Text(l10n.defaultModelPageSave),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  l10n.defaultModelPageSummaryVars(
+                    '{previous_summary}',
+                    '{user_messages}',
+                  ),
+                  style: TextStyle(
+                    color: cs.onSurface.withValues(alpha: 0.6),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showCompressPromptSheet(BuildContext context) async {
+    await showCompressionTemplateLibrary(context);
+  }
+
+  Future<void> _showSuggestionPromptSheet(BuildContext context) async {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.read<SettingsProvider>();
+    final controller = TextEditingController(text: settings.suggestionPrompt);
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: context.overlaySurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 16,
+              right: 16,
+              top: 12,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: cs.onSurface.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _ThinkingSwitchRow(task: _BackgroundModelTask.suggestion),
+                const SizedBox(height: 18),
+                Text(
+                  l10n.defaultModelPagePromptLabel,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: AppFontWeights.semibold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: controller,
+                  maxLines: 8,
+                  decoration: InputDecoration(
+                    hintText: l10n.defaultModelPageSuggestionPromptHint,
+                    filled: true,
+                    fillColor: ctx.appColors.surfaceFill,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: cs.outlineVariant.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: cs.outlineVariant.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: cs.primary.withValues(alpha: 0.5),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: () async {
+                        await settings.resetSuggestionPrompt();
+                        await settings
+                            .resetSuggestionGenerationThinkingEnabled();
+                        controller.text = settings.suggestionPrompt;
+                      },
+                      child: Text(l10n.defaultModelPageResetDefault),
+                    ),
+                    const Spacer(),
+                    FilledButton(
+                      onPressed: () async {
+                        await settings.setSuggestionPrompt(
+                          controller.text.trim(),
+                        );
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                      },
+                      child: Text(l10n.defaultModelPageSave),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  l10n.defaultModelPageSuggestionVars('{content}', '{locale}'),
+                  style: TextStyle(
+                    color: cs.onSurface.withValues(alpha: 0.6),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ModelCard extends StatelessWidget {
+  const _ModelCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.modelProvider,
+    required this.modelId,
+    required this.onPick,
+    this.onReset,
+    this.fallbackProvider,
+    this.fallbackModelId,
+    this.disabledWhenUnset = false,
+    this.showResetWhenUnset = false,
+    this.resetTooltip,
+    this.onDisable,
+    this.configAction,
+    this.footer,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final String? modelProvider;
+  final String? modelId;
+  final String? fallbackProvider;
+  final String? fallbackModelId;
+  final bool disabledWhenUnset;
+  final bool showResetWhenUnset;
+  final String? resetTooltip;
+  final VoidCallback onPick;
+  final VoidCallback? onReset;
+  final VoidCallback? onDisable;
+  final VoidCallback? configAction;
+  final Widget? footer;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final settings = context.read<SettingsProvider>();
+    final l10n = AppLocalizations.of(context)!;
+
+    // Check if using fallback (not explicitly set)
+    final usingFallback = modelProvider == null || modelId == null;
+
+    // Use fallback values if needed
+    final effectiveProvider = modelProvider ?? fallbackProvider;
+    final effectiveModelId = modelId ?? fallbackModelId;
+
+    String? providerName;
+    String? modelDisplay;
+    if (effectiveProvider != null && effectiveModelId != null) {
+      final cfg = settings.getProviderConfig(effectiveProvider);
+      providerName = cfg.name.isNotEmpty ? cfg.name : effectiveProvider;
+      final ov = cfg.modelOverrides[effectiveModelId] as Map?;
+      if (ov != null) {
+        final overrideName = (ov['name'] as String?)?.trim();
+        if (overrideName != null && overrideName.isNotEmpty) {
+          modelDisplay = overrideName;
+        } else {
+          final apiId = (ov['apiModelId'] ?? ov['api_model_id'])
+              ?.toString()
+              .trim();
+          modelDisplay = (apiId != null && apiId.isNotEmpty)
+              ? apiId
+              : effectiveModelId;
+        }
+      } else {
+        modelDisplay = effectiveModelId;
+      }
+    }
+
+    // Override display text if using fallback
+    if (usingFallback) {
+      modelDisplay = disabledWhenUnset
+          ? l10n.defaultModelPageNotEnabled
+          : l10n.defaultModelPageUseCurrentModel;
+    }
+    final baseBg = context.appColors.surfaceCard;
+    return Container(
+      decoration: BoxDecoration(
+        color: baseBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.appColors.hairline, width: 0.6),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(icon, size: 18, color: cs.onSurface),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: AppFontWeights.semibold,
+                    ),
+                  ),
+                ),
+                if (onReset != null && (!usingFallback || showResetWhenUnset))
+                  Tooltip(
+                    message: resetTooltip ?? l10n.defaultModelPageResetDefault,
+                    child: _TactileIconButton(
+                      icon: Lucide.RotateCcw,
+                      color: cs.onSurface,
+                      size: 20,
+                      onTap: onReset!,
+                    ),
+                  ),
+                if (onDisable != null)
+                  Tooltip(
+                    message: l10n.defaultModelPageDisable,
+                    child: _TactileIconButton(
+                      icon: Lucide.Ban,
+                      color: cs.onSurface,
+                      size: 20,
+                      onTap: onDisable!,
+                    ),
+                  ),
+                if (configAction != null)
+                  _TactileIconButton(
+                    icon: Lucide.Settings,
+                    color: cs.onSurface,
+                    size: 20,
+                    onTap: configAction!,
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            // description under title
+            Text(
+              subtitle,
+              style: TextStyle(
+                fontSize: 12,
+                color: cs.onSurface.withValues(alpha: 0.7),
+              ),
+            ),
+            const SizedBox(height: 4),
+            const SizedBox(height: 8),
+            _TactileRow(
+              onTap: onPick,
+              builder: (pressed) {
+                final bg = context.appColors.surfaceFill;
+                final overlay = cs.onSurface.withValues(
+                  alpha: isDark ? 0.06 : 0.05,
+                );
+                final pressedBg = Color.alphaBlend(overlay, bg);
+                return AnimatedScale(
+                  scale: pressed ? 0.98 : 1.0,
+                  duration: const Duration(milliseconds: 110),
+                  curve: Curves.easeOutCubic,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    curve: Curves.easeOutCubic,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: pressed ? pressedBg : bg,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        CurrentModelIcon(
+                          providerKey: effectiveProvider,
+                          modelId: effectiveModelId,
+                          size: 24,
+                          iconScale: .62,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            modelDisplay ?? (providerName ?? '-'),
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: AppFontWeights.semibold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+            if (footer != null) ...[const SizedBox(height: 12), footer!],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PerChatModelCard extends StatelessWidget {
+  const _PerChatModelCard({required this.value, required this.onChanged});
+
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    return Container(
+      decoration: BoxDecoration(
+        color: context.appColors.surfaceCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.appColors.hairline, width: 0.6),
+      ),
+      child: _TactileRow(
+        onTap: () => onChanged(!value),
+        builder: (_) => Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Lucide.MessagesSquare, size: 18, color: cs.onSurface),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      l10n.defaultModelPagePerChatModelTitle,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: AppFontWeights.semibold,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      l10n.defaultModelPagePerChatModelSubtitle,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: cs.onSurface.withValues(alpha: 0.6),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 16),
+              IosSwitch(
+                value: value,
+                semanticLabel: l10n.defaultModelPagePerChatModelTitle,
+                onChanged: onChanged,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _BackgroundModelTask { title, summary, suggestion, compress, translate }
+
+class _ThinkingSwitchRow extends StatelessWidget {
+  const _ThinkingSwitchRow({required this.task});
+
+  final _BackgroundModelTask task;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    return Consumer<SettingsProvider>(
+      builder: (context, settings, _) {
+        final (value, setValue) = switch (task) {
+          _BackgroundModelTask.title => (
+            settings.titleGenerationThinkingEnabled,
+            settings.setTitleGenerationThinkingEnabled,
+          ),
+          _BackgroundModelTask.summary => (
+            settings.summaryGenerationThinkingEnabled,
+            settings.setSummaryGenerationThinkingEnabled,
+          ),
+          _BackgroundModelTask.suggestion => (
+            settings.suggestionGenerationThinkingEnabled,
+            settings.setSuggestionGenerationThinkingEnabled,
+          ),
+          _BackgroundModelTask.compress => (
+            settings.compressGenerationThinkingEnabled,
+            settings.setCompressGenerationThinkingEnabled,
+          ),
+          _BackgroundModelTask.translate => (
+            settings.translateGenerationThinkingEnabled,
+            settings.setTranslateGenerationThinkingEnabled,
+          ),
+        };
+        return _TactileRow(
+          onTap: () => setValue(!value),
+          builder: (_) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: Text(
+                      l10n.titleModelThinkingTitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: AppFontWeights.medium,
+                        color: cs.onSurface.withValues(alpha: 0.92),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  IosSwitch(
+                    value: value,
+                    semanticLabel: l10n.titleModelThinkingTitle,
+                    onChanged: setValue,
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+class _TactileIconButton extends StatefulWidget {
+  const _TactileIconButton({
+    required this.icon,
+    required this.color,
+    required this.onTap,
+    this.size = 22,
+  });
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+  final double size;
+  @override
+  State<_TactileIconButton> createState() => _TactileIconButtonState();
+}
+
+class _TactileIconButtonState extends State<_TactileIconButton> {
+  bool _pressed = false;
+  @override
+  Widget build(BuildContext context) {
+    final base = widget.color;
+    final pressColor = base.withValues(alpha: 0.7);
+    final icon = Icon(
+      widget.icon,
+      size: widget.size,
+      color: _pressed ? pressColor : base,
+    );
+    return Semantics(
+      button: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        onTap: () {
+          Haptics.light();
+          widget.onTap();
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+          child: icon,
+        ),
+      ),
+    );
+  }
+}
+
+class _TactileRow extends StatefulWidget {
+  const _TactileRow({required this.builder, this.onTap});
+  final Widget Function(bool pressed) builder;
+  final VoidCallback? onTap;
+  @override
+  State<_TactileRow> createState() => _TactileRowState();
+}
+
+class _TactileRowState extends State<_TactileRow> {
+  bool _pressed = false;
+  void _setPressed(bool v) {
+    if (_pressed != v) setState(() => _pressed = v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: widget.onTap == null ? null : (_) => _setPressed(true),
+      onTapUp: widget.onTap == null
+          ? null
+          : (_) async {
+              // Keep pressed state for a short moment to avoid flicker
+              await Future.delayed(const Duration(milliseconds: 60));
+              if (mounted) _setPressed(false);
+            },
+      onTapCancel: widget.onTap == null ? null : () => _setPressed(false),
+      onTap: widget.onTap == null
+          ? null
+          : () {
+              if (context.read<SettingsProvider>().hapticsOnListItemTap) {
+                Haptics.soft();
+              }
+              widget.onTap!.call();
+            },
+      child: widget.builder(_pressed),
+    );
+  }
+}

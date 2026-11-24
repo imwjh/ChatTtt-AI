@@ -1,0 +1,328 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:Kelivo/core/services/network/dio_http_client.dart';
+import 'package:Kelivo/core/services/network/provider_http_exception.dart';
+
+class _Adapter implements HttpClientAdapter {
+  _Adapter(this.open, {this.statusCode = 200, this.headers = const {}});
+  final FutureOr<Stream<Uint8List>> Function() open;
+  final int statusCode;
+  final Map<String, List<String>> headers;
+  final requests = <RequestOptions>[];
+  final bodies = <List<int>>[];
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    requests.add(options);
+    bodies.add(
+      requestStream == null
+          ? const []
+          : await requestStream.expand((bytes) => bytes).toList(),
+    );
+    return ResponseBody(await open(), statusCode, headers: headers);
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+void main() {
+  for (final buffered in [false, true]) {
+    for (final status in [200, 503]) {
+      test(
+        'body read failures retain response metadata: buffered=$buffered status=$status',
+        () async {
+          const failure = HttpException(
+            'Connection closed while receiving data',
+          );
+          final client = DioHttpClient(
+            logRequests: false,
+            adapter: _Adapter(
+              () => Stream<Uint8List>.error(failure),
+              statusCode: status,
+              headers: {
+                'x-should-retry': ['false'],
+              },
+            ),
+          );
+          addTearDown(client.close);
+          final uri = Uri.parse('https://test.invalid');
+          final Future<Object> read = buffered
+              ? client.post(uri)
+              : client
+                    .send(http.Request('POST', uri))
+                    .then((response) => response.stream.toBytes());
+          await expectLater(
+            read,
+            throwsA(
+              status == 200
+                  ? same(failure)
+                  : isA<ProviderHttpException>()
+                        .having((e) => e.statusCode, 'status', 503)
+                        .having((e) => e.prohibitsRetry, 'no retry', isTrue)
+                        .having((e) => e.bodyReadError, 'cause', same(failure)),
+            ),
+          );
+        },
+      );
+    }
+  }
+
+  test(
+    'adapter cancellation after error headers stays a cancellation',
+    () async {
+      final cancelled = DioException(
+        requestOptions: RequestOptions(path: '/'),
+        type: DioExceptionType.cancel,
+      );
+      final client = DioHttpClient(
+        logRequests: false,
+        adapter: _Adapter(
+          () => Stream<Uint8List>.error(cancelled),
+          statusCode: 503,
+          headers: {
+            'x-should-retry': ['false'],
+          },
+        ),
+      );
+      addTearDown(client.close);
+      final response = await client.send(
+        http.Request('GET', Uri.parse('https://test.invalid')),
+      );
+      await expectLater(response.stream.toBytes(), throwsA(same(cancelled)));
+    },
+  );
+
+  for (final fails in [false, true]) {
+    test(
+      fails
+          ? 'a cancelled connection handles a late adapter error'
+          : 'a cancelled connection releases a late response',
+      () async {
+        final opened = Completer<void>();
+        final body = Completer<Stream<Uint8List>>();
+        final token = CancelToken();
+        final client = DioHttpClient(
+          adapter: _Adapter(() {
+            opened.complete();
+            return body.future;
+          }),
+          cancelToken: token,
+          logRequests: false,
+        );
+        addTearDown(client.close);
+        addTearDown(() {
+          if (!body.isCompleted) body.complete(const Stream.empty());
+        });
+        final response = client.send(
+          http.Request('GET', Uri.parse('https://test.invalid')),
+        );
+        await opened.future;
+        token.cancel('stop before headers');
+        await expectLater(
+          response.timeout(const Duration(seconds: 1)),
+          throwsA(isA<http.ClientException>()),
+        );
+        if (fails) {
+          body.completeError(StateError('late connection failure'));
+          await Future<void>.delayed(Duration.zero);
+        } else {
+          final cancelled = Completer<void>();
+          final source = StreamController<Uint8List>(
+            onCancel: cancelled.complete,
+          );
+          body.complete(source.stream);
+          await cancelled.future.timeout(const Duration(seconds: 1));
+          expect(source.hasListener, false);
+          await source.close();
+        }
+      },
+    );
+  }
+
+  test('cancellation before a body listener releases the transport', () async {
+    final source = StreamController<Uint8List>();
+    var cancellations = 0;
+    source.onCancel = () => cancellations++;
+    final token = CancelToken();
+    final client = DioHttpClient(
+      adapter: _Adapter(() => source.stream),
+      cancelToken: token,
+      logRequests: false,
+    );
+    addTearDown(client.close);
+    final response = await client.send(
+      http.Request('GET', Uri.parse('https://test.invalid')),
+    );
+    token.cancel('before listen');
+    await Future<void>.delayed(Duration.zero);
+    expect(cancellations, 1);
+    await expectLater(response.stream.toList(), throwsA(isA<DioException>()));
+    await source.close();
+  });
+
+  test(
+    'cancelling an active body does not subscribe to its source twice',
+    () async {
+      final source = StreamController<Uint8List>(sync: true);
+      var cancellations = 0;
+      source.onCancel = () => cancellations++;
+      final token = CancelToken();
+      final client = DioHttpClient(
+        adapter: _Adapter(() => source.stream),
+        cancelToken: token,
+        logRequests: false,
+      );
+      addTearDown(client.close);
+      final response = await client.send(
+        http.Request('GET', Uri.parse('https://test.invalid')),
+      );
+      // bytesToString cancels its subscription synchronously on an error.
+      final failure = expectLater(
+        response.stream.bytesToString(),
+        throwsA(isA<DioException>()),
+      );
+      source.add(Uint8List.fromList([123, 34]));
+      token.cancel('stop during the response body');
+      await failure;
+      await Future<void>.delayed(Duration.zero);
+      expect(cancellations, 1);
+      expect(source.hasListener, isFalse);
+      await source.close();
+    },
+  );
+
+  test(
+    'response demand propagates to the transport without an eager buffer',
+    () async {
+      final source = StreamController<Uint8List>(sync: true);
+      var cancellations = 0;
+      source.onCancel = () => cancellations++;
+      final adapter = _Adapter(() => source.stream);
+      final client = DioHttpClient(adapter: adapter, logRequests: false);
+      addTearDown(client.close);
+      final response = await client.send(
+        http.Request('GET', Uri.parse('https://test.invalid')),
+      );
+      expect(source.hasListener, false);
+      final seen = <int>[];
+      final subscription = response.stream.listen(seen.addAll);
+      source.add(Uint8List.fromList([1]));
+      subscription.pause();
+      expect(source.isPaused, true);
+      source.add(Uint8List.fromList([2]));
+      expect(seen, [1]);
+      subscription.resume();
+      await Future<void>.delayed(Duration.zero);
+      expect(source.isPaused, false);
+      expect(seen, [1, 2]);
+      await subscription.cancel();
+      expect(cancellations, 1);
+      await source.close();
+    },
+  );
+
+  test(
+    'cancelling one response preserves the token and next tool round',
+    () async {
+      final first = StreamController<Uint8List>();
+      var calls = 0;
+      final adapter = _Adapter(
+        () => ++calls == 1
+            ? first.stream
+            : Stream.value(Uint8List.fromList([3, 4])),
+      );
+      final token = CancelToken();
+      final client = DioHttpClient(
+        adapter: adapter,
+        cancelToken: token,
+        logRequests: false,
+      );
+      addTearDown(client.close);
+      final response = await client.send(
+        http.Request('GET', Uri.parse('https://test.invalid')),
+      );
+      final subscription = response.stream.listen((_) {});
+      await subscription.cancel();
+      expect(token.isCancelled, false);
+      final request = http.Request('POST', Uri.parse('https://test.invalid'))
+        ..headers['content-type'] = 'application/json'
+        ..body = '{"tool":"result"}';
+      final next = await client.send(request);
+      expect(await next.stream.toBytes(), [3, 4]);
+      expect(adapter.bodies.last, request.bodyBytes);
+      expect(adapter.requests.last.headers['content-type'], 'application/json');
+      await first.close();
+    },
+  );
+
+  test(
+    'receive timeout is suspended during backpressure and resumes afterwards',
+    () async {
+      final source = StreamController<Uint8List>();
+      final client = DioHttpClient(
+        adapter: _Adapter(() => source.stream),
+        timeout: const Duration(milliseconds: 50),
+        logRequests: false,
+      );
+      addTearDown(client.close);
+      final response = await client.send(
+        http.Request('GET', Uri.parse('https://test.invalid')),
+      );
+      final errors = <Object>[];
+      final done = Completer<void>();
+      final subscription = response.stream.listen(
+        (_) {},
+        onError: errors.add,
+        onDone: done.complete,
+      );
+      subscription.pause();
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      expect(errors, isEmpty);
+      subscription.resume();
+      await done.future.timeout(const Duration(seconds: 2));
+      expect(errors.single, isA<DioException>());
+      expect(
+        (errors.single as DioException).type,
+        DioExceptionType.receiveTimeout,
+      );
+      await source.close();
+    },
+  );
+
+  test('the conversation cancel token terminates a paused transport', () async {
+    final source = StreamController<Uint8List>();
+    var cancelled = false;
+    source.onCancel = () => cancelled = true;
+    final token = CancelToken();
+    final client = DioHttpClient(
+      adapter: _Adapter(() => source.stream),
+      cancelToken: token,
+      logRequests: false,
+    );
+    addTearDown(client.close);
+    final response = await client.send(
+      http.Request('GET', Uri.parse('https://test.invalid')),
+    );
+    final errors = <Object>[];
+    final subscription = response.stream.listen((_) {}, onError: errors.add);
+    subscription.pause();
+    token.cancel('stop');
+    await Future<void>.delayed(Duration.zero);
+    expect(cancelled, true);
+    subscription.resume();
+    await Future<void>.delayed(Duration.zero);
+    expect(errors.single, isA<DioException>());
+    await subscription.cancel();
+    await source.close();
+  });
+}
