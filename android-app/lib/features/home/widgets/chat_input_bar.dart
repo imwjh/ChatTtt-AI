@@ -5100,22 +5100,22 @@ class _ChatInputBarState extends State<ChatInputBar>
                             boxShadow: [
                               BoxShadow(
                                 color: Colors.black.withValues(
-                                  alpha: isDark ? 0.55 : 0.15,
+                                  alpha: isDark ? 0.40 : 0.10,
                                 ),
-                                blurRadius: 28,
+                                blurRadius: 24,
                                 spreadRadius: 1,
-                                offset: const Offset(0, 10),
+                                offset: const Offset(0, 8),
                               ),
                               BoxShadow(
                                 color: Colors.black.withValues(
-                                  alpha: isDark ? 0.34 : 0.09,
+                                  alpha: isDark ? 0.24 : 0.06,
                                 ),
-                                blurRadius: 12,
-                                offset: const Offset(0, 4),
+                                blurRadius: 10,
+                                offset: const Offset(0, 3),
                               ),
                               BoxShadow(
                                 color: Colors.black.withValues(
-                                  alpha: isDark ? 0.20 : 0.045,
+                                  alpha: isDark ? 0.14 : 0.03,
                                 ),
                                 blurRadius: 3,
                                 offset: const Offset(0, 1),
@@ -5472,7 +5472,7 @@ class _ChatInputBarState extends State<ChatInputBar>
                                           top:
                                               editorMultiline &&
                                                   composerInlineActions
-                                              ? 0
+                                              ? 8
                                               : 2,
                                           end:
                                               composerInlineActions &&
@@ -5556,9 +5556,9 @@ class _ChatInputBarState extends State<ChatInputBar>
                                           ),
                                         ),
                                         Positioned(
-                                          right: 4,
+                                          right: editorMultiline ? 2 : 4,
                                           top: editorMultiline ? null : 0,
-                                          bottom: 0,
+                                          bottom: editorMultiline ? 2 : 0,
                                           child: Align(
                                             alignment: editorMultiline
                                                 ? Alignment.bottomRight
@@ -5812,7 +5812,7 @@ class _ChatInputBarState extends State<ChatInputBar>
     final editor = ConstrainedBox(
       // 多行时给“左上角加号 + 右上角展开键 / 右下角发送键”留出互不重叠的高度。
       constraints: BoxConstraints(
-        minHeight: _canExpand && !_expandedLayout ? 66 : 48,
+        minHeight: _canExpand && !_expandedLayout ? 76 : 48,
       ),
       child: Center(
         heightFactor: 1,
