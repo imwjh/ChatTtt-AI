@@ -2,7 +2,7 @@
 
 ![ChatTtt AI](docs/og-image.webp)
 
-一个用来**整蛊朋友的「假 AI」聊天网页**：界面做得跟正经 AI 助手一模一样——模型选择器、打字机动画、思考中转圈……朋友以为在和一个顶级大模型对话，实际上每一句都是**你本人在后台偷偷扮演的** 😈
+一个用来**整蛊朋友的「假 AI」聊天网页**（附 Flutter Android 客户端）：界面做得跟正经 AI 助手一模一样——模型选择器、打字机动画、思考中转圈……朋友以为在和一个顶级大模型对话，实际上每一句都是**你本人在后台偷偷扮演的** 😈
 
 > 纯玩乐/整活项目，追求「快速跑起来」，不依赖任何数据库和云服务。请适度使用，友情翻车概不负责。
 
@@ -50,21 +50,77 @@
   </tr>
 </table>
 
+## 📱 Android 客户端
+
+除了网页版，仓库内还包含一个 **Flutter Android 客户端**，连接同一个 Socket.io 后台，手机和网页可以同时在线、互发消息。
+
+- 源码目录：`android-app/`
+- 安装包：`android-app/dist/`（当前为 `ChatTtt-2.3.0-universal.apk`）
+- 系统要求：Android 7.0+（minSdk 24），支持 arm64-v8a / armeabi-v7a / x86_64
+- 应用名 / 包名：`ChatTtt` / `com.imwjh.chatttt`
+- 开源协议：AGPL-3.0（基于 Kelivo 修改，详见下方「开源来源与致谢」）
+
+### 界面预览
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/android-chat.webp" width="240" alt="安卓聊天页" /><br/><sub>聊天页</sub></td>
+    <td align="center"><img src="docs/android-chat-empty.webp" width="240" alt="安卓新对话页" /><br/><sub>新对话</sub></td>
+    <td align="center"><img src="docs/android-settings.webp" width="240" alt="安卓设置页" /><br/><sub>设置页</sub></td>
+  </tr>
+</table>
+
+### 已实现的功能
+
+- 与网页端一致的实时聊天：文字、图片、语音消息
+- 模型选择、思考强度、图片发送、语音输入
+- 语音消息：AAC 低码率 m4a 录制，胶囊语音条播放
+- 黑白极简主题、纯白胶囊输入框、统一的 iOS 风格弹层与返回按钮
+- 免费额度（百分比展示）、通知设置、未成年人模式
+- 隐私设置、数据管理、服务协议、帮助与反馈
+- 检查更新、关于页、服务地址配置
+- 本地昵称与头像（内置 AI 绘制的简约线稿默认头像）
+- 聊天记录只保存在手机本地，服务端仅在内存中转消息
+
+### 首次使用
+
+1. 安装 APK 并打开 ChatTtt。
+2. 首次启动会要求填写服务地址；已内置默认地址 `https://chatttt.imwjh.com`，直接确认即可。
+3. 之后可在 **设置 → 关于 → 服务地址** 修改，保存后会自动重连。
+4. 点击左上角菜单新建/切换会话、修改昵称与头像；点击输入框左侧 `+` 可选择模型、思考强度或图片。
+5. 录音按钮位于输入框右侧，录完自动发送；长按消息可复制等。
+
+### 自行构建
+
+环境：Flutter 3.50.x（Dart 3.14）、Android SDK 36、JDK 17；AGP 9.3.1 / Gradle 9.5.0 / Kotlin 2.4.20。
+
+```bash
+cd android-app
+flutter pub get
+flutter build apk --release --dart-define=CHATTTT_SERVER_URL=https://chatttt.imwjh.com
+```
+
+产物位于 `android-app/build/app/outputs/flutter-apk/app-release.apk`。
+
+> Windows 路径包含中文时，请使用纯 ASCII 目录联接构建，并把 `android/local.properties` 中的 `flutter.sdk` 指向纯 ASCII 路径的 Flutter SDK。签名文件 `android/key.properties` 与 `*.jks` 不入库，需要自行生成。
+
 ## 🛠️ 技术栈
 
 | 端 | 技术 |
 |---|---|
 | 前端 | React 19 · Vite · TypeScript · Tailwind CSS 4 · [@assistant-ui/react](https://www.assistant-ui.com/) |
 | 后端 | Node.js · Express 5 · Socket.io |
+| Android 客户端 | Flutter 3.50 · Dart 3.14 · Socket.io client · 基于 Kelivo（AGPL-3.0） |
 | 媒体存储 | 图片/语音存双方浏览器 IndexedDB（图片 canvas 压缩至 ~280KB WebP，语音 WebM/Opus） |
 | 文字记录 | 各自浏览器 localStorage |
 
-> ⚠️ 注意：服务器只在内存中转消息，**重启后未送达的离线消息会丢失**；各端的聊天记录都存在各自的浏览器里。这是刻意为之的设计——不建数据库，零云端依赖。
+> ⚠️ 注意：服务器只在内存中转消息，**重启后未送达的离线消息会丢失**；网页端与 Android 端的聊天记录都只保存在各自设备本地。这是刻意为之的设计——不建数据库，零云端依赖。
 
 ## 📁 项目结构
 
 ```
 ChatTtt/
+├── android-app/        # Flutter Android 客户端（基于 Kelivo，AGPL-3.0）
 ├── web/                # 前端（前台 + 后台双入口）
 │   ├── index.html      # 前台入口（给朋友的）
 │   ├── chat.html       # 聊天页入口（/chat）
@@ -279,12 +335,19 @@ $env:PORT=4000; $env:ADMIN_TOKEN="my-secret"; node server.js
 - [ ] 预设"AI 人格"快捷回复脚本
 - [ ] 消息撤回与已读回执
 
-## 🙏 致谢
+## 🙏 开源来源与致谢
 
 本项目的大部分能力站在开源社区的肩膀上：
 
+**Android 客户端**
+- 基于开源项目 [Kelivo](https://github.com/Chevey339/kelivo)（AGPL-3.0）修改：保留其聊天引擎、UI 组件、主题与本地数据库，替换模型供应商层并接入 ChatTtt 的 Socket.io 后端。
+- 感谢 Kelivo 作者 [Chevey339](https://github.com/Chevey339) 以及所有贡献者。
+- 修改说明见 [`android-app/README.md`](android-app/README.md)，完整许可证见 [`android-app/LICENSE`](android-app/LICENSE)。
+
+**网页端**
 - 聊天页面基于 [assistant-ui](https://github.com/assistant-ui/assistant-ui) 修改
 - 落地页设计 GLM-5.3，修改完善 Ox-Alpha
+- 感谢 Flutter、Socket.io、React、Vite 等开源项目
 
 ## 👨‍💻 开发
 
@@ -292,4 +355,5 @@ $env:PORT=4000; $env:ADMIN_TOKEN="my-secret"; node server.js
 
 ## 📄 License
 
-MIT
+- **网页端 / 服务端**：MIT
+- **Android 客户端（`android-app/`）**：AGPL-3.0（继承自 [Kelivo](https://github.com/Chevey339/kelivo)），分发或修改该客户端时请遵守 AGPL-3.0，完整文本见 [`android-app/LICENSE`](android-app/LICENSE)。
